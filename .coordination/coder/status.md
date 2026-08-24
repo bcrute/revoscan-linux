@@ -1,7 +1,7 @@
-state: implementing
+state: review
 task: commit the repo; build+test the M4-M7 pipeline (validation, registration, fusion, mesh)
 round: 1
-activity: repo committed (5 commits, was previously ZERO - nothing had ever been version controlled). Nine irreplaceable depth frames preserved as fixtures. scanner3d.geometry foundation written, verified and committed. Capture checklist written. M5's unreachable exit criterion withdrawn and replaced. Four pipeline modules currently being built and adversarially reviewed by a workflow.
+activity: repo committed (5 commits, was previously ZERO - nothing had ever been version controlled). Nine irreplaceable depth frames preserved as fixtures. scanner3d.geometry foundation written, verified and committed. Capture checklist written. M5's unreachable exit criterion withdrawn and replaced. Four pipeline modules built and adversarially reviewed (10 agents, 0 errors). All gates green: pytest 2166 tests exit 0, ruff clean, mypy strict clean, zero non-stdlib imports verified by AST scan.
 
 ## Commits this round
 

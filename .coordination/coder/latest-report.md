@@ -1,8 +1,12 @@
 # Coder report — commit the repo, build the M4-M7 pipeline
 
-Signal: **implementing**. The repository is under version control for the first
-time and the reconstruction pipeline exists end to end. A workflow's reviewers
-are still finishing three modules at the time of writing.
+Signal: **review**. The repository is under version control for the first time
+and the reconstruction pipeline exists end to end, reviewed and green.
+
+Final gates: pytest **2166 tests across 41 files, exit 0, zero failures**; ruff
+check and format clean across 164 files; mypy strict clean across 77 source
+files; **zero non-stdlib imports across all 33 modules**, verified by AST scan
+rather than by grep. 24 commits, 191 tracked files, working tree clean.
 
 ## 1. The repository had never been committed
 
@@ -96,10 +100,28 @@ to this unit at all, so the criterion was unreachable by construction. Replaced
 with caliper ground truth plus a predeclared tolerance — strictly stronger, since
 agreement between two implementations never established that either was right.
 
-## 7. Not done
+## 7. The shear defect was fixed during the round
 
-- The shear-indicator safety fix (see 3), pending the reviewer finishing.
-- `registration` tests had not landed at the time of writing.
+Re-measured after the reviewer reworked the estimator. On the single-view cap a
+camera actually produces, the indicator now fires for a principal-point error as
+small as **1 pixel** and stays quiet on a clean sphere; correlation went from a
+0.247 ceiling, permanently under the 0.35 threshold, to 0.83. The coefficient
+still under-reports, but by about a third rather than by twenty times, so it is
+a usable lower bound. `docs/shear-detection-limits.md` keeps both the before and
+after measurements.
+
+The M4 workflow was then rehearsed end to end on synthetic data and discriminates
+correctly three ways: a correct capture PASSES, a 3% depth-scale error FAILS, and
+a sheared capture returns INCONCLUSIVE rather than either - which is the honest
+verdict, because a sheared fit's diameter is not a measurement of the target at
+all.
+
+## 8. Not done
+
+- History hygiene: six pipeline files landed under commit a45bd02, whose message
+  describes only a one-line annotation fix. Content is correct; the message is
+  not. Left rather than rewritten, since `main` is local-only and a rebase to
+  redistribute files carries more risk than the cosmetic gain.
 - No CLI wiring for the new modules; not in the assignment.
 - No live device work of any kind this round.
 - Nothing pushed. `main` is local only.
