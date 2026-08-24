@@ -520,10 +520,24 @@ class _VoxelIndex:
     and would be rejected anyway. No ring has to be expanded and no candidate is
     missed.
 
-    The cost of a query is therefore the number of target points inside that
-    block, which is why a large gate on a dense cloud is expensive: lower the
-    gate, or downsample harder. It is never a scan of the whole cloud, which is
-    the only thing that matters at 89000 points per frame in pure Python.
+    The cost of a query is the number of target points inside that block, and
+    that is a *constant fraction* of the cloud, not a constant - so a match
+    remains quadratic in the point count and this index is a constant-factor
+    saving, not an asymptotic one. How large a factor depends entirely on how
+    the points sit inside their own bounding box, and it is much smaller than it
+    looks. Measured at the default gate of an eighth of the extent: 21 per cent
+    of the cloud per query on the synthetic test curve, 32 per cent on one
+    occluded synthetic frame, and **91 per cent on the real ``base_4``
+    capture** - which is to say that on real data this is very nearly the linear
+    scan it replaces. The reason is the one
+    :data:`DEFAULT_VOXEL_FRACTION` already gives: a real frame's extent is set
+    by its furthest stray return, so the object occupies a small corner of the
+    box and every surviving point ends up within one cell of every other.
+
+    What keeps a real frame affordable is therefore
+    :data:`DOWNSAMPLE_THRESHOLD` reducing 89000 points to a few hundred before
+    the index is ever built - not the index. Lowering the gate, or downsampling
+    harder, is what actually buys anything here.
     """
 
     __slots__ = ("_cells", "_gate")
@@ -1005,8 +1019,12 @@ def icp(
 
     Each iteration pairs every source point with its nearest target through a
     uniform voxel hash whose cell is the widest correspondence gate, so a query
-    touches 27 cells and never the whole cloud. There is no linear scan anywhere
-    inside the loop; at a full depth frame's 89000 points there could not be.
+    touches 27 cells and provably cannot miss a candidate. That bound is a
+    correctness argument, not a performance one: the block still holds a
+    constant fraction of the cloud, so a match is quadratic in the point count
+    either way, and on the real ``base_4`` capture the fraction is 91 per cent.
+    What makes a full depth frame affordable is :data:`DOWNSAMPLE_THRESHOLD`
+    cutting it to a few hundred points first. See :class:`_VoxelIndex`.
 
     Pairs further apart than the current gate are dropped and counted, and the
     count is part of the answer - see :class:`IcpResult`. If fewer than

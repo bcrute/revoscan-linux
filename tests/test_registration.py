@@ -415,6 +415,27 @@ def test_voxel_downsample_refuses_a_grid_that_spans_more_cells_than_the_ceiling(
         voxel_downsample(CURVE, extent / 100_000.0)
 
 
+def test_a_subnormal_cell_is_refused_rather_than_escaping_as_an_arithmetic_error():
+    """Every refused input must leave by this module's own door.
+
+    ``1e-320`` is finite and positive, so it passes the parameter check, but the
+    cell count across any real cloud then overflows to infinity. Reaching
+    ``math.floor`` with that raises a bare ``OverflowError``, which carries no
+    :class:`DoctorStatus` and is not a :class:`RegistrationNotAllowed` - so a
+    caller catching this module's refusals would not catch it.
+    """
+    subnormal = 1e-320
+    good = CURVE
+    target = tuple(turn(0.05).apply_all(good))
+
+    with pytest.raises(IcpParametersUnusable, match="overflows to infinity"):
+        voxel_downsample(good, subnormal)
+    with pytest.raises(RegistrationNotAllowed):
+        icp(good, target, voxel_size=subnormal)
+    with pytest.raises(RegistrationNotAllowed):
+        icp(good, target, max_correspondence_distance=subnormal)
+
+
 def test_the_voxel_index_agrees_with_an_exhaustive_scan_on_every_query():
     """The 27-cell bound is a claim about correctness, so it is checked as one.
 
@@ -455,6 +476,10 @@ def test_the_trim_never_thins_a_correspondence_set_below_what_a_solve_needs():
     assert kept_count(1000, 1.0) == 1000
     assert kept_count(4, 0.01) == MIN_CORRESPONDENCES
     assert kept_count(MIN_CORRESPONDENCES, 0.5) == MIN_CORRESPONDENCES
+    # Rounded up, not down: a fractional share keeps the extra pair rather than
+    # discarding it. Only a product that is not already whole can show this.
+    assert kept_count(7, 0.6) == 5, "ceil(4.2), not floor"
+    assert kept_count(101, 0.5) == 51, "ceil(50.5), not floor"
 
 
 def test_cloud_extent_refuses_a_cloud_that_is_all_one_point():
@@ -983,7 +1008,12 @@ def test_six_degree_of_freedom_steps_are_offered_and_say_their_residuals_are_ind
     assert closure.translation_error < 1e-9
     assert "six degrees of freedom" in closure.note
     assert "independent" in closure.note
-    assert all(step is None or True for step in result.step_angles_radians)
+    # A six-degree-of-freedom step has no single constrained angle, so the
+    # reported step angle is the rotation magnitude of the transform that was
+    # fitted. On this sweep that magnitude is the turntable step.
+    assert len(result.step_angles_radians) == 9
+    for step in result.step_angles_radians:
+        assert step == pytest.approx(NINE_STEP, abs=1e-9)
 
 
 def test_a_supplied_spindle_is_used_as_given_rather_than_re_estimated():
@@ -1058,11 +1088,26 @@ def test_the_limitations_say_the_scan_is_shaped_not_sized():
     assert "does not say the object was reconstructed correctly" in joined
 
 
-def test_a_spindle_that_was_estimated_carries_its_own_caveats_into_the_result():
-    result = register_turntable(occluded_sweep(), angle_step=NINE_STEP, axis=bootstrap_axis(1))
+def test_a_spindles_own_caveats_are_carried_into_the_result_rather_than_dropped():
+    """The axis is where the "this was asserted, not measured" caveat lives.
 
-    for note in result.axis.limitations:
+    Asserted against a spindle that definitely carries one. Iterating over an
+    axis whose ``limitations`` happen to be empty would make this vacuously
+    true, and a build that dropped ``spindle.limitations`` from the result would
+    pass it - which is the whole thing being guarded against.
+    """
+    declared = TurntableAxis.declared(TRUE_DIRECTION, TRUE_THROUGH, basis="the test states it")
+    assert declared.limitations, "the fixture must carry a caveat for this test to mean anything"
+
+    result = register_turntable(exact_sweep(9, NINE_STEP), angle_step=NINE_STEP, axis=declared)
+
+    for note in declared.limitations:
         assert note in result.limitations
+
+    # And a spindle that was estimated carries whatever it found, likewise.
+    thin = register_turntable(occluded_sweep(), angle_step=NINE_STEP, axis=bootstrap_axis(1))
+    for note in thin.axis.limitations:
+        assert note in thin.limitations
 
 
 def test_the_whole_result_serialises_and_claims_no_dimensional_accuracy():
