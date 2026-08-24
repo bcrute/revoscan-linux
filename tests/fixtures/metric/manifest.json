@@ -10,6 +10,36 @@
     "recommendation": "Leave at least 5 seconds between captures.",
     "truncation": "Failures are never partial-random: every short frame is exactly 358402 bytes, which is 280 of 400 rows at 1280 bytes per line. The same truncation point every time."
   },
+  "cause_analysis": {
+    "conclusion": "A cx error produces a nearly constant relative bias at every distance, because the shear scales x with z and the diameter is measured in x while z scales too. The real can's error changes by a factor of 4.5 between the two distances. The near reading (-1.311) happens to match a ~20px cx error (-1.366) almost exactly, but the far reading (-0.295) is nowhere near what that same error would give (-1.346). So a constant cx error is NOT the dominant cause, and the earlier reading of the shear coefficient as evidence about cx was too quick.",
+    "controls_first": {
+      "clean_cylinder_any_tilt": "shear correlation -0.028 to +0.0005 at 0, 6.4 and 12 degrees of tilt, at both standoffs - well under the 0.12 threshold. Tilt does NOT fake a shear signal.",
+      "pipeline_has_no_distance_bias": "the synthetic cylinder recovers 58.000-58.003 at BOTH standoffs, so the distance dependence in the real data is a property of the sensor and not of this code."
+    },
+    "method": "Rendered a clean cylinder matching the real can's geometry and tilt at both real standoffs, deprojected with a deliberately wrong cx, and compared how the diameter bias varies with distance against what the real can does.",
+    "question": "Is the distance-dependent diameter error a principal-point (cx) error?",
+    "signature": {
+      "a_cx_error_is_nearly_distance_INDEPENDENT": {
+        "dcx_20px": {
+          "at_122.6": -1.346,
+          "at_98.1": -1.366
+        },
+        "dcx_277px": {
+          "at_122.6": -16.104,
+          "at_98.1": -16.371
+        },
+        "dcx_60px": {
+          "at_122.6": -3.946,
+          "at_98.1": -4.006
+        }
+      },
+      "the_real_can_is_strongly_distance_DEPENDENT": {
+        "at_122.6": -0.295,
+        "at_98.1": -1.311
+      }
+    },
+    "what_remains": "The structured residual is real - it is not tilt, not the pipeline, and not link quality. The shear indicator identifies no cause by design. Unmodelled lens distortion remains the leading hypothesis because the deprojection is an ideal pinhole and the can subtends a wider field angle when nearer. A third distance is needed to test it."
+  },
   "conditions": {
     "approximate_distance": 120,
     "capture_path": "scanner3d depth-frame --execute-depth-frame-capture",
