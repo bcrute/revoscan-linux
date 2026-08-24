@@ -543,11 +543,27 @@ report. It opens no device and runs no SDK probe.
 
 - **What:** Deproject a calibrated depth (+ RGB) frame into a 3D point
   cloud.
-- **Exit criterion:** a single-frame point cloud is produced from an owned
-  capture and visually/quantitatively compared against SDK-derived output
-  for the same scene.
-- **Risk:** low relative to M2/M3/M4; mainly an engineering risk once
-  calibrated depth exists.
+- **Production half: DONE.** `scanner3d depth-frame-to-ply` turns a raw frame
+  into a PLY through `depth_metric` -> `cloud_export` -> `pointcloud`, carrying
+  every calibration caveat into the file header. Verified against the nine
+  committed fixture frames.
+- **Original exit criterion, WITHDRAWN as unreachable:** "compared against
+  SDK-derived output for the same scene." The vendor SDK cannot connect to this
+  unit at all — its licence authorizer cannot read an `sdk-license` blob from
+  the camera, and obtaining one needs a vendor-issued artifact we do not have
+  (see [Open questions](#open-questions)). This criterion can never be met on
+  this hardware, so leaving it in place would mark M5 permanently incomplete for
+  a reason unrelated to the work.
+- **Replacement exit criterion:** a single-frame point cloud is produced from an
+  owned capture and a dimension in it is compared against a **caliper
+  measurement** with a stated uncertainty and a predeclared tolerance. This is
+  strictly stronger than the original: ground truth from a measuring instrument
+  beats agreement with another piece of software, which could only ever have
+  established that two implementations agree — not that either is right.
+- **Blocked on:** the physical captures in
+  [capture-checklist.md](capture-checklist.md). The harness is built; the
+  measurement is not taken.
+- **Risk:** low. The remaining work is a capture session, not engineering.
 
 ### M6 — Registration/fusion
 
