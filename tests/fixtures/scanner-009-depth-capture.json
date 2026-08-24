@@ -1,0 +1,636 @@
+{
+  "mode": "v4l2-mmap-depth-frame",
+  "status": "complete",
+  "succeeded": true,
+  "exit_code": 0,
+  "detail": "one complete 'Y16 ' 640x400 frame of 512000 bytes",
+  "plan": {
+    "role": "depth",
+    "node_kind": "capture",
+    "expected_interface_driver": "uvcvideo",
+    "driver_detached": false,
+    "fourcc": "Y16 ",
+    "width": 640,
+    "height": 400,
+    "descriptor_frame_rate_hz": 15.0,
+    "expected_frame_bytes": 512000,
+    "min_bytes_per_line": 1280,
+    "requested_buffers": 4,
+    "min_accepted_buffers": 2,
+    "max_buffer_bytes": 1048576,
+    "max_total_mapped_bytes": 4194304,
+    "capture_deadline_s": 8.0,
+    "max_raw_artifact_bytes": 1048576,
+    "max_dequeues": 1,
+    "retries": 0,
+    "ioctls": {
+      "VIDIOC_QUERYCAP": "0x80685600",
+      "VIDIOC_G_FMT": "0xc0d05604",
+      "VIDIOC_S_FMT": "0xc0d05605",
+      "VIDIOC_REQBUFS": "0xc0145608",
+      "VIDIOC_QUERYBUF": "0xc0585609",
+      "VIDIOC_QBUF": "0xc058560f",
+      "VIDIOC_DQBUF": "0xc0585611",
+      "VIDIOC_STREAMON": "0x40045612",
+      "VIDIOC_STREAMOFF": "0x40045613"
+    }
+  },
+  "target": {
+    "serial": "A22704522A6F00A64",
+    "sysfs_path": "/sys/bus/usb/devices/1-1.1",
+    "usb_path": "1-1.1",
+    "bus_number": 1,
+    "device_number": 41,
+    "role": "depth",
+    "interface_number": 0,
+    "interface_string": "DepthCamA22704522A6F00A64",
+    "interface_driver": "uvcvideo",
+    "v4l_index": 0,
+    "v4l_kind": "capture",
+    "v4l_name": "ZXProduct: DepthCamA22704522A6F",
+    "node_name": "video0",
+    "node_path": "/dev/video0",
+    "rdev": 20736,
+    "rdev_major_minor": "81:0",
+    "inode": 3091,
+    "mode": "0o660",
+    "resolved_by": "USB interface string descriptor prefix for role 'depth' plus V4L2 index 0 (capture); the node number was never assumed"
+  },
+  "capability": {
+    "driver": "uvcvideo",
+    "card": "ZXProduct: DepthCamA22704522A6F",
+    "bus_info": "usb-0000:00:14.0-1.1",
+    "version": 396811,
+    "version_text": "6.14.11",
+    "capabilities": "0x84a00001",
+    "device_caps": "0x04200001",
+    "effective_capabilities": "0x04200001",
+    "capability_names": [
+      "V4L2_CAP_VIDEO_CAPTURE",
+      "V4L2_CAP_META_CAPTURE",
+      "V4L2_CAP_STREAMING",
+      "V4L2_CAP_DEVICE_CAPS"
+    ],
+    "device_capability_names": [
+      "V4L2_CAP_VIDEO_CAPTURE",
+      "V4L2_CAP_STREAMING"
+    ],
+    "required_capabilities": [
+      "V4L2_CAP_VIDEO_CAPTURE",
+      "V4L2_CAP_STREAMING"
+    ],
+    "missing_required": []
+  },
+  "initial_format": {
+    "width": 640,
+    "height": 400,
+    "pixelformat": "0x56595559",
+    "fourcc": "YUYV",
+    "field": 1,
+    "field_name": "V4L2_FIELD_NONE",
+    "bytesperline": 1280,
+    "sizeimage": 512000,
+    "colorspace": 8,
+    "priv": 4276996862,
+    "flags": 0,
+    "ycbcr_enc": 0,
+    "quantization": 0,
+    "xfer_func": 0,
+    "row_padded": false,
+    "tight_frame_bytes": 512000
+  },
+  "negotiated_format": {
+    "width": 640,
+    "height": 400,
+    "pixelformat": "0x20363159",
+    "fourcc": "Y16 ",
+    "field": 1,
+    "field_name": "V4L2_FIELD_NONE",
+    "bytesperline": 1280,
+    "sizeimage": 512000,
+    "colorspace": 8,
+    "priv": 4276996862,
+    "flags": 0,
+    "ycbcr_enc": 1,
+    "quantization": 0,
+    "xfer_func": 1,
+    "row_padded": false,
+    "tight_frame_bytes": 512000
+  },
+  "buffers": {
+    "count": 4,
+    "buf_type": 1,
+    "memory": 1,
+    "capabilities": "0x00000017",
+    "requested": 4,
+    "accepted_range": [
+      2,
+      4
+    ]
+  },
+  "queried_buffers": [
+    {
+      "index": 0,
+      "buf_type": 1,
+      "bytesused": 0,
+      "flags": "0x00012000",
+      "flag_names": [
+        "V4L2_BUF_FLAG_LAST"
+      ],
+      "error_flag": false,
+      "field": 0,
+      "field_name": "V4L2_FIELD_ANY",
+      "timestamp_sec": 0,
+      "timestamp_usec": 0,
+      "timestamp_ns": 0,
+      "timestamp_source": "V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC",
+      "timecode": {
+        "type": 0,
+        "flags": 0,
+        "frames": 0,
+        "seconds": 0,
+        "minutes": 0,
+        "hours": 0,
+        "userbits": "00000000"
+      },
+      "sequence": 0,
+      "memory": 1,
+      "offset": 0,
+      "length": 512000
+    },
+    {
+      "index": 1,
+      "buf_type": 1,
+      "bytesused": 0,
+      "flags": "0x00012000",
+      "flag_names": [
+        "V4L2_BUF_FLAG_LAST"
+      ],
+      "error_flag": false,
+      "field": 0,
+      "field_name": "V4L2_FIELD_ANY",
+      "timestamp_sec": 0,
+      "timestamp_usec": 0,
+      "timestamp_ns": 0,
+      "timestamp_source": "V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC",
+      "timecode": {
+        "type": 0,
+        "flags": 0,
+        "frames": 0,
+        "seconds": 0,
+        "minutes": 0,
+        "hours": 0,
+        "userbits": "00000000"
+      },
+      "sequence": 0,
+      "memory": 1,
+      "offset": 32768,
+      "length": 512000
+    },
+    {
+      "index": 2,
+      "buf_type": 1,
+      "bytesused": 0,
+      "flags": "0x00012000",
+      "flag_names": [
+        "V4L2_BUF_FLAG_LAST"
+      ],
+      "error_flag": false,
+      "field": 0,
+      "field_name": "V4L2_FIELD_ANY",
+      "timestamp_sec": 0,
+      "timestamp_usec": 0,
+      "timestamp_ns": 0,
+      "timestamp_source": "V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC",
+      "timecode": {
+        "type": 0,
+        "flags": 0,
+        "frames": 0,
+        "seconds": 0,
+        "minutes": 0,
+        "hours": 0,
+        "userbits": "00000000"
+      },
+      "sequence": 0,
+      "memory": 1,
+      "offset": 65536,
+      "length": 512000
+    },
+    {
+      "index": 3,
+      "buf_type": 1,
+      "bytesused": 0,
+      "flags": "0x00012000",
+      "flag_names": [
+        "V4L2_BUF_FLAG_LAST"
+      ],
+      "error_flag": false,
+      "field": 0,
+      "field_name": "V4L2_FIELD_ANY",
+      "timestamp_sec": 0,
+      "timestamp_usec": 0,
+      "timestamp_ns": 0,
+      "timestamp_source": "V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC",
+      "timecode": {
+        "type": 0,
+        "flags": 0,
+        "frames": 0,
+        "seconds": 0,
+        "minutes": 0,
+        "hours": 0,
+        "userbits": "00000000"
+      },
+      "sequence": 0,
+      "memory": 1,
+      "offset": 98304,
+      "length": 512000
+    }
+  ],
+  "mappings": [
+    {
+      "index": 0,
+      "offset": 0,
+      "requested_length": 512000,
+      "mapped_length": 512000
+    },
+    {
+      "index": 1,
+      "offset": 32768,
+      "requested_length": 512000,
+      "mapped_length": 512000
+    },
+    {
+      "index": 2,
+      "offset": 65536,
+      "requested_length": 512000,
+      "mapped_length": 512000
+    },
+    {
+      "index": 3,
+      "offset": 98304,
+      "requested_length": 512000,
+      "mapped_length": 512000
+    }
+  ],
+  "poll": {
+    "deadline_s": 8.0,
+    "waited_s": 1.042971994029358,
+    "revents": "0x0001",
+    "event_names": [
+      "POLLIN"
+    ],
+    "timed_out": false,
+    "calls": 1,
+    "restarts": 0
+  },
+  "dequeued_buffer": {
+    "index": 0,
+    "buf_type": 1,
+    "bytesused": 512000,
+    "flags": "0x00012001",
+    "flag_names": [
+      "V4L2_BUF_FLAG_MAPPED",
+      "V4L2_BUF_FLAG_LAST"
+    ],
+    "error_flag": false,
+    "field": 1,
+    "field_name": "V4L2_FIELD_NONE",
+    "timestamp_sec": 272564,
+    "timestamp_usec": 631765,
+    "timestamp_ns": 272564631765000,
+    "timestamp_source": "V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC",
+    "timecode": {
+      "type": 0,
+      "flags": 0,
+      "frames": 0,
+      "seconds": 0,
+      "minutes": 0,
+      "hours": 0,
+      "userbits": "00000000"
+    },
+    "sequence": 0,
+    "memory": 1,
+    "offset": 0,
+    "length": 512000
+  },
+  "frame_bytes": 512000,
+  "artifacts": {
+    "attempted": true,
+    "ok": true,
+    "note": "the frame and its hashes were preserved",
+    "directory": "/tmp/scanner-009-evidence/frame",
+    "files": [
+      {
+        "kind": "raw",
+        "path": "/tmp/scanner-009-evidence/frame/depth-frame-raw.bin",
+        "bytes": 512000,
+        "sha256": "0a1b667eeca5ed2ce1c64e6aab124580efc9474e5e3e13187b53944d0c296933",
+        "ok": true,
+        "detail": "the dequeued bytes exactly as the kernel presented them (512000 B)"
+      },
+      {
+        "kind": "packed",
+        "path": null,
+        "bytes": 512000,
+        "sha256": "0a1b667eeca5ed2ce1c64e6aab124580efc9474e5e3e13187b53944d0c296933",
+        "ok": true,
+        "detail": "bytesperline is 1280, the tight row size, so the raw frame is already tightly packed; no separate file was written and this hash is the raw one"
+      }
+    ],
+    "raw_ceiling_bytes": 1048576
+  },
+  "steps": [
+    {
+      "step": "resolve_node",
+      "ok": true,
+      "detail": "/dev/video0 is the V4L2 index-0 capture node of the depth function on interface 0 ('DepthCamA22704522A6F00A64'), bound to uvcvideo",
+      "duration_s": null,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "open",
+      "ok": true,
+      "detail": "opened /dev/video0 O_RDWR|O_NONBLOCK|O_CLOEXEC as fd 4",
+      "duration_s": null,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "querycap",
+      "ok": true,
+      "detail": "driver 'uvcvideo' card 'ZXProduct: DepthCamA22704522A6F' bus 'usb-0000:00:14.0-1.1' version 6.14.11; video-capture and streaming both present",
+      "duration_s": null,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "get_fmt",
+      "ok": true,
+      "detail": "this handle started at 'YUYV' 640x400 bytesperline=1280 sizeimage=512000",
+      "duration_s": null,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "set_fmt",
+      "ok": true,
+      "detail": "negotiated 'Y16 ' 640x400 bytesperline=1280 sizeimage=512000 (rows tightly packed)",
+      "duration_s": null,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "reqbufs",
+      "ok": true,
+      "detail": "4 MMAP buffers allocated (requested 4)",
+      "duration_s": null,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "querybuf",
+      "ok": true,
+      "detail": "buffer 0: offset 0 length 512000 flags 0x00012000",
+      "duration_s": null,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "mmap",
+      "ok": true,
+      "detail": "buffer 0 mapped read/write shared: 512000 B at offset 0",
+      "duration_s": 3.480300074443221e-05,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "querybuf",
+      "ok": true,
+      "detail": "buffer 1: offset 32768 length 512000 flags 0x00012000",
+      "duration_s": null,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "mmap",
+      "ok": true,
+      "detail": "buffer 1 mapped read/write shared: 512000 B at offset 32768",
+      "duration_s": 1.9501021597534418e-05,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "querybuf",
+      "ok": true,
+      "detail": "buffer 2: offset 65536 length 512000 flags 0x00012000",
+      "duration_s": null,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "mmap",
+      "ok": true,
+      "detail": "buffer 2 mapped read/write shared: 512000 B at offset 65536",
+      "duration_s": 1.6690988559275866e-05,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "querybuf",
+      "ok": true,
+      "detail": "buffer 3: offset 98304 length 512000 flags 0x00012000",
+      "duration_s": null,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "mmap",
+      "ok": true,
+      "detail": "buffer 3 mapped read/write shared: 512000 B at offset 98304",
+      "duration_s": 1.5211000572890043e-05,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "qbuf",
+      "ok": true,
+      "detail": "buffer 0 queued",
+      "duration_s": null,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "qbuf",
+      "ok": true,
+      "detail": "buffer 1 queued",
+      "duration_s": null,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "qbuf",
+      "ok": true,
+      "detail": "buffer 2 queued",
+      "duration_s": null,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "qbuf",
+      "ok": true,
+      "detail": "buffer 3 queued",
+      "duration_s": null,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "streamon",
+      "ok": true,
+      "detail": "streaming started; the 8.0s deadline starts now",
+      "duration_s": null,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "poll",
+      "ok": true,
+      "detail": "readable after 1.043s (POLLIN)",
+      "duration_s": 1.042971994029358,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "dqbuf",
+      "ok": true,
+      "detail": "dequeued buffer 0: bytesused 512000 of 512000 B, sequence 0, field V4L2_FIELD_NONE, flags 0x00012001",
+      "duration_s": null,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "streamoff",
+      "ok": true,
+      "detail": "VIDIOC_STREAMOFF succeeded; the queue is stopped",
+      "duration_s": 0.0004727540072053671,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "munmap",
+      "ok": true,
+      "detail": "buffer 0 unmapped (512000 B at 0)",
+      "duration_s": 2.6007008273154497e-05,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "munmap",
+      "ok": true,
+      "detail": "buffer 1 unmapped (512000 B at 32768)",
+      "duration_s": 1.944601535797119e-05,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "munmap",
+      "ok": true,
+      "detail": "buffer 2 unmapped (512000 B at 65536)",
+      "duration_s": 1.7601007129997015e-05,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "munmap",
+      "ok": true,
+      "detail": "buffer 3 unmapped (512000 B at 98304)",
+      "duration_s": 1.968501601368189e-05,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "release_buffers",
+      "ok": true,
+      "detail": "VIDIOC_REQBUFS(count=0) succeeded; the buffer queue is freed",
+      "duration_s": 4.5688997488468885e-05,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "close",
+      "ok": true,
+      "detail": "fd 4 closed",
+      "duration_s": 0.00014028599252924323,
+      "errno": null,
+      "errno_name": null
+    }
+  ],
+  "cleanup": {
+    "attempted": true,
+    "ok": true,
+    "note": "the stream, the buffers, every mapping and /dev/video0 were released",
+    "steps": [
+      {
+        "step": "streamoff",
+        "ok": true,
+        "detail": "VIDIOC_STREAMOFF succeeded; the queue is stopped",
+        "duration_s": 0.0004727540072053671,
+        "errno": null,
+        "errno_name": null
+      },
+      {
+        "step": "munmap",
+        "ok": true,
+        "detail": "buffer 0 unmapped (512000 B at 0)",
+        "duration_s": 2.6007008273154497e-05,
+        "errno": null,
+        "errno_name": null
+      },
+      {
+        "step": "munmap",
+        "ok": true,
+        "detail": "buffer 1 unmapped (512000 B at 32768)",
+        "duration_s": 1.944601535797119e-05,
+        "errno": null,
+        "errno_name": null
+      },
+      {
+        "step": "munmap",
+        "ok": true,
+        "detail": "buffer 2 unmapped (512000 B at 65536)",
+        "duration_s": 1.7601007129997015e-05,
+        "errno": null,
+        "errno_name": null
+      },
+      {
+        "step": "munmap",
+        "ok": true,
+        "detail": "buffer 3 unmapped (512000 B at 98304)",
+        "duration_s": 1.968501601368189e-05,
+        "errno": null,
+        "errno_name": null
+      },
+      {
+        "step": "release_buffers",
+        "ok": true,
+        "detail": "VIDIOC_REQBUFS(count=0) succeeded; the buffer queue is freed",
+        "duration_s": 4.5688997488468885e-05,
+        "errno": null,
+        "errno_name": null
+      },
+      {
+        "step": "close",
+        "ok": true,
+        "detail": "fd 4 closed",
+        "duration_s": 0.00014028599252924323,
+        "errno": null,
+        "errno_name": null
+      }
+    ],
+    "recovery_guidance": null
+  },
+  "stream_duration_s": 1.0467859850032255,
+  "total_duration_s": 1.0600098430295475,
+  "errno": null,
+  "errno_name": null
+}

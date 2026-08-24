@@ -1,0 +1,11 @@
+{
+  "source": "/tmp/scanner-014-evidence/usbmon-raw.txt",
+  "source_sha256": "15b43371f426c3efb617ce58d805b9f9c04519562fb641042dfd5259b9e2d664",
+  "source_line_count": 810,
+  "source_byte_count": 58074,
+  "selection_rule": "usbmon record contains bus 1 and device 43, accepting zero-padded or unpadded three-digit rendering (target token :0*43:)",
+  "target": {"vendor_id": "2207", "product_id": "110c", "serial": "A22704522A6F00A64", "bus": 1, "devnum": 43},
+  "selected_record_count": 26,
+  "known_wrapper_filter_defect": "scanner-014 derived filters matched unpadded :43: while usbmon rendered :043:, producing empty derived files",
+  "fixture_sha256": "a4e58fc36e0792b022c47a3853d98dfc66a93f67bf8b2278cf0b0356770feefd"
+}
