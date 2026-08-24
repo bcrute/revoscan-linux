@@ -1,4 +1,4 @@
-# The shear indicator does not work on single-view data
+# The shear indicator and single-view coverage (a fixed defect, recorded)
 
 Status: **the defect described below was FIXED on 2026-08-24, after this
 document was written.** The record is kept because the failure mode is worth
@@ -61,7 +61,7 @@ model reads near 100% for small `k` and degrades for large. A constant factor is
 a systematic scale error, and its size depends on the visible geometry rather
 than on `k`.
 
-## The serious part: the detector never fires
+## The serious part: the detector never fired (since fixed)
 
 `shear_detected` requires `|shear_correlation| ≥ 0.35`. Measured on rendered
 frames, against the *maximum possible* fault on this unit:
@@ -112,7 +112,7 @@ a finding, and it has not been chased down.
 **Consequence:** simply lowering the threshold is not a fix. Below about
 `k = 0.05` on cap data there is no clean separation to threshold against.
 
-## What is safe to conclude today
+## What was safe to conclude before the fix
 
 **Safe.** On dense, near-complete coverage of a sphere the indicator is
 excellent — correlation 0.997 and `k` recovered to 0.1%. That is not a
@@ -124,7 +124,7 @@ question by a single frame.
 not be read as evidence that `cx` is correct, and `shear_coefficient` from a
 single view is a lower bound of unknown tightness, not a measurement of `k`.
 
-## What should change
+## What was recommended (items 1-3 superseded by the fix)
 
 1. **`shear_indicator_reliable` must account for angular coverage, not only
    leverage.** Leverage reads ~0.26 for both a whole sphere and a single-view
