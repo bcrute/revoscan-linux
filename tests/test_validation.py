@@ -29,6 +29,7 @@ everything the module emits.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
 import random
@@ -42,12 +43,23 @@ from scanner3d.cloud_export import camera_points
 from scanner3d.depth_metric import UNVALIDATED_UNIT, deproject_depth_frame
 from scanner3d.errors import DoctorStatus
 from scanner3d.intrinsics import INTRINSICS_FORMAT, parse_intrinsics
+from scanner3d.simulate import (
+    FACTORY_INTRINSICS,
+    Cylinder,
+    points_of,
+    render,
+    sheared_intrinsics,
+)
 from scanner3d.v4l2_capture import EXPECTED_FRAME_BYTES
 from scanner3d.validation import (
+    CYLINDER_SHEAR_CORRELATION_THRESHOLD,
     MAX_FIT_POINTS,
     MAX_NORMAL_DISAGREEMENT,
     MAX_REFINEMENT_ITERATIONS,
     MIN_CAP_HALF_ANGLE,
+    MIN_CYLINDER_AXIS_VISIBILITY,
+    MIN_CYLINDER_POINTS,
+    MIN_CYLINDER_SHEAR_LEVERAGE,
     MIN_PLANE_POINTS,
     MIN_SHEAR_LEVERAGE,
     MIN_SPHERE_POINTS,
@@ -67,6 +79,7 @@ from scanner3d.validation import (
     ToleranceUnusable,
     ValidationNotAllowed,
     Verdict,
+    fit_cylinder,
     fit_plane,
     fit_sphere,
     plane_separation,
@@ -1015,3 +1028,294 @@ def test_the_fits_are_deterministic_over_a_real_frame():
     assert first.normal == second.normal
     assert first.offset == second.offset
     assert first.residual_rms == second.residual_rms
+
+
+# --------------------------------------------------------------------------
+# fit_cylinder: real rendered frames, not hand-built point lists
+#
+# A sphere is the textbook calibration target; an owner without a
+# calibration ball has cylinders instead - cans, dowels, sockets, batteries -
+# so the harness has to accept one. Every point set below comes from
+# scanner3d.simulate: a real 512000-byte frame, rendered from an exactly
+# known cylinder and deprojected through the production path, exactly the
+# way test_simulate.py exercises the renderer itself. Nothing here is a
+# hand-built approximation of a cylinder's surface.
+#
+# The measured fact this section is built around: a shear x += k*z moves
+# points only within the x-z plane, and sliding a cylinder along its own
+# axis reproduces the identical surface. Rendering the same cylinder through
+# the same injected principal-point error and only turning it - upright
+# (+y), horizontal (+x, across the frame), end-on (+z, toward the camera) -
+# measured a surface deviation of 161.7% of the radius for the upright case
+# against a few thousandths of the radius, indistinguishable from unsheared,
+# for both the horizontal and the end-on case. A cylinder lying along the
+# camera's x or z axis is therefore exactly as blind to this fault as a flat
+# plate, and the fit has to say so rather than let a quiet indicator on that
+# geometry be read as a clean bill of health - the same lesson
+# docs/shear-detection-limits.md records fit_sphere having had to learn.
+# --------------------------------------------------------------------------
+
+#: A median working distance for this unit, matching where the module's own
+#: sphere measurements were made, so the cylinder targets below are
+#: comparable to them.
+CYLINDER_Z = 117.0
+
+#: The frame centre. Deprojecting with this while a frame was rendered with
+#: the factory cx reproduces the largest principal-point fault this unit
+#: could have, exactly as test_simulate.py uses it.
+CYLINDER_FRAME_CENTRE_CX = 320.0
+
+#: fit_cylinder is O(n) per Gauss-Newton iteration and this file has a
+#: runtime budget; a real rendered view returns tens of thousands of points,
+#: so every cylinder point set below is strided down the same way
+#: SMOKE_STRIDE already strides a real captured frame elsewhere in this
+#: file. A structural and quantitative check needs thousands of points, not
+#: tens of thousands.
+CYLINDER_STRIDE = 15
+
+#: Standing upright: axis has its full y-component available to the shear,
+#: which is the orientation the trap cannot hide from.
+UPRIGHT_CYLINDER = Cylinder(
+    centre=(0.0, 0.0, CYLINDER_Z), axis=(0.0, 1.0, 0.0), radius=15.0, half_length=25.0
+)
+
+#: Lying across the frame: axis has no y-component at all, which is one of
+#: the two orientations the trap is exactly blind to.
+HORIZONTAL_CYLINDER = Cylinder(
+    centre=(0.0, 0.0, CYLINDER_Z), axis=(1.0, 0.0, 0.0), radius=15.0, half_length=25.0
+)
+
+#: Pointed straight at the camera: the other blind orientation, and a
+#: geometry degenerate for a different reason entirely - see
+#: test_an_end_on_cylinder_shows_only_its_flat_cap_and_is_refused.
+END_ON_CYLINDER = Cylinder(
+    centre=(0.0, 0.0, CYLINDER_Z), axis=(0.0, 0.0, 1.0), radius=15.0, half_length=25.0
+)
+
+#: A puck: half_length shorter than the radius, upright. The case where the
+#: axis of greatest covariance spread is not the cylinder's own axis.
+SQUAT_CYLINDER = Cylinder(
+    centre=(0.0, 0.0, CYLINDER_Z), axis=(0.0, 1.0, 0.0), radius=20.0, half_length=6.0
+)
+
+#: Built once: every sheared test below deprojects the same clean render
+#: with this principal point instead of the factory one.
+CYLINDER_SHEARED_INTRINSICS = sheared_intrinsics(FACTORY_INTRINSICS, cx=CYLINDER_FRAME_CENTRE_CX)
+
+
+def cylinder_points(
+    shape: Cylinder, *, sheared: bool = False, stride: int = CYLINDER_STRIDE
+) -> list[tuple[float, float, float]]:
+    """One real rendered-and-deprojected view of ``shape``, strided down for runtime.
+
+    Routed through :func:`scanner3d.simulate.render` and
+    :func:`scanner3d.simulate.points_of` - the real production deprojection -
+    exactly as test_simulate.py's own shear tests are. ``sheared`` swaps in
+    :data:`CYLINDER_SHEARED_INTRINSICS`, reproducing the factory-scale
+    principal-point fault on demand rather than assuming its size.
+    """
+    frame = render([shape])
+    if sheared:
+        frame = dataclasses.replace(frame, intrinsics=CYLINDER_SHEARED_INTRINSICS)
+    return list(points_of(frame))[::stride]
+
+
+def test_an_upright_cylinder_is_recovered_to_near_machine_precision():
+    """A real rendered view of a known cylinder, fitted back to its own truth."""
+    points = cylinder_points(UPRIGHT_CYLINDER)
+    fit = fit_cylinder(points)
+
+    assert fit.axis == pytest.approx((0.0, 1.0, 0.0), abs=1e-3)
+    assert fit.radius == pytest.approx(15.0, abs=0.01)
+    # A single view never sees the whole length, the same way it never sees
+    # the whole sphere - the observed extent is close to, and never past, the
+    # true half-length.
+    assert 20.0 <= fit.half_length <= 25.0
+    assert fit.converged
+    assert fit.iterations <= MAX_REFINEMENT_ITERATIONS
+    assert fit.residual_rms < 0.01
+    assert fit.well_conditioned
+    assert fit.point_count == len(points)
+    assert fit.diameter == pytest.approx(2.0 * fit.radius)
+    # A single camera view sees only the near side of the cylinder, so the
+    # observed depths sit short of the true axis distance, never past it.
+    assert fit.z_min < fit.z_max <= CYLINDER_Z
+
+
+def test_a_squat_cylinder_is_recovered_without_a_wrong_axis():
+    """A puck is the case the greatest-spread heuristic alone gets wrong.
+
+    Measured directly: trying only the axis of greatest covariance spread (or
+    only the axis of least) converges on a residual over a thousand times the
+    true radius here, because a squat target seen as a narrow single-view arc
+    puts its true axis at the *middle* eigenvalue. All three covariance
+    directions are tried below the surface and the one that actually explains
+    the points wins - see fit_cylinder's own docstring for the measurement.
+    """
+    points = cylinder_points(SQUAT_CYLINDER)
+    fit = fit_cylinder(points)
+
+    assert fit.axis == pytest.approx((0.0, 1.0, 0.0), abs=1e-3)
+    assert fit.radius == pytest.approx(20.0, abs=0.01)
+    assert fit.half_length == pytest.approx(6.0, abs=0.05)
+    assert fit.converged
+    assert fit.residual_rms < 0.01
+
+
+def test_a_sheared_upright_cylinder_fires_the_shear_indicator():
+    """The headline positive: an axis a shear cannot hide from, caught firing.
+
+    An upright axis has its full y-component available to an x-z shear, so
+    this is exactly the orientation the trap is built to catch, and the
+    diameter alone would not: the fitted diameter here still lands within a
+    caliper's reach of the truth while the residual has become structured.
+    """
+    points = cylinder_points(UPRIGHT_CYLINDER, sheared=True)
+    fit = fit_cylinder(points)
+
+    assert fit.axis_visibility > MIN_CYLINDER_AXIS_VISIBILITY
+    assert fit.axis_shear_visible
+    assert fit.shear_leverage >= MIN_CYLINDER_SHEAR_LEVERAGE
+    assert fit.shear_indicator_reliable
+    assert abs(fit.shear_correlation) >= CYLINDER_SHEAR_CORRELATION_THRESHOLD
+    assert fit.shear_detected
+    assert "shear direction" in " ".join(fit.inconclusive_reasons)
+
+    result = validate(fit, caliper(30.0), tolerance_for(fit, 0.5))
+    assert result.verdict is Verdict.INCONCLUSIVE
+    assert result.passed is None
+    assert "shear direction" in " ".join(result.inconclusive_reasons)
+
+
+def test_a_sheared_horizontal_cylinder_is_blind_to_the_shear_and_says_so():
+    """The headline negative, and the one this assignment exists to prevent.
+
+    A shear x += k*z moves points only within the x-z plane, and sliding a
+    cylinder along its own axis reproduces the identical surface - so an axis
+    pointed across the frame along x cannot show this fault at any coverage.
+    Measured directly by rendering this exact cylinder through this exact
+    principal-point fault and only turning it: a horizontal axis reads a
+    surface deviation of a few thousandths of the radius, indistinguishable
+    from unsheared. The fitted diameter here even lands close to the truth -
+    which is precisely why the fit must report itself as unable to see,
+    rather than let that agreement read as a clean bill of health.
+    """
+    points = cylinder_points(HORIZONTAL_CYLINDER, sheared=True)
+    fit = fit_cylinder(points)
+
+    assert fit.axis == pytest.approx((1.0, 0.0, 0.0), abs=1e-3)
+    assert fit.axis_visibility < MIN_CYLINDER_AXIS_VISIBILITY
+    assert not fit.axis_shear_visible
+    assert not fit.shear_indicator_reliable
+    assert not fit.shear_detected
+    joined = " ".join(fit.inconclusive_reasons)
+    assert "could not have seen anything" in joined
+    assert "not because there is nothing there" in joined
+
+    result = validate(fit, caliper(30.0), tolerance_for(fit, 0.5))
+    assert result.fitted_value == pytest.approx(30.0, abs=0.5)
+    assert result.verdict is Verdict.INCONCLUSIVE
+    assert result.passed is not True
+    assert "could not have seen anything" in " ".join(result.inconclusive_reasons)
+
+
+def test_an_end_on_cylinder_shows_only_its_flat_cap_and_is_refused():
+    """Pointed straight at the camera, no lateral surface is visible at all.
+
+    The near end cap is a flat disk facing the camera and self-occludes the
+    entire curved surface behind it, so every returned point sits at the same
+    depth - a plane, not a cylinder. Refusing here rather than fitting a small
+    circle to a flat disk and reporting it as an axis is exactly the "must not
+    silently return a wrong axis" bar a degenerate cylinder fit has to clear.
+    """
+    points = cylinder_points(END_ON_CYLINDER)
+    z_values = {round(point[2], 6) for point in points}
+    assert len(z_values) == 1, "an end-on view should return only the flat near cap"
+
+    with pytest.raises(DegenerateFit):
+        fit_cylinder(points)
+
+
+def test_an_empty_or_undersized_cylinder_point_set_is_refused():
+    with pytest.raises(PointSetUnusable) as raised:
+        fit_cylinder([])
+    assert "given none" in str(raised.value)
+
+    points = cylinder_points(UPRIGHT_CYLINDER)
+    with pytest.raises(PointSetUnusable) as raised:
+        fit_cylinder(points[: MIN_CYLINDER_POINTS - 1])
+    assert f"at least {MIN_CYLINDER_POINTS}" in str(raised.value)
+
+
+def test_a_non_finite_cylinder_coordinate_is_refused():
+    points = cylinder_points(UPRIGHT_CYLINDER)
+    corrupted = list(points)
+    corrupted[5] = (corrupted[5][0], math.nan, corrupted[5][2])
+
+    with pytest.raises(NonFiniteInput) as raised:
+        fit_cylinder(corrupted)
+    assert "point 5" in str(raised.value)
+
+
+def test_a_cylinder_refusal_shares_the_module_s_base_and_doctor_status():
+    with pytest.raises(ValidationNotAllowed) as raised:
+        fit_cylinder([])
+    assert raised.value.status is DoctorStatus.UNSUPPORTED_MODE
+
+
+def test_validating_a_cylinder_diameter_discriminates_correct_wrong_and_sheared():
+    """The three-way discrimination this harness exists to make, over a cylinder.
+
+    One clean fit judged against three different ground truths: its own
+    diameter (PASS), a diameter 5 units off (FAIL), and - fitted from a
+    separately sheared render of the same target - the shear that makes the
+    fitted diameter untrustworthy in the first place (INCONCLUSIVE).
+    """
+    points = cylinder_points(UPRIGHT_CYLINDER)
+    fit = fit_cylinder(points)
+
+    correct = validate(fit, caliper(fit.diameter, 0.01), tolerance_for(fit, 0.05))
+    assert correct.verdict is Verdict.PASS
+    assert correct.passed is True
+
+    wrong_scale = validate(fit, caliper(fit.diameter + 5.0, 0.01), tolerance_for(fit, 0.05))
+    assert wrong_scale.verdict is Verdict.FAIL
+    assert wrong_scale.passed is False
+
+    sheared_points = cylinder_points(UPRIGHT_CYLINDER, sheared=True)
+    sheared_fit = fit_cylinder(sheared_points)
+    sheared_result = validate(
+        sheared_fit, caliper(fit.diameter, 0.01), tolerance_for(sheared_fit, 0.5)
+    )
+    assert sheared_result.verdict is Verdict.INCONCLUSIVE
+    assert sheared_result.passed is None
+
+
+def test_a_cylinder_fit_serialises_with_its_axis_and_shear_indicator():
+    points = cylinder_points(UPRIGHT_CYLINDER, sheared=True)
+    fit = fit_cylinder(points)
+    reported = json.loads(json.dumps(fit.as_dict()))
+
+    assert reported["schema_version"] == SCHEMA_VERSION
+    assert reported["quantity"] == "cylinder_diameter"
+    assert len(reported["axis"]) == 3
+    assert len(reported["centre"]) == 3
+    shear = reported["shear_indicator"]
+    assert shear["axis_visibility_floor"] == MIN_CYLINDER_AXIS_VISIBILITY
+    assert shear["leverage_floor"] == MIN_CYLINDER_SHEAR_LEVERAGE
+    assert shear["threshold"] == CYLINDER_SHEAR_CORRELATION_THRESHOLD
+    assert shear["detected"] is True
+    conditioning = reported["conditioning"]
+    assert conditioning["iteration_ceiling"] == MAX_REFINEMENT_ITERATIONS
+
+
+def test_no_string_the_cylinder_fit_emits_names_a_physical_unit():
+    """The module's defining discipline, checked over the new fit too."""
+    points = cylinder_points(UPRIGHT_CYLINDER, sheared=True)
+    fit = fit_cylinder(points)
+    result = validate(fit, caliper(30.0), tolerance_for(fit, 0.5))
+    emitted = [json.dumps(fit.as_dict()), json.dumps(result.as_dict())]
+
+    for payload in emitted:
+        found = UNIT_WORDS.findall(payload)
+        assert found == [], f"a physical unit was named: {found}"

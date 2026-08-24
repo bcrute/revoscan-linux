@@ -1,0 +1,70 @@
+{
+  "conditions": {
+    "approximate_distance": 120,
+    "capture_path": "scanner3d depth-frame --execute-depth-frame-capture",
+    "scanner_serial": "A22704522A6F00A64",
+    "surface": "BARE, untreated, specular aluminium - deliberately unsprayed"
+  },
+  "frames": [
+    {
+      "bytes": 512000,
+      "name": "can-shiny-120-1",
+      "non_zero_samples": 102343,
+      "sha256": "17de783927db16daf2951b2a6c511c597f323d170130ac92ec83898bf3f47e49",
+      "yield": 0.399777
+    },
+    {
+      "bytes": 512000,
+      "name": "can-shiny-120-2",
+      "non_zero_samples": 102871,
+      "sha256": "94bcba73c1fd17eb5df817350e48461eaefce947c11a25907a09d0a05270f834",
+      "yield": 0.40184
+    },
+    {
+      "bytes": 512000,
+      "name": "can-shiny-120-3",
+      "non_zero_samples": 102900,
+      "sha256": "378f5e2540451b59d2099e29fc01019d982d8eca05caddf833c8f85df55e311c",
+      "yield": 0.401953
+    }
+  ],
+  "measured_result": {
+    "error_vs_calipers": -0.295,
+    "fitted_diameters": [
+      57.68,
+      57.724,
+      57.711
+    ],
+    "mean": 57.705,
+    "relative_error": -0.0051,
+    "shear_coefficient_mean": -0.026,
+    "shear_correlation": [
+      -0.1941,
+      -0.1689,
+      -0.1401
+    ],
+    "spread": 0.044,
+    "verdict": "inconclusive",
+    "verdict_reason": "A shear was detected, so the harness declines to attribute the -0.295 to scale rather than to the shear. That is the correct outcome, not an evasion."
+  },
+  "schema_version": 1,
+  "target": {
+    "instrument": "digital calipers",
+    "measured_by": "owner",
+    "measured_diameter": 58.0,
+    "measurement_uncertainty": 0.05,
+    "note": "The can body measures a consistent 58 around the middle. The top and bottom are flanged and stand proud of the body, but at this distance they fall outside the vertical field of view and return nothing, so no cropping was applied.",
+    "object": "aluminium drink can, standing upright"
+  },
+  "what": "Depth frames of a drink can captured for METRIC VALIDATION. Unlike the frames in tests/fixtures/frames/, these have an independently measured ground truth.",
+  "what_this_does_NOT_establish": [
+    "Whether the residual -0.295 is a scale error or the detected shear. One view cannot separate them, which is why the verdict is inconclusive.",
+    "Anything about distances other than ~120.",
+    "Any distortion model. The deprojection is an ideal pinhole."
+  ],
+  "what_this_establishes": [
+    "The depth scale is MILLIMETRES. 57.7 against 58.0 rules out any other unit by orders of magnitude. That scalar was unknown for the entire prior life of this project.",
+    "The factory cx near 42 is approximately right. A shear was detected but its coefficient is about -0.026, where cx belonging at the frame centre would give -0.309 - twelve times larger. The off-centre principal point is a real property of the sensor.",
+    "A bare specular surface is not a blocker: 40% yield, the highest of any frame in this repository, and a frame-to-frame spread of 0.044."
+  ]
+}

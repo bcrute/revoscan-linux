@@ -81,7 +81,7 @@ from dataclasses import dataclass
 from typing import Final, Protocol
 
 from scanner3d.errors import DoctorStatus, ScannerError
-from scanner3d.geometry import Point, dot, norm, subtract
+from scanner3d.geometry import Point, cross, dot, norm, subtract
 
 #: Every record this module serialises stamps this.
 SCHEMA_VERSION: Final = 1
@@ -106,6 +106,14 @@ MIN_SPHERE_POINTS: Final = 8
 #: define a plane exactly and would report a perfect fit whatever they were.
 MIN_PLANE_POINTS: Final = 6
 
+#: Fewest points a cylinder fit will accept. A cylinder here has five free
+#: parameters - two for the axis direction, two for the centre's position in
+#: the plane perpendicular to it, one for the radius - and this module's
+#: convention throughout is to require at least twice a fit's parameter count,
+#: so the residual keeps real freedom rather than being pinned to zero by the
+#: algebra alone.
+MIN_CYLINDER_POINTS: Final = 10
+
 #: Hard ceiling on the geometric refinement below. A Gauss-Newton step on four
 #: parameters converges in a handful of iterations from an algebraic start; a
 #: run that reaches this ceiling has not converged and says so rather than
@@ -116,6 +124,18 @@ MAX_REFINEMENT_ITERATIONS: Final = 32
 #: fraction of the radius. Well above float64 dust, so convergence is a real
 #: statement about the fit rather than about rounding.
 REFINEMENT_STEP_TOLERANCE: Final = 1e-13
+
+#: Backtracking attempts per Gauss-Newton step in the cylinder refinement.
+#: That fit's axis-tangent columns scale with a point's axial distance from
+#: the centre, unlike the sphere fit's four columns, which are all unit-scale;
+#: over a point set with a wide axial span and a starting point still far from
+#: the optimum, that imbalance lets an undamped Newton step overshoot into a
+#: worse iterate or even a negative radius - confirmed directly by starting
+#: refinement from the true pre-shear parameters of a heavily sheared
+#: synthetic cylinder, which drove the radius negative within one undamped
+#: step. Halving the step until it actually reduces the sum of squared
+#: residuals, the standard damped Gauss-Newton fix, removes the instability.
+MAX_REFINEMENT_BACKTRACKS: Final = 20
 
 #: A pivot smaller than this fraction of the system's largest entry means the
 #: normal equations are singular to working precision: the point set does not
@@ -160,6 +180,50 @@ MAX_NORMAL_DISAGREEMENT: Final = 0.05
 #: to a principal-point shear. Below it the face pair is, for practical purposes,
 #: blind to one - which is a fact about the experiment, reported, never corrected.
 MIN_SHEAR_SENSITIVITY: Final = 0.1
+
+#: A shear ``x += k * z`` moves every point only within the x-z plane, and
+#: sliding a cylinder along its own axis reproduces the identical surface. So an
+#: axis lying close to the x-z plane - across the frame, or straight at the
+#: camera - cannot show this fault at any coverage, while an axis with a
+#: substantial ``y`` component can. Rendering the same cylinder through the same
+#: injected principal-point error and only turning it measured a horizontal and
+#: an end-on axis both at a surface deviation of a few thousandths of the
+#: radius - indistinguishable from an unsheared cylinder - against an upright
+#: axis at well over 100% of the radius. Below this floor on ``abs(axis[1])``
+#: the indicator's correlation and coefficient are read as unreliable however
+#: loud or quiet they are, because the geometry could not have produced a
+#: signal either way.
+MIN_CYLINDER_AXIS_VISIBILITY: Final = 0.3
+
+#: The cylinder analogue of :data:`MIN_SHEAR_LEVERAGE`: how much of the x-z
+#: shear shape survives in the residual after the fit's own five parameters -
+#: axis tangent, in-plane centre offset, radius - have absorbed what they could
+#: of it. Below this floor the visible arc is too narrow for the residual to
+#: carry the signal even when the axis orientation would otherwise allow it.
+MIN_CYLINDER_SHEAR_LEVERAGE: Final = 0.05
+
+#: The cylinder analogue of :data:`SHEAR_CORRELATION_THRESHOLD`, and a smaller
+#: number for a measured reason rather than a guessed one. A sphere's cap is
+#: visible over a wide solid angle (a realistic single view still covers
+#: 60-80 degrees from the near pole); a cylinder's *lateral* surface, at a
+#: comparable distance and radius, is visible over a much narrower azimuthal
+#: sliver, and most of that sliver's points sit near the centre of the arc
+#: rather than spread toward its edges, which is where the x-z cross term has
+#: its leverage. Rendering an upright cylinder (radius 15 at z 117, matching
+#: the sphere measurements this project already made at the same distance)
+#: through the same injected cx errors used throughout this module's own
+#: history: an unsheared cylinder reads a correlation of about 0.02, noise
+#: from quantisation and the finite point set; a 20-pixel error - a fifth of
+#: this unit's factory-scale fault - reads about 0.19; the full factory-scale
+#: 277.56-pixel error reads about 0.24. That ceiling is real, not a residual
+#: bug: stripping only the two in-plane centre columns (no axis tangent, no
+#: constant) already reaches the same ceiling, and starting the geometric
+#: refinement from the true unsheared parameters converges to a *worse*
+#: optimum than the algebraic-Kasa start used here, confirming the surface
+#: this fit is minimising over is genuinely harder to read than a sphere's.
+#: 0.12 sits above the measured noise floor with a comfortable margin and below
+#: every measured genuine-fault reading down to a 20-pixel error.
+CYLINDER_SHEAR_CORRELATION_THRESHOLD: Final = 0.12
 
 #: The limitations that hold for every verdict this module reaches, whatever the
 #: inputs were. Fit-specific limitations are appended to these, never substituted.
@@ -318,10 +382,13 @@ class FittedQuantity(enum.StrEnum):
 
     :attr:`PLANE_FLATNESS` is in the list so that the flat-target experiment can
     be run and recorded rather than merely refused - it produces no length, and
-    its verdict is always :attr:`Verdict.INCONCLUSIVE`.
+    its verdict is always :attr:`Verdict.INCONCLUSIVE`. :attr:`CYLINDER_DIAMETER`
+    is the other length a caliper can judge directly - see :func:`fit_cylinder`
+    for what it does and does not establish about a wrong principal point.
     """
 
     SPHERE_DIAMETER = "sphere_diameter"
+    CYLINDER_DIAMETER = "cylinder_diameter"
     PLANE_SEPARATION = "plane_separation"
     PLANE_FLATNESS = "plane_flatness"
 
@@ -707,6 +774,250 @@ class SphereFit:
             "conditioning": {
                 "cap_half_angle": self.cap_half_angle,
                 "cap_half_angle_floor": MIN_CAP_HALF_ANGLE,
+                "well_conditioned": self.well_conditioned,
+                "converged": self.converged,
+                "iterations": self.iterations,
+                "iteration_ceiling": MAX_REFINEMENT_ITERATIONS,
+            },
+            "z_span": [self.z_min, self.z_max],
+            "inconclusive_reasons": list(self.inconclusive_reasons),
+            "limitations": list(self.limitations),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class CylinderFit:
+    """A least-squares cylinder, its residual, and the shear it may be hiding.
+
+    Present for the same reason :class:`SphereFit` is the fit that matters in
+    this module: it produces a length a caliper can judge, and it is a shape
+    whose residual can carry the signature of a wrong principal point. A sphere
+    is the textbook calibration target; a cylinder is what an owner without a
+    calibration ball actually has - a can, a dowel, a socket, a battery - so
+    this fit exists to make that target usable for the same experiment.
+
+    A cylinder's blind spot to a shear is sharper than a sphere's, and depends
+    on more than coverage. A shear ``x += k * z`` moves every point only within
+    the x-z plane, and sliding a cylinder along its own axis reproduces the
+    identical surface - so when the axis itself lies in the x-z plane, pointed
+    across the frame along ``x`` or straight at the camera along ``z``, the
+    shear is invisible *by construction*, whatever the coverage. Measured by
+    rendering the same cylinder with the same injected principal-point error
+    and only turning it: a horizontal axis and an end-on axis both read a
+    surface deviation of a few thousandths of the radius - indistinguishable
+    from unsheared - while an upright axis, the one orientation a shear along
+    x-z cannot touch, reads a deviation well over the radius itself.
+    :attr:`axis_visibility` names how far the fitted axis sits from that blind
+    plane, and it gates the indicator the way :attr:`SphereFit.shear_leverage`
+    gates a narrow cap: a quiet reading from an axis this geometry could not
+    have seen a shear with is reported as unable to see, never as clean.
+
+    The rest of the indicator - :attr:`shear_correlation` and
+    :attr:`shear_coefficient` - is built the same way as :class:`SphereFit`'s:
+    the same signed radial residual, correlated against the same
+    ``dx * dz`` shape after that shape is first stripped of whatever this
+    fit's own five parameters (axis direction, in-plane centre position,
+    radius) could already absorb. Skipping that stripping is exactly the
+    defect ``docs/shear-detection-limits.md`` records the sphere fit having
+    shipped with; it is not repeated here.
+    """
+
+    axis: Point
+    centre: Point
+    radius: float
+    half_length: float
+    point_count: int
+    residual_rms: float
+    residual_max: float
+    shear_correlation: float
+    shear_coefficient: float
+    shear_leverage: float
+    axis_visibility: float
+    arc_half_angle: float
+    converged: bool
+    iterations: int
+    z_min: float
+    z_max: float
+    fitted_at: float
+
+    @property
+    def quantity(self) -> FittedQuantity:
+        return FittedQuantity.CYLINDER_DIAMETER
+
+    @property
+    def diameter(self) -> float:
+        """Twice the radius - the quantity a caliper across the cylinder actually reads."""
+        return 2.0 * self.radius
+
+    @property
+    def fitted_value(self) -> float | None:
+        return self.diameter
+
+    @property
+    def fit_uncertainty(self) -> float:
+        """The RMS residual, doubled because a diameter spans two surfaces.
+
+        Not divided by the square root of the point count, for the same reason
+        as :attr:`SphereFit.fit_uncertainty`: structured-light depth noise is
+        correlated across neighbouring pixels, so that division would assume an
+        independence the noise does not have.
+        """
+        return 2.0 * self.residual_rms
+
+    @property
+    def axis_shear_visible(self) -> bool:
+        """Whether this axis's orientation could show a shear at all, coverage aside."""
+        return self.axis_visibility >= MIN_CYLINDER_AXIS_VISIBILITY
+
+    @property
+    def shear_indicator_reliable(self) -> bool:
+        """Whether the axis orientation and the coverage both give the indicator something to see.
+
+        Both gates are necessary and neither is sufficient alone. An upright
+        axis seen through a narrow arc has the right orientation but not the
+        coverage; a horizontal axis seen all the way around has the coverage
+        but the wrong orientation. Either failure means a quiet reading is
+        silence, not a clean bill of health.
+        """
+        return self.axis_shear_visible and self.shear_leverage >= MIN_CYLINDER_SHEAR_LEVERAGE
+
+    @property
+    def shear_detected(self) -> bool:
+        """Whether the residual lies along the shear direction, and could be seen to."""
+        return (
+            self.shear_indicator_reliable
+            and abs(self.shear_correlation) >= CYLINDER_SHEAR_CORRELATION_THRESHOLD
+        )
+
+    @property
+    def well_conditioned(self) -> bool:
+        """Whether the points sweep enough of the circle to fix centre and radius apart.
+
+        The same conditioning problem as :attr:`SphereFit.well_conditioned`, in
+        one fewer dimension: over a narrow arc a larger circle pushed further
+        from the axis fits the same points. :data:`MIN_CAP_HALF_ANGLE` is reused
+        rather than duplicated under a new name, because it already means
+        exactly this.
+        """
+        return self.arc_half_angle >= MIN_CAP_HALF_ANGLE
+
+    @property
+    def inconclusive_reasons(self) -> tuple[str, ...]:
+        reasons: list[str] = []
+        if self.shear_detected:
+            reasons.append(
+                f"the cylinder's radial residual lies along the x-z shear direction (correlation "
+                f"{self.shear_correlation:+.3f}, at or past the "
+                f"{CYLINDER_SHEAR_CORRELATION_THRESHOLD} threshold), consistent with a shear of "
+                f"about {self.shear_coefficient:+.4f} x per z. The fitted diameter is then a "
+                "measurement of the target convolved with an unknown shear, not of the target"
+            )
+        if not self.axis_shear_visible:
+            reasons.append(
+                f"the fitted axis has a y-component of {self.axis_visibility:.3f}, below the "
+                f"{MIN_CYLINDER_AXIS_VISIBILITY} floor. An x-z shear moves points only within "
+                "the x-z plane, and sliding a cylinder along its own axis reproduces the same "
+                "surface undistorted; an axis this close to the x-z plane cannot show the fault "
+                "whatever the coverage, so the indicator is quiet because it could not have seen "
+                "anything, not because there is nothing there"
+            )
+        elif self.shear_leverage < MIN_CYLINDER_SHEAR_LEVERAGE:
+            reasons.append(
+                f"the points have a shear leverage of {self.shear_leverage:.4f}, below the "
+                f"{MIN_CYLINDER_SHEAR_LEVERAGE} floor, even though the axis orientation could "
+                "show a shear in principle: the visible arc is too narrow for the residual to "
+                "carry the signal"
+            )
+        if not self.well_conditioned:
+            reasons.append(
+                f"the points sweep an arc of half-angle {self.arc_half_angle:.3f} rad, below "
+                f"the {MIN_CAP_HALF_ANGLE} rad floor. Over an arc that narrow a larger circle "
+                "pushed further from the axis fits the same points, so the diameter is weakly "
+                "determined however small the residual is"
+            )
+        if not self.converged:
+            reasons.append(
+                f"the geometric refinement did not converge within {MAX_REFINEMENT_ITERATIONS} "
+                "iterations; the reported axis, centre and radius are the last iterate, and "
+                "their residual is not a minimum anything was found at"
+            )
+        return tuple(reasons)
+
+    @property
+    def does_not_establish(self) -> tuple[str, ...]:
+        return (
+            "the shear indicator identifies no cause. An x-z cross term in the radial residual "
+            "is what a wrong principal point produces, and also what a genuinely elliptical "
+            "cross-section, an x-z coupling in the depth model, or lens distortion over this "
+            "part of the frame would produce; this fit separates structured residual from noise "
+            "and does not attribute it",
+            "the indicator's visibility depends on how the axis happens to be oriented, which is "
+            "a fact about how the target was placed and not about the scanner: an axis pointed "
+            "across the frame or straight at the camera is blind to this fault regardless of how "
+            "carefully the cylinder was measured, which is why the axis orientation is checked "
+            "separately from how much of the circle the points cover",
+            "the observed half-length is only what these points span; a partial view of a longer "
+            "cylinder, or one whose ends were never in frame, underreports it the same way a "
+            "spherical cap underreports whether a sphere fit has seen the whole ball",
+        )
+
+    @property
+    def limitations(self) -> tuple[str, ...]:
+        return (
+            "the fitted axis, centre and radius minimise the sum of squared radial residuals "
+            "over exactly the points given, with no weighting: a denser patch of the target "
+            "pulls the fit toward itself",
+            "the axis is chosen from three covariance-derived starting directions - all three "
+            "eigenvectors of the centred covariance - by refining each and keeping whichever "
+            "converges to the smaller residual. A point set shaped so that none of the three "
+            "starting directions is close to the true axis is not guaranteed to find it",
+            "the reported uncertainty is twice the RMS residual and is not divided by the square "
+            "root of the point count, for the same reason as the sphere fit: structured-light "
+            "speckle is correlated across neighbours, not independent",
+            *self.does_not_establish,
+        )
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "quantity": str(self.quantity),
+            "axis": list(self.axis),
+            "centre": list(self.centre),
+            "radius": self.radius,
+            "diameter": self.diameter,
+            "half_length": self.half_length,
+            "point_count": self.point_count,
+            "residual": {
+                "rms": self.residual_rms,
+                "max": self.residual_max,
+                "note": (
+                    "signed radial residual, distance from the fitted axis minus the fitted "
+                    "radius, on whatever scale the input points are on"
+                ),
+            },
+            "shear_indicator": {
+                "correlation": self.shear_correlation,
+                "coefficient": self.shear_coefficient,
+                "explained_fraction": self.shear_correlation**2,
+                "leverage": self.shear_leverage,
+                "leverage_floor": MIN_CYLINDER_SHEAR_LEVERAGE,
+                "axis_visibility": self.axis_visibility,
+                "axis_visibility_floor": MIN_CYLINDER_AXIS_VISIBILITY,
+                "threshold": CYLINDER_SHEAR_CORRELATION_THRESHOLD,
+                "axis_shear_visible": self.axis_shear_visible,
+                "reliable": self.shear_indicator_reliable,
+                "detected": self.shear_detected,
+                "model": "signed radial residual ~ coefficient * dx * dz / radius",
+                "note": (
+                    "the coefficient names a size, not a cause, and is only meaningful when "
+                    "axis_shear_visible is true: an axis lying in the x-z plane cannot produce "
+                    "this signature at any shear magnitude, so a quiet reading there is not "
+                    "evidence of a correct principal point"
+                ),
+            },
+            "conditioning": {
+                "arc_half_angle": self.arc_half_angle,
+                "arc_half_angle_floor": MIN_CAP_HALF_ANGLE,
                 "well_conditioned": self.well_conditioned,
                 "converged": self.converged,
                 "iterations": self.iterations,
@@ -1313,6 +1624,408 @@ def fit_sphere(points: Sequence[Point]) -> SphereFit:
         shear_coefficient=coefficient,
         shear_leverage=leverage,
         cap_half_angle=cap_half_angle,
+        converged=converged,
+        iterations=iterations,
+        z_min=z_min,
+        z_max=z_max,
+        fitted_at=fitted_at,
+    )
+
+
+def _unit(vector: Point, *, what: str) -> Point:
+    """A unit vector in the direction of ``vector``, refused with this module's own vocabulary.
+
+    Deliberately not :func:`scanner3d.geometry.normalize`: that raises
+    ``DegenerateVector``, a ``GeometryNotAllowed``, and this module never lets a
+    foreign exception hierarchy escape a refusal - see :class:`NonFiniteInput`.
+    """
+    length = norm(vector)
+    if length <= 0.0:
+        raise DegenerateFit(f"{what}: a direction of length {length!r} has no reliable orientation")
+    return (vector[0] / length, vector[1] / length, vector[2] / length)
+
+
+def _perp_basis(axis: Point) -> tuple[Point, Point]:
+    """An orthonormal pair spanning the plane perpendicular to a unit ``axis``.
+
+    The reference vector is chosen away from whichever component of ``axis`` is
+    largest, so the cross product below is never taken between two nearly
+    parallel vectors.
+    """
+    reference = (1.0, 0.0, 0.0) if abs(axis[0]) < 0.9 else (0.0, 1.0, 0.0)
+    first = _unit(cross(axis, reference), what="cylinder fit: perpendicular basis")
+    second = cross(axis, first)  # already unit length: axis and first are orthonormal
+    return first, second
+
+
+def _algebraic_circle(points: Sequence[tuple[float, float]]) -> tuple[float, float, float]:
+    """Kasa's linear circle fit - the 2-D twin of :func:`_algebraic_sphere`.
+
+    Used on points already projected into the plane perpendicular to a
+    candidate axis. The plane is centred on the origin of that projection by
+    construction (the projected points are offsets from a point already near
+    the input cloud's own mean), for the same conditioning reason
+    :func:`_algebraic_sphere` centres first.
+    """
+    count = len(points)
+    squared = [u * u + v * v for u, v in points]
+    su = math.fsum(u for u, _ in points)
+    sv = math.fsum(v for _, v in points)
+    suu = math.fsum(u * u for u, _ in points)
+    suv = math.fsum(u * v for u, v in points)
+    svv = math.fsum(v * v for _, v in points)
+    matrix = [
+        [4.0 * suu, 4.0 * suv, 2.0 * su],
+        [4.0 * suv, 4.0 * svv, 2.0 * sv],
+        [2.0 * su, 2.0 * sv, float(count)],
+    ]
+    rhs = [
+        2.0 * math.fsum(u * s for (u, _), s in zip(points, squared, strict=True)),
+        2.0 * math.fsum(v * s for (_, v), s in zip(points, squared, strict=True)),
+        math.fsum(squared),
+    ]
+    cu, cv, gauge = _solve(matrix, rhs, what="cylinder fit (circle)")
+    squared_radius = gauge + cu * cu + cv * cv
+    if squared_radius <= 0.0:
+        raise DegenerateFit(
+            f"cylinder fit: the algebraic circle solution implies a squared radius of "
+            f"{squared_radius!r}. The points projected into this plane do not lie on any circle "
+            "this fit can express - collinear projected points are the usual cause"
+        )
+    return cu, cv, math.sqrt(squared_radius)
+
+
+def _cylinder_residuals(
+    centred: Sequence[Point], centre: Point, axis: Point, radius: float
+) -> list[float]:
+    """Signed radial residual - distance from the axis line minus the radius - per point."""
+    cx, cy, cz = centre
+    ax, ay, az = axis
+    residuals = []
+    for point in centred:
+        dx, dy, dz = point[0] - cx, point[1] - cy, point[2] - cz
+        axial = dx * ax + dy * ay + dz * az
+        px, py, pz = dx - axial * ax, dy - axial * ay, dz - axial * az
+        residuals.append(math.sqrt(px * px + py * py + pz * pz) - radius)
+    return residuals
+
+
+def _fit_cylinder_candidate(
+    centred: Sequence[Point], axis_guess: Point
+) -> tuple[Point, Point, float, bool, int]:
+    """Refine one candidate axis direction to a local optimum of the geometric residual.
+
+    Five parameters: two for the axis direction, two for the centre's position
+    in the plane perpendicular to it, one for the radius. Sliding the centre
+    along the axis changes nothing about an infinite cylinder's surface, so
+    that freedom is never given to the solver - both the algebraic start and
+    every Gauss-Newton step move the centre only within the plane perpendicular
+    to the axis at hand.
+
+    Mirrors :func:`_refine_sphere`'s Gauss-Newton exactly in spirit: the
+    algebraic fit weights points by distance from a fixed axis, which biases
+    the radius over a partial view the same way the algebraic sphere fit does,
+    so the geometric refinement is not optional.
+
+    Returns the refined axis, centre, radius, whether refinement converged, and
+    how many iterations it took. Raises :class:`DegenerateFit` if the points
+    projected into the perpendicular plane are degenerate, if the radius is
+    driven non-positive, or if a point lands exactly on the fitted axis.
+    """
+    axis = axis_guess
+    first, second = _perp_basis(axis)
+    cu, cv, radius = _algebraic_circle([(dot(p, first), dot(p, second)) for p in centred])
+    centre = (
+        cu * first[0] + cv * second[0],
+        cu * first[1] + cv * second[1],
+        cu * first[2] + cv * second[2],
+    )
+
+    converged = False
+    iterations = 0
+    for iteration in range(1, MAX_REFINEMENT_ITERATIONS + 1):
+        iterations = iteration
+        first, second = _perp_basis(axis)
+        ax, ay, az = axis
+        f1, f2, f3 = first
+        s1, s2, s3 = second
+        cx, cy, cz = centre
+        normal_matrix = [[0.0] * 5 for _ in range(5)]
+        rhs = [0.0] * 5
+        current_sse = 0.0
+        for point in centred:
+            dx, dy, dz = point[0] - cx, point[1] - cy, point[2] - cz
+            axial = dx * ax + dy * ay + dz * az
+            px, py, pz = dx - axial * ax, dy - axial * ay, dz - axial * az
+            radial = math.sqrt(px * px + py * py + pz * pz)
+            if radial <= 0.0:
+                raise DegenerateFit(
+                    "cylinder fit: a point coincides with the fitted axis, so it has no radial "
+                    "direction and the fit has no gradient there"
+                )
+            p1 = (px * f1 + py * f2 + pz * f3) / radial
+            p2 = (px * s1 + py * s2 + pz * s3) / radial
+            residual = radial - radius
+            current_sse += residual * residual
+            row = (p1, p2, axial * p1, axial * p2, 1.0)
+            for i in range(5):
+                for j in range(i, 5):
+                    normal_matrix[i][j] += row[i] * row[j]
+                rhs[i] += row[i] * residual
+        for i in range(5):
+            for j in range(i):
+                normal_matrix[i][j] = normal_matrix[j][i]
+        step = _solve(normal_matrix, rhs, what="cylinder refinement")
+
+        # A full Newton step can overshoot: the axis-tangent columns above
+        # scale with a point's axial distance from the centre, so a point set
+        # with a wide axial span can leave the normal equations badly scaled
+        # while still far from the optimum. Halve the step until it actually
+        # reduces the sum of squared residuals - standard damped Gauss-Newton
+        # - rather than applying it outright; see MAX_REFINEMENT_BACKTRACKS
+        # for the divergence this was measured to fix.
+        scale = 1.0
+        trial_centre, trial_axis, trial_radius = centre, axis, radius
+        improved = False
+        for _attempt in range(MAX_REFINEMENT_BACKTRACKS):
+            trial_radius = radius + scale * step[4]
+            if trial_radius > 0.0:
+                trial_centre = (
+                    centre[0] + scale * step[0] * f1 + scale * step[1] * s1,
+                    centre[1] + scale * step[0] * f2 + scale * step[1] * s2,
+                    centre[2] + scale * step[0] * f3 + scale * step[1] * s3,
+                )
+                trial_axis = _unit(
+                    (
+                        axis[0] + scale * step[2] * f1 + scale * step[3] * s1,
+                        axis[1] + scale * step[2] * f2 + scale * step[3] * s2,
+                        axis[2] + scale * step[2] * f3 + scale * step[3] * s3,
+                    ),
+                    what="cylinder refinement",
+                )
+                trial_sse = math.fsum(
+                    r * r
+                    for r in _cylinder_residuals(centred, trial_centre, trial_axis, trial_radius)
+                )
+                if trial_sse <= current_sse:
+                    improved = True
+                    break
+            scale *= 0.5
+        if not improved:
+            # No shrinkage of this step improves the fit: the current iterate
+            # is already a stationary point of the geometric residual.
+            converged = True
+            break
+        step_size = (
+            math.hypot(scale * step[0], scale * step[1])
+            + math.hypot(scale * step[2], scale * step[3])
+            + abs(scale * step[4])
+        )
+        centre, axis, radius = trial_centre, trial_axis, trial_radius
+        if step_size <= REFINEMENT_STEP_TOLERANCE * radius:
+            converged = True
+            break
+    return axis, centre, radius, converged, iterations
+
+
+def fit_cylinder(points: Sequence[Point]) -> CylinderFit:
+    """Least-squares cylinder, with its residual and its shear indicator.
+
+    A cylinder is fitted by trying all three directions the centred covariance
+    offers as the axis, refining each with Gauss-Newton on the true radial
+    residual, and keeping whichever converges to the smaller residual. An
+    elongated target's axis is the direction of greatest spread and a squat
+    one's is the direction of least - but a squat target seen as a narrow
+    single-view arc rather than a full circumference can have those two
+    *radial* directions themselves at very unequal variance, which can leave
+    the true axis at the *middle* eigenvalue rather than either extreme.
+    Measured directly on a rendered squat cylinder: trying only the two
+    extremes converged on a residual over 1000 times the true radius, while
+    the middle direction was the true axis all along. Trying all three, and
+    keeping the one that actually explains the points, is what
+    :attr:`CylinderFit.limitations` means by "two covariance-derived starting
+    directions" being not quite enough on their own; three are tried here.
+
+    Two facts drive the shear indicator, and both are read from the fitted axis
+    before any correlation is computed:
+
+    * A shear ``x += k * z`` moves points only within the x-z plane, and
+      sliding a cylinder along its own axis reproduces the identical surface.
+      So an axis lying in the x-z plane - across the frame or straight at the
+      camera - cannot show this fault at any coverage, and
+      :attr:`CylinderFit.axis_visibility` names how far the fitted axis sits
+      from that plane.
+    * Coverage still matters exactly as it does for :func:`fit_sphere`: even an
+      upright axis needs enough of the circle swept out for the residual to
+      carry the shear's shape rather than have it absorbed by the fit's own
+      parameters.
+
+    Both are required for :attr:`CylinderFit.shear_indicator_reliable`, and a
+    quiet reading when either is missing is reported as unable to see, never as
+    clean - the discipline ``docs/shear-detection-limits.md`` records the
+    sphere fit having had to learn.
+
+    The residual, the axis, the centre, the radius and the half-length are all
+    on whatever scale the input points are on. Nothing here names a unit for
+    any of them.
+    """
+    _ensure_point_set(points, MIN_CYLINDER_POINTS, "cylinder fit")
+    fitted_at = time.time()
+
+    origin = _mean(points)
+    centred = [subtract(point, origin) for point in points]
+    count = len(points)
+
+    covariance = [
+        [math.fsum(p[i] * p[j] for p in centred) / count for j in range(3)] for i in range(3)
+    ]
+    # Eigenvalues themselves are not needed: all three axis candidates below
+    # are tried and refined, and whichever produces the smaller residual is
+    # kept, rather than trusting one heuristic pick from the eigenvalue
+    # ordering alone. Trying only the two extremes (greatest spread, least)
+    # is not enough - a squat target seen as a narrow single-view arc can put
+    # its true axis at the middle eigenvalue, because the arc's own two
+    # radial directions end up at very unequal variance. See fit_cylinder's
+    # docstring for the measurement that found this.
+    _, directions = _symmetric_eigen(covariance)
+
+    best: tuple[Point, Point, float, bool, int] | None = None
+    best_rank: tuple[int, float] = (2, math.inf)  # worse than any real (0 or 1, finite) rank
+    failures: list[str] = []
+    for axis_guess in directions:
+        try:
+            candidate = _fit_cylinder_candidate(centred, axis_guess)
+        except DegenerateFit as failure:
+            failures.append(str(failure))
+            continue
+        axis_c, centre_c, radius_c, converged_c, _ = candidate
+        trial_residuals = _cylinder_residuals(centred, centre_c, axis_c, radius_c)
+        trial_rms = math.sqrt(math.fsum(r * r for r in trial_residuals) / count)
+        # A converged candidate always beats an unconverged one; between two of
+        # the same convergence status, the smaller residual wins.
+        rank = (0 if converged_c else 1, trial_rms)
+        if rank < best_rank:
+            best, best_rank = candidate, rank
+    if best is None:
+        raise DegenerateFit(
+            "cylinder fit: no candidate axis produced a determinate circle fit ("
+            + "; ".join(failures)
+            + ")"
+        )
+    axis, centre, radius, converged, iterations = best
+
+    residuals = _cylinder_residuals(centred, centre, axis, radius)
+    residual_rms = math.sqrt(math.fsum(r * r for r in residuals) / count)
+    residual_max = max(abs(r) for r in residuals)
+
+    first, second = _perp_basis(axis)
+    offsets = [subtract(point, centre) for point in centred]
+    axial_values = [dot(offset, axis) for offset in offsets]
+    perp_vectors = [
+        (offset[0] - axial * axis[0], offset[1] - axial * axis[1], offset[2] - axial * axis[2])
+        for offset, axial in zip(offsets, axial_values, strict=True)
+    ]
+    radial_values = [norm(perp) for perp in perp_vectors]
+    if any(value <= 0.0 for value in radial_values):
+        raise DegenerateFit(
+            "cylinder fit: a point coincides with the fitted axis, so it has no radial direction "
+            "and the fit has no gradient there"
+        )
+    unit_perps = [
+        (perp[0] / radial, perp[1] / radial, perp[2] / radial)
+        for perp, radial in zip(perp_vectors, radial_values, strict=True)
+    ]
+
+    # The shear model, exactly as in fit_sphere: a signed radial residual with
+    # an x-z cross term is what a wrong principal point leaves behind - but
+    # only after the part of that shape this fit's own five parameters could
+    # already absorb is removed. Skipping that removal is precisely the defect
+    # docs/shear-detection-limits.md records the sphere fit having shipped
+    # with: over a partial view the raw dx*dz shape is mostly reachable by the
+    # fit's own centre, axis and radius, and reading it raw drives the
+    # correlation toward zero regardless of how large the shear actually is.
+    def _column(which: int) -> Iterator[float]:
+        if which == 4:
+            return (1.0 for _ in unit_perps)
+        basis = first if which in (0, 2) else second
+        if which < 2:
+            return (dot(perp, basis) for perp in unit_perps)
+        return (
+            axial * dot(perp, basis) for axial, perp in zip(axial_values, unit_perps, strict=True)
+        )
+
+    shape = [offset[0] * offset[2] / radius for offset in offsets]
+    for which in range(5):
+        column_energy = math.fsum(value * value for value in _column(which))
+        if column_energy <= 0.0:
+            continue
+        cross_term = math.fsum(w * value for w, value in zip(shape, _column(which), strict=True))
+        projection = cross_term / column_energy
+        if projection == 0.0:
+            continue
+        for index, value in enumerate(_column(which)):
+            shape[index] -= projection * value
+
+    shape_energy = math.fsum(w * w for w in shape)
+    residual_energy = math.fsum(r * r for r in residuals)
+    cross_sum = math.fsum(r * w for r, w in zip(residuals, shape, strict=True))
+    if shape_energy <= 0.0 or residual_energy <= 0.0:
+        correlation, coefficient = 0.0, 0.0
+    else:
+        correlation = cross_sum / math.sqrt(shape_energy * residual_energy)
+        coefficient = cross_sum / shape_energy
+    leverage = math.sqrt(shape_energy / count) / radius
+
+    axis_visibility = abs(axis[1])
+
+    # How much of the circle the points actually sweep, exactly as fit_sphere
+    # measures how much of the sphere they cover - the same conditioning
+    # problem, one dimension down.
+    mean_perp = _mean(unit_perps)
+    mean_length = norm(mean_perp)
+    if mean_length <= 1e-9:
+        arc_half_angle = math.pi
+    else:
+        arc_axis = (
+            mean_perp[0] / mean_length,
+            mean_perp[1] / mean_length,
+            mean_perp[2] / mean_length,
+        )
+        arc_half_angle = max(
+            math.acos(max(-1.0, min(1.0, dot(perp, arc_axis)))) for perp in unit_perps
+        )
+
+    # The centre is repositioned along the axis to the midpoint of the observed
+    # axial extent - a canonical, physically sensible point - which changes
+    # nothing about the radius or the residual: sliding a point along the axis
+    # line does not move it off (or onto) the cylinder's surface.
+    axial_min, axial_max = min(axial_values), max(axial_values)
+    half_length = (axial_max - axial_min) / 2.0
+    midpoint = (axial_min + axial_max) / 2.0
+    positioned_centre = (
+        centre[0] + midpoint * axis[0],
+        centre[1] + midpoint * axis[1],
+        centre[2] + midpoint * axis[2],
+    )
+
+    z_min, z_max = _z_span(points)
+    return CylinderFit(
+        axis=_oriented(axis),
+        centre=(
+            positioned_centre[0] + origin[0],
+            positioned_centre[1] + origin[1],
+            positioned_centre[2] + origin[2],
+        ),
+        radius=radius,
+        half_length=half_length,
+        point_count=count,
+        residual_rms=residual_rms,
+        residual_max=residual_max,
+        shear_correlation=correlation,
+        shear_coefficient=coefficient,
+        shear_leverage=leverage,
+        axis_visibility=axis_visibility,
+        arc_half_angle=arc_half_angle,
         converged=converged,
         iterations=iterations,
         z_min=z_min,
