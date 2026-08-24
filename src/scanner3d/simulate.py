@@ -180,6 +180,92 @@ class Plane:
 
 
 @dataclass(frozen=True, slots=True)
+class Cylinder:
+    """A finite cylinder with flat end caps: axis, radius, half-length.
+
+    Present because a sphere is the textbook calibration target and most people
+    do not own one, whereas almost everyone owns a can, a dowel, a socket or a
+    battery. What a cylinder can establish depends entirely on how it is
+    oriented relative to the camera, which is measured in
+    ``docs/capture-checklist.md`` rather than assumed here.
+    """
+
+    centre: Point
+    axis: Point
+    radius: float
+    half_length: float
+
+    #: Unit axis, precomputed: every ray needs it and there are 256000 per frame.
+    _unit: Point = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if not (self.radius > 0.0) or not math.isfinite(self.radius):
+            raise ShapeUnusable(f"cylinder radius must be positive and finite, got {self.radius!r}")
+        if not (self.half_length > 0.0) or not math.isfinite(self.half_length):
+            raise ShapeUnusable(f"cylinder half-length must be positive, got {self.half_length!r}")
+        object.__setattr__(self, "_unit", normalize(self.axis))
+
+    def intersect(self, direction: Point) -> float | None:
+        a = self._unit
+        # Ray from the origin: P(t) = t * direction. Work relative to centre.
+        w = (-self.centre[0], -self.centre[1], -self.centre[2])
+        d_axial, w_axial = dot(direction, a), dot(w, a)
+        d_perp = (
+            direction[0] - d_axial * a[0],
+            direction[1] - d_axial * a[1],
+            direction[2] - d_axial * a[2],
+        )
+        w_perp = (w[0] - w_axial * a[0], w[1] - w_axial * a[1], w[2] - w_axial * a[2])
+
+        best: float | None = None
+        qa = dot(d_perp, d_perp)
+        if qa > 1e-18:
+            qb = 2.0 * dot(d_perp, w_perp)
+            qc = dot(w_perp, w_perp) - self.radius * self.radius
+            disc = qb * qb - 4.0 * qa * qc
+            if disc >= 0.0:
+                root = math.sqrt(disc)
+                for t in ((-qb - root) / (2.0 * qa), (-qb + root) / (2.0 * qa)):
+                    on_body = t > 0.0 and abs(w_axial + t * d_axial) <= self.half_length
+                    if on_body and (best is None or t < best):
+                        best = t
+        # The two flat caps.
+        if abs(d_axial) > 1e-12:
+            for sign in (-1.0, 1.0):
+                t = (sign * self.half_length - w_axial) / d_axial
+                if t <= 0.0:
+                    continue
+                hit = (
+                    t * direction[0] - self.centre[0],
+                    t * direction[1] - self.centre[1],
+                    t * direction[2] - self.centre[2],
+                )
+                axial = dot(hit, a)
+                radial_sq = dot(hit, hit) - axial * axial
+                if radial_sq <= self.radius * self.radius and (best is None or t < best):
+                    best = t
+        return best
+
+    def transformed(self, pose: Rigid) -> Cylinder:
+        spin = Rigid.of(pose.rotation, (0.0, 0.0, 0.0))
+        return Cylinder(
+            centre=pose.apply(self.centre),
+            axis=spin.apply(self._unit),
+            radius=self.radius,
+            half_length=self.half_length,
+        )
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "kind": "cylinder",
+            "centre": list(self.centre),
+            "axis": list(self._unit),
+            "radius": self.radius,
+            "half_length": self.half_length,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class Box:
     """An oriented box: an axis-aligned extent carried by a pose.
 

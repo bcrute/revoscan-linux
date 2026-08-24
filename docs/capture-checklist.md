@@ -46,10 +46,15 @@ cube. Much smaller and you get too few returns; much larger and it will not fit.
 either a real property of this sensor or a wrong calibration value, and
 distinguishing those is capture 2 below.
 
-## Capture 1 — scale, with a sphere
+## Capture 1 — scale, with a sphere or an upright cylinder
 
-**Object:** a sphere. A ball bearing, a marble, a smooth ball. Matte is better
-than shiny; a mirror-finish bearing may return almost nothing.
+**Object:** a sphere *or an upright cylinder*. A cylinder is the practical
+choice for most people, and it works — but only in one orientation. See
+[Using a cylinder instead](#using-a-cylinder-instead) below, which is measured
+rather than assumed.
+
+Matte is better than shiny; a mirror-finish bearing or a bare aluminium can may
+return almost nothing.
 
 **Why a sphere is the best single target:** its diameter is one number you can
 measure with calipers from any orientation, so there is no alignment error in
@@ -125,6 +130,41 @@ up for capture 3. The full history and measurements are in
 The static captures in steps 2–4 still matter regardless: they are what test
 **scale** at known distances, which does not need that coverage.
 
+## Using a cylinder instead
+
+Most people do not own a sphere. A cylinder works, and its diameter is just as
+good a caliper measurement — but **orientation decides whether it can detect a
+wrong principal point at all**, and the difference is total rather than
+marginal.
+
+Rendering a cylinder and deprojecting it with `cx` wrong by 278 px, then
+measuring how far the points move off the true surface:
+
+| Cylinder orientation | Points move by |
+| --- | --- |
+| **standing upright** (axis vertical) | **161.7% of its radius** |
+| lying down, across the view | 0.0025 — *identical to unsheared* |
+| end-on, circular face toward the camera | 0.0000 — *identical to unsheared* |
+
+**So stand it up.** Lying down, a cylinder is exactly as blind to this fault as
+a flat plate, because the shear slides it along its own length and the shape
+does not change at all. That is not a weak signal; it is no signal.
+
+Good candidates, in rough order of preference:
+
+- **A pill bottle, cardboard tube, candle, or plastic jar** — matte, right size,
+  stands up on its own.
+- **A soup or drink can** — good size (~66 units across) and a very clean
+  diameter to measure, but bare aluminium is shiny; a strip of masking tape or
+  a dusting of chalk fixes that and is standard practice.
+- **A dowel, socket, or large bolt** — fine if wide enough to fill a useful part
+  of the frame. Below about 40 units across you get too few returns.
+- **Avoid anything squat** (a coin, a puck, a jar lid): a cylinder shorter than
+  it is wide makes the axis hard to estimate from the points alone.
+
+Measure the **diameter** with calipers, five readings at different heights and
+rotations, and record all five — the spread is your uncertainty.
+
 ## Capture 2 — the principal point, by translation
 
 This is the experiment that decides whether `cx = 42.44` is real.
@@ -150,11 +190,26 @@ three or four steps.
 
 ## Capture 3 — the turntable sweep, for registration
 
-**Object: NOT the sphere.** This is the easiest mistake to make here. A sphere
-looks identical from every angle, so it carries no information about how far it
-rotated — registration would report a perfect, meaningless alignment. Use
-something clearly **asymmetric**: a small figurine, a bracket, a crumpled shape,
-a 3D print with distinct features. It must look different from every side.
+**Object: NOT the calibration target.** This is the easiest mistake to make
+here, and it applies to a cylinder just as much as to a sphere. A sphere looks
+identical from every angle. An upright cylinder standing on the turntable's own
+axis *also* looks identical from every angle, for the same reason — it is
+rotationally symmetric about the very axis you are turning it around. Either one
+carries no information about how far it rotated, and registration would report a
+perfect, meaningless alignment.
+
+Use something clearly **asymmetric**: a small figurine, a bracket, a crumpled
+shape, a 3D print with distinct features. It must look different from every side.
+
+Being asymmetric to the eye is not quite enough — it has to be asymmetric *about
+the rotation axis in use*. A rectangular block whose width and depth are equal
+is symmetric under a quarter turn and would defeat a 4-frame sweep, which is a
+mistake made and caught while writing the tests for this.
+
+**If the only suitable object you have is the cylinder**, place it clearly
+**off-centre** on the turntable. It then orbits the axis instead of spinning on
+it, and its position changes from frame to frame even though its shape does
+not.
 
 **Do:**
 1. Centre the object on the turntable, roughly at the median working distance.
