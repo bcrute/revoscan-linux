@@ -139,13 +139,26 @@ PLANE_REFLECTION: Matrix3 = (
 #: Words no assertion, message or serialised field in this module may contain.
 #: The depth scale's physical unit is unestablished on this device, so a
 #: transform built from it measures nothing nameable.
+#:
+#: The bare stems ``metre``/``meter`` cannot be listed on their own, because
+#: "parameter", "diameter" and "perimeter" all contain them and are legitimate
+#: prose. So each is listed twice: once preceded by a space, which catches the
+#: prose form, and once preceded by an underscore, which catches the far more
+#: likely form - a serialised field named ``translation_metres``. Listing only
+#: the spaced form left exactly that hole, and a field name is the shape this
+#: violation would actually take.
 FORBIDDEN_UNIT_WORDS = (
     "millimetre",
     "millimeter",
     "centimetre",
     "centimeter",
+    "micrometre",
+    "micrometer",
+    "micron",
     " metre",
     " meter",
+    "_metre",
+    "_meter",
     "inch",
     "_mm",
     "mm_",
@@ -203,6 +216,40 @@ def rms_radius(points: Sequence[Point]) -> float:
 
 def transformed(transform: Rigid, points: Sequence[Point]) -> tuple[Point, ...]:
     return tuple(transform.apply(point) for point in points)
+
+
+def covariance_condition(points: Sequence[Point]) -> float:
+    """Largest over smallest eigenvalue of the centred covariance.
+
+    Solved from the characteristic cubic in closed form (Smith's trigonometric
+    method) rather than by calling into :mod:`scanner3d.geometry`, so a claim
+    about how well conditioned a point set is does not rest on the same
+    eigensolver the module under test uses.
+
+    That closed form loses about half its significant digits when two eigenvalues
+    nearly coincide, so it is fit for comparing two well-separated, full-rank
+    sets - which is all it is used for here - and is *not* a substitute for the
+    module's Jacobi routine when the question is degeneracy. That difference is
+    the reason :func:`scanner3d.geometry.spanned_dimensions` uses Jacobi.
+    """
+    centre = centroid(points)
+    offsets = [subtract(point, centre) for point in points]
+    a = [[math.fsum(o[i] * o[j] for o in offsets) for j in range(3)] for i in range(3)]
+    p1 = a[0][1] ** 2 + a[0][2] ** 2 + a[1][2] ** 2
+    q = (a[0][0] + a[1][1] + a[2][2]) / 3.0
+    if p1 == 0.0:
+        diagonal = sorted((a[0][0], a[1][1], a[2][2]), reverse=True)
+        return diagonal[0] / diagonal[2]
+    p2 = (a[0][0] - q) ** 2 + (a[1][1] - q) ** 2 + (a[2][2] - q) ** 2 + 2.0 * p1
+    p = math.sqrt(p2 / 6.0)
+    b = [[(a[i][j] - (q if i == j else 0.0)) / p for j in range(3)] for i in range(3)]
+    half_det = determinant((tuple(b[0]), tuple(b[1]), tuple(b[2]))) / 2.0  # type: ignore[arg-type]
+    phi = math.acos(max(-1.0, min(1.0, half_det))) / 3.0
+    first = q + 2.0 * p * math.cos(phi)
+    third = q + 2.0 * p * math.cos(phi + 2.0 * math.pi / 3.0)
+    second = 3.0 * q - first - third
+    ordered = sorted((first, second, third), reverse=True)
+    return ordered[0] / ordered[2]
 
 
 # --- vector arithmetic and the refusals around it -----------------------------
@@ -1087,6 +1134,46 @@ def test_the_serialised_record_names_no_physical_unit():
     assert "rotation_angle_radians" in transform.as_dict()
 
 
+def test_the_unit_guard_would_actually_catch_a_unit_named_field():
+    """The guard checked against the shapes the violation would really take.
+
+    A blacklist that happens to miss the realistic spelling is worse than none,
+    because it reads as enforcement while enforcing nothing. Every name below is
+    a plausible field somebody could add to :meth:`Rigid.as_dict` in good faith,
+    and each has to trip at least one entry in the list.
+
+    The spaced ``" metre"``/``" meter"`` entries alone did not catch any of the
+    snake_case forms - which is the form a serialised field actually takes - so
+    the underscore variants were added.
+    """
+    plausible_violations = (
+        "translation_metres",
+        "translation_meters",
+        "distance_meters",
+        "length_metres",
+        "size_micrometres",
+        "translation_millimetres",
+        "translation_mm",
+        "offset_in_mm",
+        "scale_cm",
+        "width_inches",
+        "depth_centimeters",
+    )
+    for name in plausible_violations:
+        payload = json.dumps({name: 1.0}).lower()
+        assert any(word in payload for word in FORBIDDEN_UNIT_WORDS), (
+            f"{name!r} is a physical-unit field name and the guard lets it through"
+        )
+
+    # And the guard must not fire on legitimate prose that merely contains the
+    # stems, or the next reader will delete it as a nuisance.
+    for innocent in ("parameter", "diameter", "perimeter", "rotation_angle_radians"):
+        payload = json.dumps({innocent: 1.0}).lower()
+        assert not any(word in payload for word in FORBIDDEN_UNIT_WORDS), (
+            f"{innocent!r} is not a unit and the guard must not flag it"
+        )
+
+
 def test_the_module_docstring_disclaims_the_units_it_does_not_establish():
     """The claim travels with the code, so a reader of the module cannot miss it."""
     import scanner3d.geometry as geometry
@@ -1168,6 +1255,42 @@ def test_coincident_correspondences_are_refused_as_determining_no_rotation():
     with pytest.raises(CorrespondenceUnusable) as raised:
         rigid_from_correspondences(repeated, repeated)
     assert "span only 0 dimension" in str(raised.value)
+
+
+def test_the_rank_gate_examines_the_source_set_and_not_the_target():
+    """Which of the two sets is measured is a real decision, so pin it.
+
+    Every other degeneracy test here pairs a degenerate source with a target
+    derived from it by a rigid motion - and rigid motion preserves rank, so both
+    sets are equally degenerate and the two choices are indistinguishable. That
+    left the gate free to read either one without any test noticing.
+
+    It matters in both directions:
+
+    * A collinear *source* is genuinely underdetermined - rotation about that
+      line changes nothing - and must be refused however well-spread the target
+      is. A gate reading the target would accept it and return a confident,
+      arbitrary rotation.
+    * A collinear *target* against a well-spread source is not underdetermined
+      at all; it is simply data that no rigid transform fits. That must come back
+      as a large residual, not as a refusal whose message claims the *source* was
+      degenerate - which would be a false statement about the caller's input.
+    """
+    spread = ((1.0, 0.0, 0.0), (0.0, 2.0, 0.0), (0.0, 0.0, 3.0), (-1.5, 0.5, 1.0))
+    line = tuple((float(i), 2.0 * float(i), -3.0 * float(i)) for i in range(4))
+    assert spanned_dimensions(spread) == 3
+    assert spanned_dimensions(line) == 1
+
+    # Degenerate source, well-spread target: refused, because the rotation
+    # really is undetermined.
+    with pytest.raises(CorrespondenceUnusable) as raised:
+        rigid_from_correspondences(line, spread)
+    assert "span only 1 dimension" in str(raised.value)
+
+    # Well-spread source, degenerate target: accepted, and the mismatch is
+    # reported honestly as a residual rather than as a refusal.
+    fitted = rigid_from_correspondences(spread, line)
+    assert alignment_rmse(spread, line, fitted) > 1.0
 
 
 def test_a_planar_set_is_still_accepted_because_rank_two_determines_a_rotation():
@@ -1278,21 +1401,31 @@ def real_cloud() -> tuple[Point, ...]:
     return tuple(camera_points(conversion))[::REAL_FRAME_STRIDE]
 
 
-def test_a_known_pose_is_recovered_from_a_real_cloud_that_is_nearly_a_plane():
+def test_a_known_pose_is_recovered_from_a_real_less_well_conditioned_cloud():
     """Conditioning, not accuracy - and this file can assert nothing else.
 
-    A real depth cloud is not the well-spread blob the synthetic tests use. It is
-    a thin shell at roughly one distance, occupying a narrow solid angle, which
-    makes the cross-covariance far worse conditioned than anything constructed by
-    hand. A closed-form solver that is fine on a tidy set can degrade on this one.
+    A real depth cloud is not the well-spread blob the synthetic tests use, and
+    its cross-covariance is measurably worse conditioned. How much worse is
+    asserted below rather than asserted in prose, because the earlier wording
+    here ("nearly a plane", "far worse conditioned") overstated it: the cloud's
+    thinnest principal extent is about 14% of its thickest, which is a squat
+    solid, not a plane. The honest claim is the comparative one - worse than the
+    hand-built set, by a factor this test measures - and that is what is checked.
 
-    So: a known transform is applied to the real points, the solver is asked to
-    recover it, and the residual is reported alongside. Not one assertion here
-    concerns whether the cloud's coordinates are correct, or what they measure.
-    Nothing in this repository has established either.
+    A closed-form solver that is fine on a tidy set can degrade on a worse
+    conditioned one, so: a known transform is applied to the real points, the
+    solver is asked to recover it, and the residual is reported alongside. Not
+    one assertion here concerns whether the cloud's coordinates are correct, or
+    what they measure. Nothing in this repository has established either.
     """
     cloud = real_cloud()
     assert len(cloud) >= 3
+
+    # The premise, measured rather than asserted in prose. Both sets are full
+    # rank, and the real one is the worse conditioned of the two.
+    assert spanned_dimensions(cloud) == 3
+    assert spanned_dimensions(CORRESPONDENCE_POINTS) == 3
+    assert covariance_condition(cloud) > covariance_condition(CORRESPONDENCE_POINTS)
 
     extent = max(distance(point, cloud[0]) for point in cloud)
     known = rotation_about_axis((0.2, 1.0, -0.4), 0.35, through=centroid(cloud))

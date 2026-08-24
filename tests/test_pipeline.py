@@ -41,7 +41,7 @@ from scanner3d.fusion import fuse
 from scanner3d.geometry import Rigid, pose_difference
 from scanner3d.mesh import reconstruct
 from scanner3d.registration import register_turntable, voxel_downsample
-from scanner3d.simulate import Box, Sphere, points_of, turntable_sweep
+from scanner3d.simulate import Box, Shape, Sphere, points_of, turntable_sweep
 
 #: Where the object sits: the median working distance measured across the nine
 #: committed frames.
@@ -67,7 +67,7 @@ def _at(point: tuple[float, float, float]) -> Rigid:
     return Rigid.of(((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)), point)
 
 
-def _scene() -> list[object]:
+def _scene() -> list[Shape]:
     """An asymmetric scene: a box off-square in x and z, plus an off-axis sphere.
 
     The box alone is nearly all flat faces, where point-to-point ICP can slide
