@@ -1,4 +1,15 @@
 {
+  "capture_reliability": {
+    "finding": "Back-to-back captures fail. The device needs recovery time between them, and without it the kernel flags the buffer V4L2_BUF_FLAG_ERROR.",
+    "measured": {
+      "fifteen_second_gap": "3/3",
+      "five_second_gap": "3/3",
+      "no_gap": "1/3 complete"
+    },
+    "not_the_usb_link": "Distinct from the hub problem. On the direct connection there were ZERO disconnects and the short frames continued at the same rate until a gap was introduced, so the two faults are independent.",
+    "recommendation": "Leave at least 5 seconds between captures.",
+    "truncation": "Failures are never partial-random: every short frame is exactly 358402 bytes, which is 280 of 400 rows at 1280 bytes per line. The same truncation point every time."
+  },
   "conditions": {
     "approximate_distance": 120,
     "capture_path": "scanner3d depth-frame --execute-depth-frame-capture",
@@ -47,6 +58,27 @@
       "non_zero_samples": 66872,
       "sha256": "c38341b0397f5178bca225ff95b8db9c548eaac4b3ddd3c7f2dcc036fa349566",
       "yield": 0.261219
+    },
+    {
+      "bytes": 512000,
+      "name": "can-shiny-098-3",
+      "non_zero_samples": 67125,
+      "sha256": "8f0ebf4b12fd8dd56b5dcb635ac560635a6c20059611310c036a8c3db56b1481",
+      "yield": 0.262207
+    },
+    {
+      "bytes": 512000,
+      "name": "can-shiny-098-4",
+      "non_zero_samples": 66973,
+      "sha256": "5439d5a08a15a2f078cab20873ed80658f51b7da7f2499535c71a125ec9c2f3c",
+      "yield": 0.261613
+    },
+    {
+      "bytes": 512000,
+      "name": "can-shiny-098-5",
+      "non_zero_samples": 66967,
+      "sha256": "6aca1950d65334e622a7190af226bfcced2ca700f7d7c2be839994b81848bbab",
+      "yield": 0.26159
     }
   ],
   "measured_result": {
@@ -72,6 +104,15 @@
   "second_distance": {
     "clipping": "none - zero returns on either frame edge, so the silhouette is intact",
     "derived_nearest_surface": 98.0,
+    "direct_connection_control": {
+      "conclusion": "A 0.048 difference, well inside the 0.155 frame-to-frame spread. Link quality did NOT bias the measurement, so the hub-era frames are trustworthy.",
+      "direct_mean": 56.689,
+      "direct_n": 7,
+      "direct_spread": 0.155,
+      "hub_mean": 56.641,
+      "hub_n": 2,
+      "what": "The first two frames at this distance were captured through a USB hub that was dropping the link; the rest after plugging straight into the root port. Same can, unmoved."
+    },
     "error_vs_calipers": -1.368,
     "finding": "The error is FOUR AND A HALF TIMES worse at 98 than at 122.7 (-1.368 against -0.295), while remaining highly repeatable within each distance (spreads 0.017 and 0.044). A distance-dependent error of that shape is not a depth-scale error, which would be a constant fraction, and it is not the detected shear, which grows with z rather than shrinking. Unmodelled lens distortion is the leading explanation: the deprojection is an ideal pinhole, cx sits 6.6% across the frame so a centred object is already ~17 degrees off-axis, and at 98 the can subtends +-16.5 degrees about that, putting its silhouette deep in the periphery.",
     "fitted_diameters": [
@@ -79,7 +120,7 @@
       56.649
     ],
     "frames_attempted": 9,
-    "frames_kept": 2,
+    "frames_kept": 5,
     "owner_estimate": 95,
     "relative_error": -0.0236,
     "spread": 0.017,
