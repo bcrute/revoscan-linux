@@ -356,16 +356,24 @@ def rotation_about_axis(axis: Point, angle: float, *, through: Point = (0.0, 0.0
 # --- best-fit alignment -------------------------------------------------------
 
 
-def _jacobi_largest_eigenvector(matrix: list[list[float]], *, sweeps: int = 64) -> list[float]:
-    """The eigenvector of the largest eigenvalue of a symmetric 4x4, by Jacobi rotations.
+#: How small a covariance eigenvalue may be, relative to the largest, before the
+#: point set is treated as not spanning that direction at all. Chosen well above
+#: float64 dust so genuine noise does not read as a dimension, and well below any
+#: real spread so a nearly-flat but genuinely two-dimensional cloud still counts.
+RANK_TOLERANCE: Final = 1e-10
 
-    Used only by :func:`rigid_from_correspondences`. The cyclic Jacobi method is
-    chosen over a power iteration or a characteristic-polynomial root because it
+
+def _jacobi_eigen(
+    matrix: list[list[float]], *, sweeps: int = 64
+) -> tuple[list[float], list[list[float]]]:
+    """Eigenvalues and eigenvectors of a symmetric matrix, by cyclic Jacobi rotations.
+
+    Chosen over a power iteration or a characteristic-polynomial root because it
     is unconditionally stable for symmetric matrices and needs no starting
-    guess - and over an SVD because this repository has no numerical library and
-    a 4x4 symmetric eigenproblem is the smallest thing that solves the problem.
+    guess - and over an SVD because this repository has no numerical library.
+    Returns eigenvalues and the matching eigenvectors as columns.
     """
-    size = 4
+    size = len(matrix)
     a = [row[:] for row in matrix]
     vectors = [[1.0 if i == j else 0.0 for j in range(size)] for i in range(size)]
     for _ in range(sweeps):
@@ -390,8 +398,36 @@ def _jacobi_largest_eigenvector(matrix: list[list[float]], *, sweeps: int = 64) 
                 for k in range(size):
                     vkp, vkq = vectors[k][p], vectors[k][q]
                     vectors[k][p], vectors[k][q] = c * vkp - s * vkq, s * vkp + c * vkq
-    best = max(range(size), key=lambda i: a[i][i])
-    return [vectors[k][best] for k in range(size)]
+    return [a[i][i] for i in range(size)], vectors
+
+
+def _largest_eigenvector(matrix: list[list[float]]) -> list[float]:
+    """The eigenvector belonging to the largest eigenvalue."""
+    values, vectors = _jacobi_eigen(matrix)
+    best = max(range(len(values)), key=lambda i: values[i])
+    return [vectors[k][best] for k in range(len(values))]
+
+
+def spanned_dimensions(points: Sequence[Point]) -> int:
+    """How many independent directions a point set actually spans: 0, 1, 2 or 3.
+
+    Computed from the eigenvalues of the centred covariance, counting those above
+    :data:`RANK_TOLERANCE` of the largest. All points identical gives 0, points on
+    a line give 1, points on a plane give 2.
+
+    This exists because a rigid fit needs the answer and cannot get it from its
+    own machinery - see :func:`rigid_from_correspondences`.
+    """
+    if not points:
+        return 0
+    centre = centroid(points)
+    offsets = [subtract(point, centre) for point in points]
+    covariance = [[math.fsum(o[i] * o[j] for o in offsets) for j in range(3)] for i in range(3)]
+    values, _ = _jacobi_eigen(covariance)
+    largest = max(values)
+    if largest <= 0.0:
+        return 0
+    return sum(1 for value in values if value > largest * RANK_TOLERANCE)
 
 
 def rigid_from_correspondences(source: Sequence[Point], target: Sequence[Point]) -> Rigid:
@@ -408,6 +444,18 @@ def rigid_from_correspondences(source: Sequence[Point], target: Sequence[Point])
     Rigid only. It cannot absorb a scale error, which is deliberate: if two
     clouds differ in scale, that is a calibration fault and it must surface as
     a large residual rather than being quietly fitted away.
+
+    Degeneracy is refused rather than fitted, and the reason is worth stating.
+    A set of points lying on a line leaves rotation *about that line* completely
+    undetermined; a set of coincident points determines no rotation at all. In
+    both cases Horn's method still returns an answer, that answer is generally
+    not the transform that produced the data, and - the dangerous part - the
+    residual comes back at the float64 floor. A caller doing exactly what the
+    rest of this module tells them to do, namely trusting the residual, would
+    get no warning whatsoever. So the rank of the point set is checked directly
+    rather than inferred from the solver, which cannot see it: the Jacobi
+    routine accumulates orthogonal rotations from the identity, so its
+    eigenvector is always unit length no matter how degenerate the input.
     """
     if len(source) != len(target):
         raise CorrespondenceUnusable(
@@ -417,6 +465,19 @@ def rigid_from_correspondences(source: Sequence[Point], target: Sequence[Point])
     if len(source) < 3:
         raise CorrespondenceUnusable(
             f"{len(source)} correspondences cannot constrain a rotation; at least 3 are needed"
+        )
+    spanned = spanned_dimensions(source)
+    if spanned < 2:
+        raise CorrespondenceUnusable(
+            f"the source points span only {spanned} dimension(s), so the rotation is "
+            f"underdetermined: "
+            + (
+                "every point is at the same place"
+                if spanned == 0
+                else "they lie on a line, and rotation about that line changes nothing"
+            )
+            + ". A transform fitted to this would come back with a residual at the "
+            "float64 floor while being the wrong transform, so it is refused instead."
         )
 
     source_centre = centroid(source)
@@ -436,7 +497,7 @@ def rigid_from_correspondences(source: Sequence[Point], target: Sequence[Point])
         [s[2][0] - s[0][2], s[0][1] + s[1][0], -s[0][0] + s[1][1] - s[2][2], s[1][2] + s[2][1]],
         [s[0][1] - s[1][0], s[2][0] + s[0][2], s[1][2] + s[2][1], -s[0][0] - s[1][1] + s[2][2]],
     ]
-    w, x, y, z = _jacobi_largest_eigenvector(n_matrix)
+    w, x, y, z = _largest_eigenvector(n_matrix)
     length = math.sqrt(math.fsum((w * w, x * x, y * y, z * z)))
     if length < MIN_VECTOR_NORM:
         raise CorrespondenceUnusable(
