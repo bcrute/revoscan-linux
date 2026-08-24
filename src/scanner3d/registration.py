@@ -139,13 +139,17 @@ DEFAULT_TOLERANCE: Final = 1e-6
 
 #: Voxel side used to downsample a large cloud, as a fraction of its extent.
 #: A 64-cell grid across the object keeps the shape a surface fit needs while
-#: cutting a full depth frame to a few thousand points.
+#: cutting a real depth frame's 89000 surviving points to a few hundred - 243 of
+#: them for the ``base_4`` fixture, 505 for ``final_test``. The gap between
+#: those two is the point: a frame's extent is set by its furthest stray return,
+#: not by the object, so this is a bound on cost and not a target point count.
 DEFAULT_VOXEL_FRACTION: Final = 1.0 / 64.0
 
-#: Correspondence gate at the *first* iteration, as a fraction of the target
-#: cloud's extent. Generous on purpose: it has to cover the displacement of a
-#: whole turntable step when a fit is started from the identity, which is what
-#: the axis bootstrap does.
+#: The correspondence gate, as a fraction of the target cloud's extent. Nothing
+#: further away than this is ever paired. Generous on purpose: it has to cover
+#: the displacement of a whole turntable step when a fit is started from the
+#: identity, which is what the axis bootstrap does. It is the trim, not this
+#: bound, that does the discriminating once a fit is under way.
 DEFAULT_CORRESPONDENCE_FRACTION: Final = 1.0 / 8.0
 
 #: The share of matched pairs a fit solves on, closest first. The rest are
@@ -154,18 +158,20 @@ DEFAULT_CORRESPONDENCE_FRACTION: Final = 1.0 / 8.0
 #: Every turntable step turns some surface out of view and some into it, so a
 #: large minority of the points in one frame have no true partner in the next.
 #: Their nearest neighbour is whatever happens to be closest, which is a false
-#: pair, and on a turntable the false pairs all pull the same way: measured
-#: against partial-overlap test data an untrimmed fit under-rotated every step
-#: by about a fifth, and the revolution then missed closing by 0.6 rad. The
-#: false pairs are also, reliably, the *furthest* ones - which is exactly what a
-#: quantile can cut. Trimming the same data recovered it to floating-point
-#: precision.
+#: pair, and on a turntable the false pairs all pull the same way. Measured on
+#: the partial-overlap test sweep, an untrimmed fit under-rotated every step by
+#: 15.7 per cent and the revolution then missed closing by 0.99 rad. The false
+#: pairs are also, reliably, the *furthest* ones - which is exactly what a
+#: quantile can cut. Trimming the same data at 0.6 recovers the step to
+#: floating-point precision and closes the loop to 5e-15.
 #:
-#: 0.6 is deliberately below the overlap a sane sweep actually has. Keeping too
-#: few pairs costs precision that a few hundred surviving points make back;
-#: keeping too many leaves false pairs in the solve, and those do not average
-#: out. A caller who knows their overlap may raise it, and 1.0 turns trimming
-#: off for data whose correspondences really are complete.
+#: 0.6 is deliberately below the overlap a sane sweep actually has, and the
+#: margin is not free to give away: the same sweep trimmed at 0.8 still leaves
+#: enough false pairs to close 1.9e-3 rad short. Keeping too few pairs costs
+#: precision that a few hundred survivors make back; keeping too many leaves
+#: false pairs in the solve, and those do not average out. A caller who knows
+#: their overlap may raise it, and 1.0 turns trimming off for data whose
+#: correspondences really are complete.
 DEFAULT_KEEP_FRACTION: Final = 0.6
 
 #: A cloud at or below this many points is matched as it stands. Downsampling
@@ -225,6 +231,12 @@ INHERENT_LIMITATIONS: Final[tuple[str, ...]] = (
     "turntable's axis has been measured or compared against it anywhere in this repository",
     "a loop-closure residual near zero says the poses are self-consistent around one "
     "revolution. It does not say the object was reconstructed correctly",
+    "a loop that closes is not a loop that is right. Where every frame really is a rigid "
+    "transform of one shape and the overlap is complete, consecutive fits telescope and the "
+    "chain composes to the identity whatever those transforms were - so a small closure says "
+    "the fits succeeded, not that the poses are the ones the object took. What the closure "
+    "detects is a fit that could not be made: partial overlap, noise, a frame whose shape does "
+    "not match its neighbours, or an alignment that settled in the wrong place",
     "point-to-point matching has no notion of surface: it minimises distance between nearest "
     "samples, so two clouds sliding along a smooth or symmetric shape can register with a "
     "small residual and the wrong pose",
@@ -431,9 +443,24 @@ def cloud_extent(points: Sequence[Point]) -> float:
 
 
 def _ensure_grid_affordable(points: Sequence[Point], cell: float, *, what: str) -> None:
-    """Refuse a cell size whose grid would span an unreasonable number of cells."""
+    """Refuse a cell size whose grid would span an unreasonable number of cells.
+
+    A cell small enough that a span overflows to infinity is refused here rather
+    than allowed to reach ``math.floor``, which would raise a bare
+    ``OverflowError`` - an escape from this module's contract that every refused
+    input leaves by a :class:`RegistrationNotAllowed` carrying a
+    :class:`~scanner3d.errors.DoctorStatus`. Subnormal cells reach that point:
+    ``1.0 / 1e-320`` is ``inf``, and ``1e-320`` passes a finite-and-positive
+    check.
+    """
     low, high = _bounds(points)
-    spans = [math.floor((high[i] - low[i]) / cell) + 1 for i in range(3)]
+    ratios = [(high[i] - low[i]) / cell for i in range(3)]
+    if not all(math.isfinite(ratio) for ratio in ratios):
+        raise IcpParametersUnusable(
+            f"{what}: a cell of {cell!r} is so small that the number of cells across this "
+            "cloud overflows to infinity, which is past any ceiling by definition"
+        )
+    spans = [math.floor(ratio) + 1 for ratio in ratios]
     total = spans[0] * spans[1] * spans[2]
     if total > MAX_GRID_CELLS:
         raise IcpParametersUnusable(
@@ -1045,6 +1072,11 @@ class TurntableAxis:
     is a different statement from a residual of zero, and the two are never
     allowed to look alike.
 
+    :attr:`pair_iterations` is how much work each frame-to-frame fit needed. It
+    is cost, not accuracy, and it is recorded because it is the only visible
+    evidence that seeding each pair from the one before it did anything - see
+    :func:`estimate_turntable_axis`.
+
     :attr:`through` is the point of the line closest to the camera origin. Any
     point on the line would describe the same line; pinning it to the closest
     one makes two estimates directly comparable.
@@ -1059,6 +1091,7 @@ class TurntableAxis:
     axial_slip: float | None
     fit_rmse: float | None
     pair_count: int
+    pair_iterations: tuple[int, ...]
     passes: int
     converged: bool | None
     limitations: tuple[str, ...] = ()
@@ -1083,6 +1116,7 @@ class TurntableAxis:
             axial_slip=None,
             fit_rmse=None,
             pair_count=0,
+            pair_iterations=(),
             passes=0,
             converged=None,
             limitations=(
@@ -1105,6 +1139,7 @@ class TurntableAxis:
             "through_is": "the point of the spindle closest to the camera origin",
             "estimated": self.estimated,
             "pair_count": self.pair_count,
+            "pair_iterations": list(self.pair_iterations),
             "passes": self.passes,
             "converged": self.converged,
             "angle_step_radians": self.angle_step_radians,
@@ -1143,11 +1178,18 @@ def estimate_turntable_axis(
     1. Align each consecutive pair with unconstrained ICP. The first pair starts
        from a rotation of ``angle_step`` about the seed line if one is offered
        and from the identity otherwise; every later pair starts from the
-       transform recovered for the pair before it. That chaining is the
-       turntable insight applied to the bootstrap - on a turntable every step is
-       the *same* transform, so the previous answer is an excellent guess for
-       the next question and the search never has far to go after the first
-       pair.
+       transform recovered for the pair before it.
+
+       That chaining is the turntable insight applied to the bootstrap - on a
+       turntable every step is the *same* transform, so the previous answer is
+       an excellent guess for the next question. It buys **cost, not accuracy**,
+       and the distinction is worth keeping straight: the answer it reaches is
+       the same either way. What changes is how far the search has to go. On the
+       partial-overlap test sweep the chained pairs needed 12, 14 and then 2
+       iterations each, against 12 to 36 apiece unseeded - 38 iterations across
+       the sweep rather than 164. In pure Python that is the difference between
+       a bootstrap that costs a tenth of a second and one that costs four
+       tenths. :attr:`TurntableAxis.pair_iterations` records it.
     2. Decompose each of those transforms into its screw axis. A turntable step
        is a rotation about the spindle, so every pair should name the same line.
     3. Take the consensus - the normalised mean direction, and the mean anchor
@@ -1155,15 +1197,17 @@ def estimate_turntable_axis(
        estimates strayed from it.
 
     ``passes`` runs that whole method more than once, each pass seeded with the
-    line the pass before it found. This is worth its cost. The first pass has to
+    line the pass before it found. Unlike the chaining, this one buys accuracy,
+    and it is why the default is two rather than one. The first pass has to
     start from the identity, which on a coarse sweep of a partly self-occluding
     object is a poor enough guess that the pairwise fits settle in a local
     minimum; seeded with even a rough line, the second pass starts a fraction of
-    a step away and lands on the answer. On the partial-overlap test data a
-    40-degree sweep went from a direction wrong by 0.12 rad after one pass to
-    floating-point exact after two. It is not monotone, though - more passes is
-    not reliably better, and the residuals below, not the pass count, are what
-    say whether an estimate is any good.
+    a step away and lands on the answer. On the partial-overlap test sweep a
+    40-degree revolution went from a direction wrong by 0.056 rad after one pass
+    to floating-point exact after two, and the loop closure with it, from
+    0.9 rad to 5e-15. It is not monotone, though - more passes is not reliably
+    better, and the residuals below, not the pass count, are what say whether an
+    estimate is any good.
 
     Failure modes, all of them visible in those residuals rather than hidden
     by them:
@@ -1286,7 +1330,7 @@ def _consensus_axis(
     )
     # Pin the anchor to the line's closest approach to the origin, so two
     # estimates of one line are compared at the same point on it.
-    through = anchor_mean
+    through = subtract(anchor_mean, scaled(direction, dot(anchor_mean, direction)))
 
     angles = [s.angle for s in screws]
     mean_angle = math.fsum(angles) / len(angles)
@@ -1322,6 +1366,7 @@ def _consensus_axis(
         axial_slip=max(abs(s.axial_slip) for s in screws),
         fit_rmse=max(f.rmse for f in fits),
         pair_count=len(screws),
+        pair_iterations=tuple(f.iterations for f in fits),
         passes=passes,
         converged=all(f.converged for f in fits),
         limitations=tuple(limitations),
@@ -1398,6 +1443,15 @@ class LoopClosure:
     :attr:`note` states how the figure was produced, including - and this
     matters for reading :attr:`translation_error` - whether the steps that were
     composed had six degrees of freedom or one.
+
+    What this cannot see is worth knowing before trusting it. If one frame is
+    displaced by a rigid transform and the fits on either side of it still find
+    their global optimum, those two fits absorb the displacement exactly and the
+    chain closes as if nothing had happened - the frame's pose is wrong by the
+    whole displacement and the residual here is at the floating-point floor.
+    Closure is a check on whether the *fits* held together, not on whether the
+    poses are the object's. That is why it is reported beside the per-frame
+    residuals rather than in place of them.
     """
 
     rotation_error_radians: float

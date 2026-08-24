@@ -692,6 +692,7 @@ def test_a_declared_spindle_carries_no_residual_and_none_is_invented_for_it():
     assert declared.through_spread is None
     assert declared.axial_slip is None
     assert declared.fit_rmse is None
+    assert declared.pair_iterations == ()
     assert declared.converged is None
     assert any("declared by the caller" in note for note in declared.limitations)
     # Still canonicalised, so it compares against an estimate of the same line.
@@ -714,6 +715,58 @@ def test_a_second_bootstrap_pass_rescues_a_fit_that_settled_in_the_wrong_place()
     assert math.dist(two.through, TRUE_ANCHOR) < 1e-8
     assert one.passes == 1
     assert two.passes == 2
+
+
+def test_an_estimated_spindle_is_always_anchored_at_its_closest_approach_to_the_origin():
+    """Two estimates of one line must be comparable, and only one anchor makes them so.
+
+    A line has infinitely many points on it, so the anchor is a *choice*, and the
+    choice only helps if it is made the same way every time. The bad bootstrap is
+    the case that shows it: its per-pair axes genuinely disagree, so their mean
+    anchor lies off the consensus line until it is projected back onto it.
+    """
+    for axis in (
+        estimate_turntable_axis(exact_sweep(9, NINE_STEP), angle_step=NINE_STEP),
+        bootstrap_axis(1),
+        bootstrap_axis(2),
+    ):
+        assert abs(dot(axis.through, axis.direction)) < 1e-12
+        assert math.dist(axis.direction, (0.0, 0.0, 0.0)) == pytest.approx(1.0)
+
+
+def test_seeding_each_pair_from_the_one_before_costs_far_fewer_iterations():
+    """Chaining buys cost, not accuracy, so it is cost that is measured here.
+
+    Every turntable step is the same transform, so once one pair is solved the
+    next starts a fraction of a step from its answer and settles in the fewest
+    iterations the loop can report. Unseeded, each pair starts from the identity
+    and pays the full search again.
+    """
+    axis = estimate_turntable_axis(occluded_sweep(), angle_step=NINE_STEP, passes=1)
+
+    assert len(axis.pair_iterations) == axis.pair_count == 8
+    assert axis.pair_iterations[0] >= 8, "the first pair has nothing to start from"
+    assert max(axis.pair_iterations[2:]) <= 4, "the rest start next door to the answer"
+    assert sum(axis.pair_iterations) < 4 * axis.pair_iterations[0]
+
+
+def test_trimming_is_what_stops_a_partial_overlap_under_rotating_every_step():
+    """The justification for the default keep fraction, measured rather than asserted.
+
+    A point on the edge of the overlap has no true partner - the object turned
+    it into view, or out of it - so its nearest neighbour is a false pair. On a
+    turntable those pull the same way every time, which is why an untrimmed fit
+    does not merely get noisier: it gets consistently, directionally wrong.
+    """
+    untrimmed = estimate_turntable_axis(occluded_sweep(), angle_step=NINE_STEP, keep_fraction=1.0)
+    trimmed = bootstrap_axis(2)
+
+    short = untrimmed.angle_step_radians
+    assert short is not None
+    assert short < NINE_STEP * 0.9, "the bias is a systematic under-rotation, not noise"
+    assert angle_between(untrimmed.direction, TRUE_DIRECTION) > 100 * angle_between(
+        trimmed.direction, TRUE_DIRECTION
+    )
 
 
 def test_the_residuals_show_the_bad_bootstrap_to_be_bad_without_the_ground_truth():
@@ -854,6 +907,33 @@ def test_a_broken_registration_is_caught_by_the_loop_closure():
     assert broken.loop_closure.rotation_error_radians > 0.1
     assert sound.loop_closure.rotation_error_radians < 1e-9
     assert broken.loop_closure.translation_error > sound.loop_closure.translation_error * 1e9
+
+
+def test_the_closure_cannot_see_a_displacement_two_good_fits_absorbed():
+    """A limitation, pinned down so nobody has to rediscover it by trusting the number.
+
+    One frame is turned off the spindle. The fits on either side of it are still
+    exact - they find the transform that really relates those clouds - so the
+    displacement telescopes out of the chain and the loop closes at the
+    floating-point floor, while that frame's pose is wrong by the whole
+    displacement. Closure checks that the fits held together. It does not check
+    that the poses are the object's.
+    """
+    sweep = list(exact_sweep(9, NINE_STEP))
+    nudged = rotation_about_axis((1.0, 0.0, 0.0), 0.15, through=TRUE_THROUGH)
+    sweep[4] = tuple(nudged.apply_all(sweep[4]))
+    truth = TurntableAxis.declared(TRUE_DIRECTION, TRUE_THROUGH, basis="the test states it")
+
+    result = register_turntable(sweep, angle_step=NINE_STEP, axis=truth, constrain_to_axis=False)
+
+    assert result.worst_rmse < 1e-12, "every fit found its global optimum"
+    displaced = result.poses[4].transform.compose(turn(-4 * NINE_STEP).inverse())
+    assert displaced.rotation_angle > 0.1, "frame 4's pose really is wrong"
+
+    closure = result.loop_closure
+    assert closure is not None
+    assert closure.rotation_error_radians < 1e-12, "and the closure sees none of it"
+    assert any("not a loop that is right" in note for note in result.limitations)
 
 
 def test_a_wrong_spindle_shows_up_in_the_closure_of_a_constrained_sweep():

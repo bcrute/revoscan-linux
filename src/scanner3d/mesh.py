@@ -1040,10 +1040,13 @@ def _march(
         j, i = divmod(remainder, nx)
         base = (k * node_y + j) * node_x + i
         corners = tuple(counts[base + offset] for offset in corner_offsets)
-        mask = 0
-        for corner, value in enumerate(corners):
-            if value > level:
-                mask |= 1 << corner
+        # Through :func:`case_index` rather than inline, so the rule at the level
+        # exists once. A second copy here could drift to ``>=`` while the public
+        # function still documented and tested ``>``, and the two would then
+        # disagree about which side a node sitting exactly on an integer level
+        # falls - silently, because either rule closes as long as it is the only
+        # one in use.
+        mask = case_index(corners, level)
         table = TRIANGLE_TABLE[mask]
         if not table:
             continue

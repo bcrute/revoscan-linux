@@ -553,6 +553,43 @@ def test_lowering_the_level_keeps_the_sample_the_default_drops():
     assert kept.is_watertight
 
 
+@pytest.mark.parametrize("iso_level", [1.0, 4.0, 7.0])
+def test_an_integer_level_still_closes_and_never_collapses_a_triangle(iso_level):
+    """The level the module warns about, exercised instead of only described.
+
+    ``_ensure_iso_level`` admits any level in ``(0, 8)``, and an *integer* one is
+    the case the half-integer default exists to avoid: the field is an integer
+    count, so a node can sit exactly on the level, and the crossing on every edge
+    touching that node would land exactly on it. Two cut edges would then produce
+    one point and the triangle between them would have no area at all.
+
+    ``MIN_EDGE_FRACTION`` is what stops that, and nothing exercised it: the whole
+    suite used half-integer levels, so the clamp could be deleted and the
+    ``>``-at-the-level rule in :func:`_march` could be relaxed to ``>=`` with
+    every test still passing. Both are pinned here.
+
+    What is asserted is what the module actually promises - closed, consistently
+    oriented, no face naming a vertex twice, no face of zero area, and no two
+    vertices at the same point. Not that the triangles are well shaped: at an
+    integer level they are slivers, which is the documented cost of the choice
+    and the reason the default is not one.
+    """
+    mesh = reconstruct(sphere_points(2000, 1.0), voxel_size=0.12, iso_level=iso_level)
+    assert mesh.face_count > 0
+    assert mesh.is_watertight, "an integer level must not tear the surface open"
+    assert mesh.census.consistently_oriented
+    for face in mesh.faces:
+        assert len(set(face)) == 3, face
+        assert triangle_area(mesh, face) > 0.0, face
+    # No two vertices coincide, which is the property the clamp buys and the
+    # property a vertex landing exactly on a node would destroy.
+    assert len(set(mesh.vertices)) == mesh.vertex_count, "two cut edges produced one point"
+    # And the surface still exports: a mesh this module hands back is a mesh its
+    # own writers accept, at every level it accepts.
+    export = encode_obj(mesh, provenance=provenance(iso_level=iso_level))
+    assert export.face_count == mesh.face_count
+
+
 @pytest.mark.parametrize("seed", range(30))
 def test_random_clouds_all_reconstruct_to_closed_surfaces(seed):
     """Arbitrary blobs, not just the two shapes chosen to work.
@@ -926,6 +963,71 @@ def test_every_export_carries_its_caveats_and_claims_no_unit(tmp_path, cube_mesh
         assert set(INHERENT_LIMITATIONS) <= set(export.limitations)
         assert set(cube_mesh.limitations) <= set(export.limitations)
         assert len(export.limitations) == len(set(export.limitations)), "de-duplicated"
+
+
+def test_provenance_text_cannot_forge_a_line_of_either_format(tmp_path):
+    """The guard :func:`scanner3d.mesh._one_line` exists for is exercised, not assumed.
+
+    Both formats are line structured and both take strings straight from a
+    caller. A units label carrying a newline and ``end_header`` ends a PLY header
+    early and turns the caveats that follow it into vertex data; one carrying a
+    newline and ``f 1 2 3`` adds a face to an OBJ that no reconstruction
+    produced. Nothing in the suite covered this: the guard could be reduced to
+    ``printable = text`` and every other test still passed, which is exactly the
+    state a security-relevant guard must not be left in.
+
+    So the payloads are checked, not the helper: every line of the written file
+    is either one this module's own encoder emits or a comment carrying its
+    format's prefix, and the counts the header declares still match the body.
+    """
+    # Non-ASCII is in here deliberately and is the half that only this guard
+    # stops: newlines alone are already flattened by ``textwrap.wrap``, but a
+    # single non-ASCII character reaches ``encode("ascii")`` in the header
+    # builder and raises ``UnicodeEncodeError`` - a crash from outside this
+    # module's refusal hierarchy, on a string a caller is free to supply.
+    poison = "\nend_header\n0 0 0\nf 1 2 3\nelement vertex 99\ncafé 90° 中\t\r\x00"
+    prov = MeshProvenance(
+        cloud=CloudProvenance(
+            units=f"unvalidated{poison}",
+            convention=CAMERA_OPTICAL_FRAME,
+            calibration=CalibrationProvenance.none_applied(f"none{poison}"),
+        ),
+        method=f"voxel occupancy{poison}",
+        voxel_size=0.1,
+        iso_level=DEFAULT_ISO_LEVEL,
+        limitations=(f"a caveat{poison}",),
+    )
+    mesh = tetrahedron()
+
+    obj = write_obj(tmp_path / "poisoned.obj", mesh, provenance=prov)
+    body = [line for line in obj.payload.decode("ascii").splitlines() if not line.startswith("# ")]
+    assert [line[0] for line in body] == ["v"] * 4 + ["f"] * 4, body
+    parsed_obj = ParsedObj(obj.payload)
+    assert len(parsed_obj.vertices) == 4
+    assert len(parsed_obj.faces) == 4, "a forged 'f' line would make a fifth"
+
+    ply = write_ply_mesh(tmp_path / "poisoned.ply", mesh, provenance=prov)
+    lines = ply.payload.decode("ascii").splitlines()
+    # A directive is a whole line, so that is what must not be forged. The words
+    # may appear inside a comment - flattened onto one, which is the point.
+    assert lines.count("end_header") == 1, "a provenance string forged a header terminator"
+    assert [line for line in lines if line.startswith("element ")] == [
+        "element vertex 4",
+        "element face 4",
+    ], "a provenance string forged an element declaration"
+    end = lines.index("end_header")
+    assert lines[0] == "ply"
+    assert lines[1].startswith("format ")
+    for line in lines[2 : end - 6]:
+        assert line.startswith("comment "), f"a provenance string became its own line: {line!r}"
+    rows = [line.split() for line in lines[end + 1 :]]
+    assert [len(tokens) for tokens in rows] == [3] * 4 + [4] * 4, "a forged line reached the body"
+    assert all(tokens[0] == "3" for tokens in rows[4:]), rows[4:]
+    parsed_ply = ParsedPlyMesh(ply.payload)
+    assert len(parsed_ply.vertices) == 4
+    assert len(parsed_ply.faces) == 4
+    # The caveats survive the flattening; they are neutered, not dropped.
+    assert any("a caveat" in line for line in ply.limitations)
 
 
 def test_the_export_record_says_what_was_written(tmp_path, cube_mesh):
