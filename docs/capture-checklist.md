@@ -254,8 +254,18 @@ Back-to-back captures fail. Measured:
 | gap between captures | complete frames |
 | --- | --- |
 | none | 1 of 3 |
+| 1 second | 2 of 5 |
+| **2 seconds** | **5 of 5** |
+| 3 seconds | 5 of 5 |
+| 4 seconds | 5 of 5 |
 | 5 seconds | 3 of 3 |
-| 15 seconds | 3 of 3 |
+
+**Two seconds is the threshold.** That matters for a continuously rotating
+turntable, where the capture cadence sets the angular resolution: a cycle of
+~1.1 s capture plus a 2 s gap is about **3.1 s per frame**, so the turntable
+must take roughly `3.1 x frames` seconds per revolution to hit a given step.
+For the 24 frames at 15 degrees that registration wants, that is about **75
+seconds per revolution**.
 
 Every failure is *exactly* 358402 bytes — 280 of 400 rows — never a random
 partial. The kernel flags the buffer `V4L2_BUF_FLAG_ERROR` and the capture path
