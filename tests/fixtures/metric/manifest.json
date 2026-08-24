@@ -1,4 +1,43 @@
 {
+  "THE_RESULT": {
+    "ground_truth": {
+      "instrument": "calipers",
+      "object": "bare aluminium can",
+      "uncertainty": 0.05,
+      "value": 58.0
+    },
+    "headline": "The depth scale is millimetres, and the accuracy is distance-dependent with a sweet spot near 120mm.",
+    "measurements": [
+      {
+        "diameter": 56.689,
+        "error": -1.311,
+        "n": 7,
+        "relative": -0.0226,
+        "standoff": 98.1
+      },
+      {
+        "diameter": 57.705,
+        "error": -0.295,
+        "n": 3,
+        "relative": -0.0051,
+        "standoff": 122.7
+      },
+      {
+        "diameter": 57.445,
+        "error": -0.555,
+        "n": 3,
+        "relative": -0.0096,
+        "standoff": 244.1
+      }
+    ],
+    "not_monotonic": "The error has a MINIMUM near 122mm and worsens on both sides. That rules out the two hypotheses tested: a constant depth-scale error would be a fixed fraction at every distance, and a lens-distortion or principal-point term would vary monotonically with field angle. A minimum near the middle of the vendor's stated 100-200mm working range is what a factory calibration optimised for a nominal distance would produce.",
+    "pipeline_control": "A synthetic cylinder of the same geometry and tilt recovers 58.000 +-0.0006 at ALL THREE standoffs, so none of the above is an artifact of fitting at different ranges.",
+    "still_open": [
+      "The surface was bare specular aluminium throughout. The spray A/B has not been run, so how much of this is optical rather than geometric is unknown.",
+      "A structured residual persists at every distance (shear correlation -0.14 to -0.25). Its cause is unidentified; the indicator names no cause by design.",
+      "Only one object, one tilt, one position in the frame."
+    ]
+  },
   "capture_reliability": {
     "finding": "Back-to-back captures fail. The device needs recovery time between them, and without it the kernel flags the buffer V4L2_BUF_FLAG_ERROR.",
     "measured": {
@@ -109,6 +148,27 @@
       "non_zero_samples": 66967,
       "sha256": "6aca1950d65334e622a7190af226bfcced2ca700f7d7c2be839994b81848bbab",
       "yield": 0.26159
+    },
+    {
+      "bytes": 512000,
+      "name": "can-shiny-244-1",
+      "non_zero_samples": 59008,
+      "sha256": "0228abc4c3fb9e41e99ed05b752f5dab4c5061c3c841d0a1fd74790837872328",
+      "yield": 0.2305
+    },
+    {
+      "bytes": 512000,
+      "name": "can-shiny-244-2",
+      "non_zero_samples": 59030,
+      "sha256": "81127dfc10b0df8978a25fb754a40eb6e1bf38ca6fb48ca5dbe1cc63460477bb",
+      "yield": 0.230586
+    },
+    {
+      "bytes": 512000,
+      "name": "can-shiny-244-3",
+      "non_zero_samples": 58994,
+      "sha256": "76e46d97f50460b140aa579393555e9ee07093647cbe48e99e9d866668a7b5ee",
+      "yield": 0.230445
     }
   ],
   "measured_result": {
@@ -165,6 +225,24 @@
     "measurement_uncertainty": 0.05,
     "note": "The can body measures a consistent 58 around the middle. The top and bottom are flanged and stand proud of the body, but at this distance they fall outside the vertical field of view and return nothing, so no cropping was applied.",
     "object": "aluminium drink can, standing upright"
+  },
+  "third_distance": {
+    "capture_note": "4 of 4 complete once a 5-second gap was left between captures.",
+    "derived_standoff": 244.1,
+    "error_vs_calipers": -0.555,
+    "fitted_diameters_cropped": [
+      57.438,
+      57.438,
+      57.449
+    ],
+    "flanges": "At this range the whole can is in view. The axial residual profile shows a smooth SYMMETRIC bow - about +0.12 at both ends against -0.07 in the middle - rather than the sharp step a flange alone would give. cy sits near mid-frame, so the can's top and bottom are equally off-axis, which is the signature of radial distortion about the principal point. Cropping to |axial| < 35 changes the diameter by only 0.01-0.03, so the flanges are not the dominant term.",
+    "frames_attempted": 4,
+    "frames_kept": 3,
+    "mean": 57.445,
+    "owner_estimate": 240,
+    "relative_error": -0.0096,
+    "spread": 0.017,
+    "yield": 0.231
   },
   "what": "Depth frames of a drink can captured for METRIC VALIDATION. Unlike the frames in tests/fixtures/frames/, these have an independently measured ground truth.",
   "what_this_does_NOT_establish": [
