@@ -100,6 +100,36 @@ evidence that `cx` is wrong.
 3. Capture. Then capture twice more without touching anything.
 4. Move it nearer (~85 units) and repeat. Move it further (~250 units) and
    repeat.
+5. **Then put the sphere on the turntable and sweep it, exactly as in capture 3.**
+   This step is not optional and the reason is measured, not theoretical — see
+   below.
+
+### Sweep the sphere too, or the shear check cannot work
+
+A single camera view sees less than a hemisphere of a sphere. Measured against
+both the validation harness's own generator and independently rendered frames,
+that is not enough coverage for the shear indicator to fire **at all**: its
+correlation saturates near 0.25 against a 0.35 detection threshold, so even a
+principal-point error of 278 px — the largest this unit could have — reads as
+*not detected*. Full detail in
+[shear-detection-limits.md](shear-detection-limits.md).
+
+Coverage, not fault magnitude, is what the indicator is limited by:
+
+| Coverage of the sphere | Shear correctly detected? |
+| --- | --- |
+| whole sphere | yes (correlation 0.997) |
+| perfect hemisphere | yes (0.544) |
+| what one camera view actually sees | **no** (0.25, below threshold) |
+
+A turntable sweep of the sphere, fused, gives near-complete coverage — which is
+the regime where the indicator works well. So the sweep is what makes the
+`cx` half of this test possible. The static captures in steps 2–4 still matter:
+they are what test **scale** at known distances, and scale does not need the
+coverage that shear detection does.
+
+Until that fused sweep exists, treat a quiet shear indicator as **no
+information**. It must not be read as evidence that `cx` is correct.
 
 **Record:** the five caliper readings, the instrument, and roughly where the
 sphere sat for each set.
