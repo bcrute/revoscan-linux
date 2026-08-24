@@ -27,13 +27,21 @@ import struct
 
 import pytest
 
-from scanner3d.geometry import Rigid, distance, dot, rotation_about_axis, subtract
+from scanner3d.geometry import (
+    DegenerateVector,
+    Rigid,
+    distance,
+    dot,
+    rotation_about_axis,
+    subtract,
+)
 from scanner3d.simulate import (
     FACTORY_INTRINSICS,
     MAX_CODE,
     NO_RETURN,
     SCHEMA_VERSION,
     Box,
+    Cylinder,
     Plane,
     SceneUnusable,
     ShapeUnusable,
@@ -382,3 +390,101 @@ def test_geometry_helpers_agree_with_the_recovery_metric():
         offset = subtract(point, TARGET.centre)
         worst = max(worst, abs(math.sqrt(dot(offset, offset)) - TARGET.radius))
     assert recovery_error(frame, TARGET)[0] == pytest.approx(worst)
+
+
+# --- the cylinder, and why its orientation decides everything -----------------
+
+
+def _cylinder_radial_deviation(points, centre, axis, radius, half_length):
+    """Max distance of body points from the cylinder's curved surface."""
+    worst = 0.0
+    for point in points:
+        v = subtract(point, centre)
+        axial = dot(v, axis)
+        if abs(axial) >= half_length * 0.9:  # skip the flat caps
+            continue
+        perpendicular = math.sqrt(max(dot(v, v) - axial * axial, 0.0))
+        worst = max(worst, abs(perpendicular - radius))
+    return worst
+
+
+CYL_R, CYL_HL, CYL_Z = 15.0, 25.0, 117.0
+
+
+def _cyl(axis):
+    return Cylinder(centre=(0.0, 0.0, CYL_Z), axis=axis, radius=CYL_R, half_length=CYL_HL)
+
+
+@pytest.mark.parametrize("axis", [(0.0, 1.0, 0.0), (1.0, 0.0, 0.0), (0.0, 0.0, 1.0)])
+def test_a_rendered_cylinder_deprojects_back_onto_its_own_surface(axis):
+    frame = render([_cyl(axis)])
+    assert frame.returned > 1000
+    worst = _cylinder_radial_deviation(points_of(frame), (0.0, 0.0, CYL_Z), axis, CYL_R, CYL_HL)
+    assert worst <= frame.max_quantisation_error * 1.5
+
+
+def test_an_upright_cylinder_reveals_a_wrong_cx_dramatically():
+    """The orientation that works, and it is not a marginal difference."""
+    axis = (0.0, 1.0, 0.0)
+    frame = render([_cyl(axis)])
+    wrong = dataclasses.replace(
+        frame, intrinsics=sheared_intrinsics(FACTORY_INTRINSICS, cx=FRAME_CENTRE_CX)
+    )
+    deviation = _cylinder_radial_deviation(points_of(wrong), (0.0, 0.0, CYL_Z), axis, CYL_R, CYL_HL)
+    assert deviation > CYL_R, (
+        f"an upright cylinder must be grossly distorted by a 278-column cx error; "
+        f"got {deviation} against radius {CYL_R}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("axis", "why"),
+    [
+        ((1.0, 0.0, 0.0), "the shear slides it along its own length"),
+        ((0.0, 0.0, 1.0), "each circular cross-section shifts but stays circular"),
+    ],
+)
+def test_a_cylinder_lying_along_x_or_z_cannot_reveal_a_wrong_cx_at_all(axis, why):
+    """The orientations that are useless, asserted rather than warned about.
+
+    ``docs/capture-checklist.md`` tells the owner to stand the cylinder up. This
+    is why: in these two orientations a 278-column principal-point error moves
+    the points by no more than quantisation does, so the target is exactly as
+    blind to the fault as a flat plate.
+    """
+    frame = render([_cyl(axis)])
+    clean = _cylinder_radial_deviation(points_of(frame), (0.0, 0.0, CYL_Z), axis, CYL_R, CYL_HL)
+    wrong = dataclasses.replace(
+        frame, intrinsics=sheared_intrinsics(FACTORY_INTRINSICS, cx=FRAME_CENTRE_CX)
+    )
+    sheared = _cylinder_radial_deviation(points_of(wrong), (0.0, 0.0, CYL_Z), axis, CYL_R, CYL_HL)
+    assert sheared < CYL_R * 0.01, f"{why}: expected no signal, got {sheared}"
+    assert sheared == pytest.approx(clean, abs=frame.max_quantisation_error * 2)
+
+
+def test_a_cylinder_is_hit_at_its_near_surface():
+    cylinder = _cyl((0.0, 1.0, 0.0))
+    assert cylinder.intersect((0.0, 0.0, 1.0)) == pytest.approx(CYL_Z - CYL_R)
+
+
+def test_the_flat_caps_are_rendered():
+    """An end-on cylinder must return its cap, not nothing."""
+    frame = render([_cyl((0.0, 0.0, 1.0))])
+    zs = [point[2] for point in points_of(frame)]
+    assert min(zs) == pytest.approx(CYL_Z - CYL_HL, abs=0.01)
+
+
+@pytest.mark.parametrize(
+    ("radius", "half_length"),
+    [(0.0, 1.0), (-1.0, 1.0), (1.0, 0.0), (1.0, -1.0), (math.nan, 1.0), (1.0, math.inf)],
+)
+def test_a_degenerate_cylinder_is_refused(radius, half_length):
+    with pytest.raises(ShapeUnusable):
+        Cylinder(
+            centre=(0.0, 0.0, 1.0), axis=(0.0, 1.0, 0.0), radius=radius, half_length=half_length
+        )
+
+
+def test_a_cylinder_with_no_axis_direction_is_refused():
+    with pytest.raises(DegenerateVector):
+        Cylinder(centre=(0.0, 0.0, 1.0), axis=(0.0, 0.0, 0.0), radius=1.0, half_length=1.0)
