@@ -1,9 +1,12 @@
 # The shear indicator does not work on single-view data
 
-Status: measured 2026-08-24, offline, against both the validation harness's own
-synthetic generator and independently rendered frames from
-`scanner3d.simulate`. This documents a defect found during integration, the
-evidence for it, and what is and is not safe to conclude from the harness today.
+Status: **the defect described below was FIXED on 2026-08-24, after this
+document was written.** The record is kept because the failure mode is worth
+remembering and because the measurements are the reason the fix happened. Skip
+to [After the fix](#after-the-fix) for current behaviour.
+
+Measured offline against both the validation harness's own synthetic generator
+and independently rendered frames from `scanner3d.simulate`.
 
 ## The claim under test
 
@@ -149,3 +152,48 @@ Neither experiment depends on trusting the other. The harness's own generator
 and `scanner3d.simulate` were written by different authors from different
 descriptions, and they agree: coverage, not fault magnitude, controls what the
 indicator can see.
+
+
+## After the fix
+
+The estimator was reworked by the module's reviewer. Re-measured the same way,
+with the same rendered frames and the same deliberately injected principal-point
+errors:
+
+| `cx` error (px) | Injected `k` | Recovered `k` | Fraction | \|correlation\| | Detected? |
+| --- | --- | --- | --- | --- | --- |
+| 0 | 0 | −0.000001 | — | 0.001 | no (correct) |
+| 1 | −0.001113 | −0.000771 | 69.3% | 0.649 | **yes** |
+| 20 | −0.022255 | −0.015371 | 69.1% | 0.832 | **yes** |
+| 100 | −0.111274 | −0.075590 | 67.9% | 0.834 | **yes** |
+| 277.56 | −0.308852 | −0.198418 | 64.2% | 0.830 | **yes** |
+
+**The false clearance is gone.** On the single-view cap a camera actually
+produces, the indicator now fires for a principal-point error as small as **1
+pixel**, and stays quiet on a clean sphere. Correlation went from a 0.247
+ceiling — permanently under the 0.35 threshold — to 0.83.
+
+**What remains.** The coefficient still under-reports, now by about a third
+rather than by twenty times: it reads 64–69% of the injected `k` across the
+whole range. That is a far less dangerous error, because 0.198 against a true
+0.309 is plainly the same order of magnitude and still obviously non-negligible,
+where 0.018 read as "nothing to see". Treat `shear_coefficient` from a single
+view as a **lower bound**, not a measurement.
+
+The advice to sweep the sphere on the turntable stands, for a different reason
+than before: fused coverage makes the coefficient accurate as well as the
+detection, and the sweep costs nothing extra once the turntable is set up.
+
+## Why this is recorded rather than deleted
+
+The original defect is the most instructive kind this codebase can produce. The
+module was not wrong in an obvious way — it worked excellently on the data its
+tests used, and its tests used a whole sphere because that is the natural thing
+to generate. It failed only on the distribution a real camera produces, and it
+failed *silently*, reporting `shear_indicator_reliable = True` beside a quiet
+indicator, which reads as a clean bill of health.
+
+What caught it was feeding a fault of known magnitude from one module into
+another written independently. Neither module's own tests could have found it,
+because each was self-consistent. That is the argument for
+`scanner3d.simulate` existing at all.
