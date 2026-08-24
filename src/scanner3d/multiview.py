@@ -1,0 +1,853 @@
+"""Align scans taken from different scanner positions, where no shared axis exists.
+
+Why this is a different problem
+-------------------------------
+:mod:`~scanner3d.registration` aligns a turntable sweep, and it works because
+the turntable *constrains* the answer: one fixed axis, a known angular step, and
+therefore a starting point already in the right neighbourhood. That constraint
+is doing nearly all the work. Measured on a real model truck bed, plain
+point-to-point ICP between frames 15-20 degrees apart converges to within about
+one degree of the identity and reports ``converged=True`` while being completely
+wrong.
+
+Move the scanner - to reach the top of an object, or its underside - and the
+constraint is gone. The new frames share no axis with the old ones, and the
+transform between them is a general six-degree-of-freedom rotation and
+translation that may be very large. Handing that to ICP directly reproduces
+exactly the failure above: it slides into a local minimum near wherever it
+started and announces success.
+
+So this module does the part ICP cannot: it finds a *starting point*. Refinement
+is still ICP's job, and this module hands off to it.
+
+The strategy, and why it is this one
+------------------------------------
+Align whole fused clouds, not individual frames. A single depth frame of a
+featureless panel carries almost no constraint; a fused sweep carries the whole
+object. So the intended flow is:
+
+1. register each sweep on its own turntable axis (:mod:`registration`),
+2. fuse each sweep to one cloud (:mod:`fusion`),
+3. align the fused clouds to each other - this module,
+4. fuse the aligned result.
+
+For the coarse step, candidate orientations come from two sources. The principal
+axes of each cloud give four candidates (eigenvector signs are arbitrary, and
+only the sign combinations with determinant +1 are rotations). Those are cheap
+and often right. But principal axes are meaningless when a cloud's eigenvalues
+are close together - a roughly cubic or rotationally symmetric object has no
+distinguishable principal frame - so the octahedral rotation group is also
+applied on top, giving broad coverage without a full SO(3) search.
+
+Every candidate is scored on heavily decimated clouds, because the point of the
+coarse stage is ranking, not precision.
+
+What this does NOT do
+---------------------
+It does not decide whether an alignment is *correct*. It reports the residual
+and the overlap it achieved and refuses when the best candidate is not clearly
+better than the runner-up, because an alignment that ties with a wrong one is
+not evidence of anything. A confident-looking wrong transform is the specific
+failure this module exists to prevent, so it would be perverse to produce one.
+
+No physical unit is implied anywhere. Distances are in whatever the depth scale
+produced.
+"""
+
+from __future__ import annotations
+
+import itertools
+import math
+from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import Final
+
+from scanner3d.errors import DoctorStatus, ScannerError
+from scanner3d.geometry import (
+    Matrix3,
+    Point,
+    Rigid,
+    centroid,
+    dot,
+    ensure_rotation,
+    spanned_dimensions,
+    subtract,
+)
+
+SCHEMA_VERSION: Final = 1
+
+#: Fewest points a cloud may have and still be worth aligning. Below this the
+#: principal frame is noise and the residual means nothing.
+MIN_ALIGN_POINTS: Final = 50
+
+#: Points kept for candidate SCORING. The coarse stage ranks orientations; it
+#: does not need precision, and scoring is quadratic in this number.
+COARSE_SAMPLE: Final = 400
+
+#: Cell size for the scoring grid, as a fraction of the cloud's extent. Coarse
+#: enough that a roughly-right candidate scores well, fine enough to separate it
+#: from a wrong one.
+SCORE_CELL_FRACTION: Final = 0.04
+
+#: How much better the best candidate must be than the runner-up to be reported
+#: as unambiguous. A tie means the geometry does not distinguish them - common
+#: for symmetric objects - and saying so is more useful than picking one.
+AMBIGUITY_MARGIN: Final = 1.15
+
+#: Eigenvalue ratio below which a cloud's principal axes are treated as
+#: degenerate: two comparable extents leave the frame undetermined about the
+#: axis between them.
+PRINCIPAL_DEGENERACY_RATIO: Final = 1.25
+
+
+class MultiviewNotAllowed(ScannerError):
+    """An alignment was requested that this module refuses to attempt."""
+
+    status = DoctorStatus.UNSUPPORTED_MODE
+
+
+class CloudTooSmall(MultiviewNotAllowed):
+    """A cloud has too few points for its principal frame to mean anything."""
+
+
+class CloudDegenerate(MultiviewNotAllowed):
+    """A cloud does not span three dimensions, so no orientation is determined."""
+
+
+@dataclass(frozen=True, slots=True)
+class AlignmentCandidate:
+    """One coarse orientation and how well it scored. Not an answer on its own."""
+
+    transform: Rigid
+    score: float
+    matched: int
+    origin: str
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "score": self.score,
+            "matched": self.matched,
+            "origin": self.origin,
+            "transform": self.transform.as_dict(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class CoarseAlignment:
+    """The ranked coarse candidates, and whether the best is clearly best."""
+
+    candidates: tuple[AlignmentCandidate, ...]
+    unambiguous: bool
+    margin: float
+    source_principal_degenerate: bool
+    target_principal_degenerate: bool
+    limitations: tuple[str, ...]
+
+    @property
+    def best(self) -> AlignmentCandidate | None:
+        return self.candidates[0] if self.candidates else None
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "candidates": [c.as_dict() for c in self.candidates[:5]],
+            "considered": len(self.candidates),
+            "unambiguous": self.unambiguous,
+            "margin": self.margin,
+            "source_principal_degenerate": self.source_principal_degenerate,
+            "target_principal_degenerate": self.target_principal_degenerate,
+            "limitations": list(self.limitations),
+        }
+
+
+def _covariance(points: Sequence[Point], centre: Point) -> list[list[float]]:
+    xx = xy = xz = yy = yz = zz = 0.0
+    for p in points:
+        a, b, c = p[0] - centre[0], p[1] - centre[1], p[2] - centre[2]
+        xx += a * a
+        xy += a * b
+        xz += a * c
+        yy += b * b
+        yz += b * c
+        zz += c * c
+    return [[xx, xy, xz], [xy, yy, yz], [xz, yz, zz]]
+
+
+def _jacobi(matrix: list[list[float]], sweeps: int = 64) -> tuple[list[float], list[list[float]]]:
+    """Symmetric eigen-decomposition by cyclic Jacobi rotations.
+
+    The same method :mod:`geometry` uses, for the same reason: unconditionally
+    stable on symmetric matrices and needing no external library.
+    """
+    size = len(matrix)
+    a = [row[:] for row in matrix]
+    v = [[1.0 if i == j else 0.0 for j in range(size)] for i in range(size)]
+    for _ in range(sweeps):
+        off = math.fsum(a[i][j] ** 2 for i in range(size) for j in range(i + 1, size))
+        if off < 1e-30:
+            break
+        for p in range(size - 1):
+            for q in range(p + 1, size):
+                if abs(a[p][q]) < 1e-30:
+                    continue
+                theta = (a[q][q] - a[p][p]) / (2.0 * a[p][q])
+                sign = 1.0 if theta >= 0.0 else -1.0
+                t = sign / (abs(theta) + math.sqrt(theta * theta + 1.0))
+                c = 1.0 / math.sqrt(t * t + 1.0)
+                s = t * c
+                for k in range(size):
+                    akp, akq = a[k][p], a[k][q]
+                    a[k][p], a[k][q] = c * akp - s * akq, s * akp + c * akq
+                for k in range(size):
+                    apk, aqk = a[p][k], a[q][k]
+                    a[p][k], a[q][k] = c * apk - s * aqk, s * apk + c * aqk
+                for k in range(size):
+                    vkp, vkq = v[k][p], v[k][q]
+                    v[k][p], v[k][q] = c * vkp - s * vkq, s * vkp + c * vkq
+    return [a[i][i] for i in range(size)], v
+
+
+def principal_frame(points: Sequence[Point]) -> tuple[Matrix3, bool]:
+    """The cloud's principal axes as a rotation, and whether they are degenerate.
+
+    Columns are the eigenvectors of the centred covariance, ordered by
+    descending eigenvalue. The second return value is ``True`` when two
+    eigenvalues are within :data:`PRINCIPAL_DEGENERACY_RATIO` of each other,
+    which means the frame is *not* determined by the geometry and any candidate
+    derived from it is a guess rather than an estimate.
+    """
+    if len(points) < MIN_ALIGN_POINTS:
+        raise CloudTooSmall(
+            f"{len(points)} points is below the {MIN_ALIGN_POINTS} needed for a "
+            "principal frame to carry any information"
+        )
+    if spanned_dimensions(points) < 3:
+        raise CloudDegenerate(
+            "the cloud does not span three dimensions, so no orientation is determined"
+        )
+    centre = centroid(points)
+    values, vectors = _jacobi(_covariance(points, centre))
+    order = sorted(range(3), key=lambda i: values[i], reverse=True)
+    ordered = [values[i] for i in order]
+    degenerate = any(
+        ordered[i + 1] > 0.0 and ordered[i] / ordered[i + 1] < PRINCIPAL_DEGENERACY_RATIO
+        for i in range(2)
+    )
+    columns = [[vectors[r][order[c]] for c in range(3)] for r in range(3)]
+    matrix: Matrix3 = (
+        (columns[0][0], columns[0][1], columns[0][2]),
+        (columns[1][0], columns[1][1], columns[1][2]),
+        (columns[2][0], columns[2][1], columns[2][2]),
+    )
+    # Force a right-handed frame: an eigenvector triple can come back as a
+    # reflection, and geometry.Rigid would rightly refuse it.
+    if _det(matrix) < 0.0:
+        matrix = (
+            (-matrix[0][0], matrix[0][1], matrix[0][2]),
+            (-matrix[1][0], matrix[1][1], matrix[1][2]),
+            (-matrix[2][0], matrix[2][1], matrix[2][2]),
+        )
+    return ensure_rotation(matrix), degenerate
+
+
+def _det(m: Matrix3) -> float:
+    return (
+        m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+    )
+
+
+def _transpose(m: Matrix3) -> Matrix3:
+    return ((m[0][0], m[1][0], m[2][0]), (m[0][1], m[1][1], m[2][1]), (m[0][2], m[1][2], m[2][2]))
+
+
+def _multiply(a: Matrix3, b: Matrix3) -> Matrix3:
+    return tuple(  # type: ignore[return-value]
+        tuple(math.fsum(a[i][k] * b[k][j] for k in range(3)) for j in range(3)) for i in range(3)
+    )
+
+
+def octahedral_rotations() -> tuple[Matrix3, ...]:
+    """The 24 rotations mapping a cube onto itself.
+
+    Applied on top of the principal-axis candidates so that a cloud whose
+    principal frame is degenerate - a near-cubic or rotationally symmetric
+    object, where the axes carry no information - is still covered. Cheaper and
+    better conditioned than sampling SO(3) blindly.
+    """
+    found: list[Matrix3] = []
+    for perm in itertools.permutations(range(3)):
+        for signs in itertools.product((1.0, -1.0), repeat=3):
+            rows = []
+            for i in range(3):
+                row = [0.0, 0.0, 0.0]
+                row[perm[i]] = signs[i]
+                rows.append(tuple(row))
+            candidate: Matrix3 = (rows[0], rows[1], rows[2])  # type: ignore[assignment]
+            if abs(_det(candidate) - 1.0) < 1e-9:
+                found.append(candidate)
+    return tuple(found)
+
+
+def _decimate(points: Sequence[Point], target: int) -> tuple[Point, ...]:
+    if len(points) <= target:
+        return tuple(points)
+    step = len(points) / target
+    return tuple(points[int(i * step)] for i in range(target))
+
+
+def _score(
+    moved: Sequence[Point], grid: dict[tuple[int, int, int], list[Point]], cell: float
+) -> tuple[float, int]:
+    """Mean nearest-neighbour distance over matched points, and how many matched.
+
+    Unmatched points are excluded rather than penalised with a large distance:
+    a partial view legitimately has points the other view never saw, and
+    charging for them would favour transforms that hide the object rather than
+    align it. The matched COUNT is returned alongside so a caller can see when a
+    good-looking score came from very little overlap.
+    """
+    total = 0.0
+    matched = 0
+    for p in moved:
+        key = (int(p[0] // cell), int(p[1] // cell), int(p[2] // cell))
+        best = math.inf
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    for q in grid.get((key[0] + dx, key[1] + dy, key[2] + dz), ()):
+                        d = (p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2 + (p[2] - q[2]) ** 2
+                        if d < best:
+                            best = d
+        if best < math.inf:
+            total += math.sqrt(best)
+            matched += 1
+    if matched == 0:
+        return math.inf, 0
+    return total / matched, matched
+
+
+def _extent(points: Sequence[Point]) -> float:
+    lo = [min(p[i] for p in points) for i in range(3)]
+    hi = [max(p[i] for p in points) for i in range(3)]
+    return max(hi[i] - lo[i] for i in range(3))
+
+
+def coarse_align(
+    source: Sequence[Point],
+    target: Sequence[Point],
+    *,
+    sample: int = COARSE_SAMPLE,
+    include_octahedral: bool = True,
+) -> CoarseAlignment:
+    """Rank candidate orientations taking ``source`` onto ``target``.
+
+    Returns candidates, best first, and says whether the best is *clearly* best.
+    This is a starting point for ICP, not an alignment: the scores come from
+    heavily decimated clouds and a coarse grid, which is all that ranking needs.
+    """
+    src_frame, src_degenerate = principal_frame(source)
+    dst_frame, dst_degenerate = principal_frame(target)
+    src_centre, dst_centre = centroid(source), centroid(target)
+
+    small_src = _decimate(source, sample)
+    small_dst = _decimate(target, sample)
+    cell = max(_extent(target) * SCORE_CELL_FRACTION, 1e-6)
+    grid: dict[tuple[int, int, int], list[Point]] = {}
+    for q in small_dst:
+        grid.setdefault((int(q[0] // cell), int(q[1] // cell), int(q[2] // cell)), []).append(q)
+
+    # The composition order matters and is easy to get backwards. The sign and
+    # axis ambiguity of an eigenvector triple lives in the PRINCIPAL frame, so
+    # the extra rotation has to sit between the two frames:
+    #
+    #     candidate = dst_frame @ extra @ src_frame^T
+    #
+    # Post-multiplying the already-composed transform instead applies the extra
+    # rotation in the source's original coordinates, which is a different and
+    # wrong thing. Written the wrong way round it recovers a small turn exactly
+    # and fails completely on a flip - measured 140 degrees of error on a
+    # 180-degree flip - because a small turn does not need the sign correction
+    # and a flip is nothing but one.
+    src_t = _transpose(src_frame)
+    bases: list[tuple[Matrix3, str]] = [(_multiply(dst_frame, src_t), "principal")]
+    if include_octahedral:
+        for extra in octahedral_rotations():
+            bases.append((_multiply(_multiply(dst_frame, extra), src_t), "principal+octahedral"))
+
+    seen: set[tuple[int, ...]] = set()
+    candidates: list[AlignmentCandidate] = []
+    for rotation, origin in bases:
+        key = tuple(round(v * 1e6) for row in rotation for v in row)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            spin = Rigid.of(rotation, (0.0, 0.0, 0.0))
+        except ScannerError:
+            continue
+        moved_centre = spin.apply(src_centre)
+        transform = Rigid.of(rotation, subtract(dst_centre, moved_centre))
+        score, matched = _score(tuple(transform.apply_all(small_src)), grid, cell)
+        if matched:
+            candidates.append(AlignmentCandidate(transform, score, matched, origin))
+
+    candidates.sort(key=lambda c: (c.score, -c.matched))
+    margin = math.inf
+    if len(candidates) >= 2 and candidates[0].score > 0.0:
+        margin = candidates[1].score / candidates[0].score
+    unambiguous = bool(candidates) and margin >= AMBIGUITY_MARGIN
+
+    limitations = [
+        "A coarse orientation is a starting point for ICP, not an alignment. The scores "
+        "come from decimated clouds on a coarse grid and are for ranking only.",
+        "Unmatched points are excluded from the score rather than penalised, so a high "
+        "score with a low matched count means very little overlap, not a good fit.",
+    ]
+    if src_degenerate or dst_degenerate:
+        limitations.append(
+            "At least one cloud has near-equal principal extents, so its principal frame "
+            "is not determined by its geometry. The principal candidate is a guess there; "
+            "the octahedral set is what is actually doing the work."
+        )
+    if not unambiguous:
+        limitations.append(
+            f"The best candidate is only {margin:.2f}x better than the runner-up, under the "
+            f"{AMBIGUITY_MARGIN} margin. The geometry does not clearly distinguish them - "
+            "common for symmetric objects - and picking one anyway would manufacture "
+            "confidence that is not there."
+        )
+    return CoarseAlignment(
+        candidates=tuple(candidates),
+        unambiguous=unambiguous,
+        margin=margin,
+        source_principal_degenerate=src_degenerate,
+        target_principal_degenerate=dst_degenerate,
+        limitations=tuple(limitations),
+    )
+
+
+def overlap_fraction(
+    source: Sequence[Point], target: Sequence[Point], transform: Rigid, *, tolerance: float
+) -> float:
+    """Fraction of ``source`` landing within ``tolerance`` of some target point.
+
+    Reported alongside any residual, because a small residual over 5% of the
+    cloud says nothing. Overlap is what tells a reader whether the residual is
+    describing the object or a corner of it.
+    """
+    if not source or not target:
+        return 0.0
+    cell = max(tolerance, 1e-6)
+    grid: dict[tuple[int, int, int], list[Point]] = {}
+    for q in target:
+        grid.setdefault((int(q[0] // cell), int(q[1] // cell), int(q[2] // cell)), []).append(q)
+    within = 0
+    limit = tolerance * tolerance
+    for p in transform.apply_all(source):
+        key = (int(p[0] // cell), int(p[1] // cell), int(p[2] // cell))
+        hit = False
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    for q in grid.get((key[0] + dx, key[1] + dy, key[2] + dz), ()):
+                        if dot(subtract(p, q), subtract(p, q)) <= limit:
+                            hit = True
+                            break
+                    if hit:
+                        break
+                if hit:
+                    break
+            if hit:
+                break
+        within += hit
+    return within / len(source)
+
+
+@dataclass(frozen=True, slots=True)
+class DriftPair:
+    """Two frames that see the same surface, and how far apart they place it."""
+
+    first: int
+    second: int
+    index_gap: int
+    residual: float
+    overlap: float
+    compared: int
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "first": self.first,
+            "second": self.second,
+            "index_gap": self.index_gap,
+            "residual": self.residual,
+            "overlap": self.overlap,
+            "compared": self.compared,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ModelDrift:
+    """How well a registered model agrees with itself, measured geometrically.
+
+    This replaces loop closure as the quality metric, and the reason is a
+    limitation of loop closure rather than a preference. Closure composes every
+    frame-to-frame transform and compares the result against the identity, which
+    silently assumes the capture covered exactly one revolution. It therefore
+    needs the angular step to be known precisely: on real data, three
+    independent estimates of one turntable's rate disagreed by 10%, and the
+    reported closure swung from 5 to 23 degrees purely on which was assumed. The
+    number was describing the assumption, not the scan.
+
+    Worse, closure cannot exist at all for a handheld capture, which is how this
+    scanner is mainly meant to be used. There are no revolutions and no step.
+
+    So drift is measured the way a reader would actually check: find frames that
+    look at the same surface but are far apart in capture order, and see whether
+    the model puts that surface in the same place twice. If registration drifted,
+    they disagree. No angles are involved, nothing is assumed about the path the
+    camera took, and it works identically for a turntable and a handheld sweep.
+    """
+
+    pairs: tuple[DriftPair, ...]
+    frames: int
+    min_index_gap: int
+    tolerance: float
+    limitations: tuple[str, ...]
+
+    @property
+    def overlapping(self) -> tuple[DriftPair, ...]:
+        return tuple(p for p in self.pairs if p.compared > 0)
+
+    @property
+    def median_residual(self) -> float | None:
+        found = sorted(p.residual for p in self.overlapping)
+        return found[len(found) // 2] if found else None
+
+    @property
+    def worst(self) -> DriftPair | None:
+        found = self.overlapping
+        return max(found, key=lambda p: p.residual) if found else None
+
+    def as_dict(self) -> dict[str, object]:
+        worst = self.worst
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "frames": self.frames,
+            "min_index_gap": self.min_index_gap,
+            "tolerance": self.tolerance,
+            "pairs_examined": len(self.pairs),
+            "pairs_overlapping": len(self.overlapping),
+            "median_residual": self.median_residual,
+            "worst": worst.as_dict() if worst else None,
+            "limitations": list(self.limitations),
+        }
+
+
+def model_drift(
+    clouds: Sequence[Sequence[Point]],
+    transforms: Sequence[Rigid],
+    *,
+    tolerance: float,
+    min_index_gap: int = 4,
+    sample: int = COARSE_SAMPLE,
+) -> ModelDrift:
+    """Measure a registered model's self-agreement, without reference to angles.
+
+    Pairs of frames separated by at least ``min_index_gap`` in capture order are
+    compared where they overlap in space. Adjacent frames are excluded on
+    purpose: consecutive frames were aligned *to each other*, so their agreement
+    is what registration optimised and says nothing about accumulated error.
+    Distant pairs were never compared during registration, so their agreement is
+    independent evidence.
+
+    ``tolerance`` sets what counts as the same surface. It should be a few times
+    the expected point spacing: too tight and nothing matches, too loose and
+    everything does.
+
+    A pair with ``compared == 0`` simply never saw common ground and carries no
+    information - it is reported, not silently dropped, so a reader can see how
+    much of the model was actually checked.
+    """
+    if len(clouds) != len(transforms):
+        raise MultiviewNotAllowed(
+            f"{len(clouds)} clouds against {len(transforms)} transforms: one transform per cloud"
+        )
+    if len(clouds) < 2:
+        raise MultiviewNotAllowed("drift needs at least two frames to compare")
+    if not tolerance > 0.0:
+        raise MultiviewNotAllowed(f"tolerance must be positive, got {tolerance}")
+
+    placed = [
+        _decimate(tuple(t.apply_all(c)), sample) for c, t in zip(clouds, transforms, strict=True)
+    ]
+    cell = tolerance
+    grids: list[dict[tuple[int, int, int], list[Point]]] = []
+    for pts in placed:
+        grid: dict[tuple[int, int, int], list[Point]] = {}
+        for q in pts:
+            grid.setdefault((int(q[0] // cell), int(q[1] // cell), int(q[2] // cell)), []).append(q)
+        grids.append(grid)
+
+    limit = tolerance * tolerance
+    pairs: list[DriftPair] = []
+    for i in range(len(placed)):
+        for j in range(i + min_index_gap, len(placed)):
+            total = 0.0
+            matched = 0
+            for p in placed[i]:
+                key = (int(p[0] // cell), int(p[1] // cell), int(p[2] // cell))
+                best = math.inf
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        for dz in (-1, 0, 1):
+                            for q in grids[j].get((key[0] + dx, key[1] + dy, key[2] + dz), ()):
+                                d = dot(subtract(p, q), subtract(p, q))
+                                if d < best:
+                                    best = d
+                if best <= limit:
+                    total += math.sqrt(best)
+                    matched += 1
+            residual = (total / matched) if matched else math.inf
+            pairs.append(
+                DriftPair(
+                    first=i,
+                    second=j,
+                    index_gap=j - i,
+                    residual=residual,
+                    overlap=matched / len(placed[i]) if placed[i] else 0.0,
+                    compared=matched,
+                )
+            )
+
+    limitations = [
+        "Drift is agreement between frames that were never aligned to each other. It is "
+        "evidence of consistency, not of correctness: a model can be self-consistent and "
+        "still be the wrong shape if the calibration is wrong.",
+        "Only pairs that overlap in space carry information. The count of overlapping "
+        "pairs says how much of the model was actually checked.",
+        "The residual is bounded above by the tolerance by construction, since points "
+        "further apart than that are not treated as the same surface. A residual near the "
+        "tolerance means the pair barely agreed, not that it agreed to that precision.",
+    ]
+    return ModelDrift(
+        pairs=tuple(pairs),
+        frames=len(clouds),
+        min_index_gap=min_index_gap,
+        tolerance=tolerance,
+        limitations=tuple(limitations),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ModelRefinement:
+    """Poses refined against the accumulated model rather than against neighbours.
+
+    Why this exists
+    ---------------
+    :func:`~scanner3d.registration.register_turntable` CHAINS: frame 2 is
+    aligned to frame 1, frame 3 to frame 2, and each pairwise error compounds
+    down the chain. More frames therefore means a longer chain and *more*
+    accumulated error, which is the opposite of what anyone reasonably expects
+    from adding data. Measured on a real sweep, a second lap took the pose error
+    from 1.07 to 1.99 degrees, and self-agreement between frames degraded
+    steadily with how far apart in capture order they were.
+
+    Refining against the model breaks the chain. Every frame is aligned to
+    everything else seen, so one frame's error is corrected by the consensus of
+    the rest instead of being handed to its successor. More frames become more
+    constraint, which is the behaviour a user is entitled to expect.
+
+    What it does NOT do
+    -------------------
+    This is not bundle adjustment. Poses are refined one at a time against a
+    model built from the current estimate, not solved jointly, so it can settle
+    into a consistent-but-wrong configuration if the starting point is badly
+    wrong. It improves a reasonable estimate; it does not rescue a broken one.
+
+    It also cannot make a self-consistent model *correct*. Agreement is not
+    accuracy, and a systematic calibration error survives this untouched.
+    """
+
+    transforms: tuple[Rigid, ...]
+    residual_history: tuple[float, ...]
+    iterations_run: int
+    converged: bool
+    residual_improved: bool
+    anchor: int
+    limitations: tuple[str, ...]
+
+    @property
+    def initial_residual(self) -> float | None:
+        return self.residual_history[0] if self.residual_history else None
+
+    @property
+    def final_residual(self) -> float | None:
+        return self.residual_history[-1] if self.residual_history else None
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "frames": len(self.transforms),
+            "iterations_run": self.iterations_run,
+            "converged": self.converged,
+            "residual_improved": self.residual_improved,
+            "anchor": self.anchor,
+            "initial_residual": self.initial_residual,
+            "final_residual": self.final_residual,
+            "residual_history": list(self.residual_history),
+            "limitations": list(self.limitations),
+        }
+
+
+def _model_index(
+    clouds: Sequence[Sequence[Point]],
+    transforms: Sequence[Rigid],
+    *,
+    skip: int | None,
+    cell: float,
+) -> dict[tuple[int, int, int], list[Point]]:
+    """Spatial index of every frame placed in world coordinates.
+
+    ``skip`` excludes one frame, and excluding the frame being aligned matters:
+    a model containing it would partly match the frame against itself and pull
+    the answer toward the pose it already has, which is the error being
+    corrected.
+    """
+    grid: dict[tuple[int, int, int], list[Point]] = {}
+    for index, (cloud, transform) in enumerate(zip(clouds, transforms, strict=True)):
+        if index == skip:
+            continue
+        for p in transform.apply_all(cloud):
+            grid.setdefault((int(p[0] // cell), int(p[1] // cell), int(p[2] // cell)), []).append(p)
+    return grid
+
+
+def _nearest_in(
+    grid: dict[tuple[int, int, int], list[Point]], p: Point, cell: float, limit: float
+) -> Point | None:
+    key = (int(p[0] // cell), int(p[1] // cell), int(p[2] // cell))
+    best: Point | None = None
+    best_d = limit * limit
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            for dz in (-1, 0, 1):
+                for q in grid.get((key[0] + dx, key[1] + dy, key[2] + dz), ()):
+                    d = dot(subtract(p, q), subtract(p, q))
+                    if d < best_d:
+                        best_d, best = d, q
+    return best
+
+
+def refine_against_model(
+    clouds: Sequence[Sequence[Point]],
+    transforms: Sequence[Rigid],
+    *,
+    tolerance: float,
+    iterations: int = 4,
+    anchor: int = 0,
+    sample: int = 300,
+    min_improvement: float = 0.01,
+) -> ModelRefinement:
+    """Re-align every frame to the model, repeatedly, instead of to its neighbour.
+
+    Returns refined poses and the residual after each pass. If refinement made
+    things WORSE, the original transforms are returned unchanged and
+    ``improved`` is False. An optimiser that can quietly degrade a scan is worse
+    than none, so the outcome is measured and recorded rather than assumed.
+
+    ``anchor`` names the frame held fixed. Without it the whole model is free to
+    drift bodily through space, because aligning everything to everything else
+    constrains relative poses but pins no origin.
+    """
+    from scanner3d.geometry import rigid_from_correspondences
+
+    if len(clouds) != len(transforms):
+        raise MultiviewNotAllowed(
+            f"{len(clouds)} clouds against {len(transforms)} transforms: one each"
+        )
+    if len(clouds) < 3:
+        raise MultiviewNotAllowed("refining against a model needs at least three frames")
+    if not 0 <= anchor < len(clouds):
+        raise MultiviewNotAllowed(f"anchor {anchor} is not a frame index")
+    if iterations < 1:
+        raise MultiviewNotAllowed(f"iterations must be at least 1, got {iterations}")
+    if not tolerance > 0.0:
+        raise MultiviewNotAllowed(f"tolerance must be positive, got {tolerance}")
+
+    current = list(transforms)
+    samples = [_decimate(tuple(c), sample) for c in clouds]
+
+    def residual_now(poses: Sequence[Rigid]) -> float:
+        total, count = 0.0, 0
+        for index, pts in enumerate(samples):
+            grid = _model_index(clouds, poses, skip=index, cell=tolerance)
+            for p in poses[index].apply_all(pts):
+                q = _nearest_in(grid, p, tolerance, tolerance)
+                if q is not None:
+                    total += math.sqrt(dot(subtract(p, q), subtract(p, q)))
+                    count += 1
+        return total / count if count else math.inf
+
+    history = [residual_now(current)]
+    converged = False
+    for _ in range(iterations):
+        for index, pts in enumerate(samples):
+            grid = _model_index(clouds, current, skip=index, cell=tolerance)
+            placed = tuple(current[index].apply_all(pts))
+            src: list[Point] = []
+            dst: list[Point] = []
+            for p in placed:
+                q = _nearest_in(grid, p, tolerance, tolerance)
+                if q is not None:
+                    src.append(p)
+                    dst.append(q)
+            if len(src) < 3 or spanned_dimensions(src) < 2:
+                continue
+            try:
+                correction = rigid_from_correspondences(src, dst)
+            except ScannerError:
+                continue
+            current[index] = correction.compose(current[index])
+        # Re-anchor, so the model cannot wander bodily while agreeing with itself.
+        drifted = current[anchor].compose(transforms[anchor].inverse())
+        back = drifted.inverse()
+        current = [back.compose(t) for t in current]
+        history.append(residual_now(current))
+        if history[-2] - history[-1] < min_improvement * history[-2]:
+            converged = True
+            break
+
+    residual_improved = history[-1] < history[0]
+    limitations = [
+        "Not bundle adjustment: poses are refined one at a time against a model built "
+        "from the current estimate, not solved jointly. It improves a reasonable starting "
+        "point and cannot rescue a badly wrong one.",
+        "MEASURED WARNING: a falling residual does NOT mean a better scan. On a synthetic "
+        "sweep with known ground truth, this reduced the residual by 40% (0.712 -> 0.424) "
+        "while DOUBLING the true pose error (mean 0.672 -> 1.303 degrees, worst 1.273 -> "
+        "2.843). Free six-degree-of-freedom refinement against a self-consistency objective "
+        "is under-constrained: the poses can agree with each other better while collectively "
+        "drifting away from the truth. `residual_improved` names what it measures and is not "
+        "a claim about accuracy.",
+        "Self-consistency is not accuracy. A systematic calibration error is untouched by "
+        "this and survives into a model that agrees with itself perfectly.",
+        "The frame being aligned is excluded from the model it aligns to, so no frame "
+        "holds itself in place - but every other frame's current error is still part of "
+        "what it aligns against.",
+    ]
+    if not residual_improved:
+        limitations.append(
+            f"Refinement did NOT improve the residual ({history[0]:.4f} -> {history[-1]:.4f}), "
+            "so the original transforms were returned unchanged."
+        )
+    return ModelRefinement(
+        transforms=tuple(current if residual_improved else transforms),
+        residual_history=tuple(history),
+        iterations_run=len(history) - 1,
+        converged=converged,
+        residual_improved=residual_improved,
+        anchor=anchor,
+        limitations=tuple(limitations),
+    )
