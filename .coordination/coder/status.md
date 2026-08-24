@@ -1,40 +1,50 @@
-state: review
-task: firmware/illumination continuation + software focus
+state: implementing
+task: commit the repo; build+test the M4-M7 pipeline (validation, registration, fusion, mesh)
 round: 1
-activity: DSP mailbox door found and the projector command block mapped; the scanner's undocumented wireless stack discovered, measured, documented, and confirmed beaconing over the air by the owner; depth-frame-to-ply CLI and session-manifest capture wiring both landed with full gates green. A probe of mine took the device off the USB bus mid-session; the owner replugged and it is fully recovered.
+activity: repo committed (5 commits, was previously ZERO - nothing had ever been version controlled). Nine irreplaceable depth frames preserved as fixtures. scanner3d.geometry foundation written, verified and committed. Capture checklist written. M5's unreachable exit criterion withdrawn and replaced. Four pipeline modules currently being built and adversarially reviewed by a workflow.
 
-## Device incident — RESOLVED by owner replug
+## Commits this round
 
-The scanner was taken off the USB bus mid-session and required a physical
-unplug/replug. The owner has since replugged it and it is FULLY RECOVERED:
-devnum 73, all five interfaces bound (0-3 uvcvideo, 4 usbhid), all four video
-nodes present. Recorded here because the cause and the fix both matter.
+- eff68d9 Initial commit (166 files). The repository had NEVER been committed:
+  zero tracked files, unborn main. Every line of code and every piece of
+  measured evidence existed only as loose working-tree files.
+- 6cf221e The nine real depth frames as tests/fixtures/frames/, with a
+  provenance manifest. They previously lived only under a scratchpad path
+  embedding a session id that exists on no other machine, so the real-frame
+  tests skipped on any fresh checkout. Recomputing from the committed bytes
+  reproduces the documented figures exactly: 2304000 samples, 79.4788% zeros,
+  smallest non-zero code 17.
+- a1234c0 scanner3d.geometry - rigid transforms, rotation about an arbitrary
+  axis, Horn's closed-form alignment, pose-difference metrics.
+- 7026b89 docs/capture-checklist.md - the physical half of M4/M6.
+- ba0e96e M5's exit criterion withdrawn as unreachable, replaced.
 
-Cause, stated plainly: probe scanner-073 included
-`grep -rl USB_CONFIG_FILE /etc /usr/bin`, a recursive grep over a directory of
-binaries, sent down a command channel whose per-transfer timeout is 1000 ms.
-The command outran the timeout, the probe aborted mid-sequence, and its cleanup
-transfer failed. Interfaces 0 and 1 lost their driver; the host kernel log
-showed `uvcvideo` being probed and the DEVICE answering `-71 (EPROTO)` to every
-UVC control query, ending `Failed to initialize the device (-71)` — a
-device-side wedge, not a host-side unbind. Reissuing USBDEVFS_CONNECT for both
-interfaces returned 0 and changed nothing. A USB port reset (USBDEVFS_RESET)
-was then issued as the standard remedy; the device disconnected
-(`usb 1-1.1: USB disconnect, device number 72`) and did not come back.
+## Two findings worth the planner's attention
 
-No persistent change was made: rootfs is mounted read-only, every probe wrote
-only to /tmp (tmpfs, RAM), no firmware was flashed, and a replug has fully
-recovered this unit from a comparable state before. The failure is recoverable
-by the owner in seconds, but only by the owner.
+geometry_rotation_angle: Rotation magnitude uses atan2(|sin t|, cos t), not
+acos((trace-1)/2). acos is severely ill-conditioned near the identity -
+acos(1-e) ~ sqrt(2e) - putting a ~1e-8 rad noise floor on exactly the
+measurement loop closure exists to make. A well-closed turntable loop would
+have reported the floor instead of its true error. Measured: 1.7e-16 rad
+against 6.3e-8 rad on a 36-step revolution, relative error ~1e-16 maintained
+from 1e-6 to 179.999 degrees.
 
-Root cause, FIXED: probe commands were validated for length, read-only-ness and
-output destination but NOT for bounded runtime, and the validation ran AFTER the
-runnable file was written, so nothing stopped it being executed. Both are now
-fixed in the derivation script: `ensure_bounded_runtime` refuses recursive
-greps, `find` without `-xdev`, and `cat` of a log file, and all validation runs
-BEFORE the file is written. Verified against the exact fatal command (refused,
-no file produced) and against the ten commands that ran safely (all pass):
-0 false positives, 0 misses.
+m5_criterion_withdrawn: M5 demanded comparison against SDK-derived output. The
+vendor SDK cannot connect to this unit at all, so the criterion was unreachable
+by construction. Replaced with caliper ground truth plus a predeclared
+tolerance, which is strictly stronger - agreement between two implementations
+never established that either was right.
+
+## Working envelope, measured from the committed frames
+
+Depth codes returned: p1 16817, median 23398, p99 58002. At the unproven scale
+that implies ~84 to ~290 unknown units, median ~117. Field of view 36.3 x 25.0
+degrees, and the principal point sits 6.6% across a 640-wide frame - near the
+left edge. A target 40-70 units across fills the frame usefully.
+
+The median implying ~117 is *consistent with* the MINI's documented 100-200mm
+working distance. That is a coincidence, not evidence, and it is exactly the
+kind this project has been fooled by before. One caliper reading settles it.
 
 ## Firmware findings this round
 
