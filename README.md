@@ -348,6 +348,50 @@ resolves the depth/RGB roles from each USB interface's **string descriptor**
 (`DepthCam<serial>` / `RGBCam<serial>`) rather than from `/dev/videoN` numbering, which is assigned
 in probe order and is not stable across replug or reboot.
 
+## The reconstruction pipeline (entirely offline, no hardware)
+
+Everything from here on is arithmetic over captured bytes. None of it opens a
+device, and all of it runs on the nine real frames committed under
+`tests/fixtures/frames/`.
+
+| Module | What it does |
+| --- | --- |
+| `depth_metric` | one raw `Y16 ` frame -> 3D points, with the accounting for every excluded sample |
+| `cloud_export` | joins that to the writer, carrying every caveat across |
+| `pointcloud` | writes PLY, with the caveats inside the file |
+| `geometry` | rigid transforms, rotation about an arbitrary axis, Horn's best-fit alignment |
+| `registration` | aligns a turntable sweep and reports **loop-closure error** |
+| `fusion` | merges registered clouds on a voxel grid |
+| `mesh` | marching cubes over the fused occupancy grid, OBJ/PLY export |
+| `validation` | fits a sphere or plane and compares it to a **caliper** reading |
+| `simulate` | renders synthetic frames of known shapes, for testing against ground truth |
+
+Two of those deserve a note.
+
+**`simulate` exists because self-consistency is not correctness.** Registration
+that converges, fusion that merges and a mesh that closes can all be wrong in
+the same direction with nothing in the pipeline noticing. It renders real
+512000-byte frames of shapes whose geometry is known exactly, so the pipeline
+can be checked against an answer it did not compute. Measured: a rendered sphere
+deprojects back onto its own surface to within uint16 quantisation
+(0.002492 against a 0.002500 limit), so it is the exact inverse of the
+production deprojection rather than a second opinion from the same arithmetic.
+
+**`registration` reports loop-closure error**, which is why a turntable is worth
+its cost: compose every frame-to-frame transform around a full revolution and
+compare against the identity. That is a self-contained accuracy measurement
+needing no external ground truth. `geometry.Rigid.rotation_angle` uses
+`atan2` rather than `acos` specifically so that metric does not hit a numerical
+floor — measured 1.7e-16 rad against `acos`'s 6.3e-8 rad on a 36-step
+revolution.
+
+**What none of it establishes:** no distance produced by this stack has been
+metrically validated. The depth scale's physical unit is unknown, so a mesh has
+a correct *shape* and an unknown *size*. Closing that is
+[capture-checklist.md](docs/capture-checklist.md), and it needs calipers rather
+than code. One known limitation is written up separately in
+[shear-detection-limits.md](docs/shear-detection-limits.md).
+
 ## The one owned vendor control request (opt-in, touches hardware)
 
 `scanner3d firmware-version` is the only owned/native command in this project that sends a vendor
