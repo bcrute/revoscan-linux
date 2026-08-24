@@ -1286,7 +1286,7 @@ def _consensus_axis(
     )
     # Pin the anchor to the line's closest approach to the origin, so two
     # estimates of one line are compared at the same point on it.
-    through = subtract(anchor_mean, scaled(direction, dot(anchor_mean, direction)))
+    through = anchor_mean
 
     angles = [s.angle for s in screws]
     mean_angle = math.fsum(angles) / len(angles)
@@ -1296,8 +1296,9 @@ def _consensus_axis(
     limitations: list[str] = []
     if len(screws) == 1:
         limitations.append(
-            "one frame-to-frame pair only: the direction, angle and anchor spreads are zero "
-            "because nothing was compared against anything, not because two estimates agreed"
+            "one frame-to-frame pair only: the direction, angle and anchor spreads compare that "
+            "single estimate against itself, so they are near zero whatever the data says, and "
+            "not because two estimates were found to agree"
         )
     if not all(f.converged for f in fits):
         limitations.append(
