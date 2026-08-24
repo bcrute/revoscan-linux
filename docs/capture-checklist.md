@@ -242,6 +242,41 @@ thing worth adding is one sweep of an object with a **known simple dimension**
 (a cube with caliper-measured edges), so the final mesh can be checked against a
 real number end to end rather than only at the point-cloud stage.
 
+## Two hardware faults found while capturing, and how to avoid them
+
+Both were diagnosed during the first real metric session. Neither is obvious
+from a single capture, and each wastes a lot of time if you do not know about it.
+
+### Leave at least 5 seconds between captures
+
+Back-to-back captures fail. Measured:
+
+| gap between captures | complete frames |
+| --- | --- |
+| none | 1 of 3 |
+| 5 seconds | 3 of 3 |
+| 15 seconds | 3 of 3 |
+
+Every failure is *exactly* 358402 bytes — 280 of 400 rows — never a random
+partial. The kernel flags the buffer `V4L2_BUF_FLAG_ERROR` and the capture path
+refuses to call it a frame, so a bad capture is never silently used. But it
+looks like flakiness until you notice the truncation is always at the same row.
+
+### Do not put the scanner behind a USB hub
+
+On a Realtek USB3.0 hub the link dropped **28 times**, with the device number
+climbing 73 to 79. Moving to a root port took that to **zero disconnects** in
+the next run.
+
+The two faults are independent and were initially mistaken for one: after the
+hub was removed the short frames continued at the same rate until the 5-second
+gap was introduced.
+
+**A control worth knowing:** the same can, unmoved, measured 56.641 through the
+failing hub (n=2) and 56.689 direct (n=7, spread 0.155). Link quality did not
+bias the measurement — it only cost frames. So data captured through a flaky
+link is still trustworthy if the frame came back complete.
+
 ## Practical notes
 
 - **Surfaces matter more than you would expect.** Structured light returns
