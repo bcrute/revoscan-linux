@@ -176,6 +176,27 @@
       "non_zero_samples": 2157,
       "sha256": "67ac0dbc8ec4dc6d1c53acf8607fa8e81deb38f011acf2841bd50bd92805c98e",
       "yield": 0.008426
+    },
+    {
+      "bytes": 512000,
+      "name": "can-sprayed-242-1",
+      "non_zero_samples": 72021,
+      "sha256": "d3ffee6d2c98fc2431e4ca81dae09a94385fa48117f8192ba3bf23cd0cea0549",
+      "yield": 0.281332
+    },
+    {
+      "bytes": 512000,
+      "name": "can-sprayed-242-2",
+      "non_zero_samples": 72037,
+      "sha256": "45256a68b0b01650ea27c0fe591b80a05a7804a178703ba12fcd274391187f30",
+      "yield": 0.281395
+    },
+    {
+      "bytes": 512000,
+      "name": "can-sprayed-242-3",
+      "non_zero_samples": 72017,
+      "sha256": "43f1246d55a5024249e3913c29a4f7090f74c2d79a23c6e07beb967c08fdfc08",
+      "yield": 0.281316
     }
   ],
   "measured_result": {
@@ -224,6 +245,33 @@
     "surface": "BARE, untreated aluminium - same can, unmoved except in depth",
     "yield": 0.261,
     "yield_note": "Yield FELL from 40% at 122.7 to 26% at 98. Closer is not better on this sensor."
+  },
+  "spray_ab_at_242": {
+    "bare": {
+      "diameter": 57.445,
+      "error": -0.555,
+      "residual_rms": 0.216,
+      "shear_correlation": -0.21,
+      "standoff": 244.1,
+      "yield": 0.231
+    },
+    "saturation_confirmed": "The sprayed can returned 0.8% at 95mm and 28.1% at 241.5mm. Illumination falls off with distance squared, so restoring the returns by backing off is exactly what saturation predicts. The coating is fine; the close range was overexposing.",
+    "sprayed": {
+      "diameter": 57.716,
+      "error": -0.284,
+      "residual_rms": 0.098,
+      "shear_correlation": 0.13,
+      "spread": 0.018,
+      "standoff": 241.5,
+      "yield": 0.281
+    },
+    "spraying_improved_everything_at_this_range": {
+      "error": "-0.96% -> -0.49%, halved",
+      "residual_rms": "0.216 -> 0.098, halved",
+      "yield": "23.1% -> 28.1%"
+    },
+    "the_shear_sign_FLIPPED": "-0.21 bare against +0.13 sprayed, on the same object at the same distance and pose. A geometric shear from a wrong principal point cannot change sign when you paint the target - cx is a property of the lens. So the structured residual measured on bare aluminium was substantially an OPTICAL artifact of the specular surface, not geometry. Earlier readings of that indicator as evidence about cx are weakened further.",
+    "why_bare_specular_biases_a_fit": "On a curved specular surface the returns that survive are not uniformly distributed around the arc: the specular lobe throws light away from the camera over part of the surface, so the surviving points are biased toward particular incidence angles. That is a systematic, surface-dependent sampling bias - exactly the sort of thing that produces a structured residual with no geometric cause."
   },
   "spray_ab_at_95": {
     "alternative_not_excluded": "A very thick or subsurface-scattering coat would also degrade returns.",
