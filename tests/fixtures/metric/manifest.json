@@ -169,6 +169,13 @@
       "non_zero_samples": 58994,
       "sha256": "76e46d97f50460b140aa579393555e9ee07093647cbe48e99e9d866668a7b5ee",
       "yield": 0.230445
+    },
+    {
+      "bytes": 512000,
+      "name": "can-sprayed-095-1",
+      "non_zero_samples": 2157,
+      "sha256": "67ac0dbc8ec4dc6d1c53acf8607fa8e81deb38f011acf2841bd50bd92805c98e",
+      "yield": 0.008426
     }
   ],
   "measured_result": {
@@ -217,6 +224,25 @@
     "surface": "BARE, untreated aluminium - same can, unmoved except in depth",
     "yield": 0.261,
     "yield_note": "Yield FELL from 40% at 122.7 to 26% at 98. Closer is not better on this sensor."
+  },
+  "spray_ab_at_95": {
+    "alternative_not_excluded": "A very thick or subsurface-scattering coat would also degrade returns.",
+    "bare": {
+      "diameter": 56.689,
+      "spread": 0.155,
+      "yield": 0.262
+    },
+    "leading_explanation": "Overexposure. A bright matte white coating at close range returns far more light than bare specular metal did, the sensor saturates, and the structured-light fringe decode fails. What survives is scattered speckle rather than surface.",
+    "prediction_to_test": "If it is saturation, moving the sprayed can further away should restore the returns, because illumination falls off with distance squared. If the yield stays collapsed at 240mm the cause is something else - the coating itself.",
+    "result": "THE SPRAY MADE IT DRAMATICALLY WORSE AT THIS DISTANCE, not better.",
+    "sprayed": {
+      "diameter": 26.874,
+      "spread": 5.251,
+      "yield": 0.008
+    },
+    "the_can_is_still_there": "The surviving returns sit at z 97.8-111.7, exactly the can's distance, and occupy the same columns as the bare capture. This is not a framing or positioning error - the surface simply stopped returning coherent data.",
+    "why_the_scanner_cannot_adapt": "id_msg_cam_get_auto_expo_mode reads 0 on this unit - AUTOMATIC EXPOSURE IS OFF - and id_msg_cam_get_exposure_time is fixed at 20000. So the scanner cannot compensate for a much brighter target. This is the first concrete cost of that firmware finding, which until now was only a curiosity.",
+    "yield_collapse": "26.2% -> 0.84%, a 33-fold drop. Four frames, all complete captures."
   },
   "target": {
     "instrument": "digital calipers",
