@@ -1,0 +1,199 @@
+{
+  "capture": {
+    "attempted": 24,
+    "complete": 24,
+    "gap_seconds": 3.6,
+    "note": "24 of 24 complete once the minimum 2-second recovery gap was respected."
+  },
+  "frames": [
+    {
+      "bytes": 512000,
+      "name": "bed-01",
+      "non_zero_samples": 86060,
+      "sha256": "ac8bd5516e100177655f5ae5b7ee67fc0fc339ad6db58205ed5cdb2b2a0eb4e0",
+      "yield": 0.336172
+    },
+    {
+      "bytes": 512000,
+      "name": "bed-02",
+      "non_zero_samples": 102655,
+      "sha256": "4f8ecb1e2b17859518ef6514b44c51b5eecb515267e9d869bfea5a279c0ef77c",
+      "yield": 0.400996
+    },
+    {
+      "bytes": 512000,
+      "name": "bed-03",
+      "non_zero_samples": 106461,
+      "sha256": "8c8b8c5fc86556b80e09976c4461c1dcded6e336f96e550d91835423694e8e22",
+      "yield": 0.415863
+    },
+    {
+      "bytes": 512000,
+      "name": "bed-04",
+      "non_zero_samples": 91693,
+      "sha256": "e3257f2b37683db24ab3a860ef9531644b9a6a568098db4b131c00007886a9a4",
+      "yield": 0.358176
+    },
+    {
+      "bytes": 512000,
+      "name": "bed-05",
+      "non_zero_samples": 93369,
+      "sha256": "c36457171f85b9a969a8f20233b998e759bc138f71ce45c0bff7fc9fd12a297e",
+      "yield": 0.364723
+    },
+    {
+      "bytes": 512000,
+      "name": "bed-06",
+      "non_zero_samples": 92969,
+      "sha256": "471c31af0d624772d92b95911133f23709b19418384a06aca9ad7ab94a22d272",
+      "yield": 0.36316
+    },
+    {
+      "bytes": 512000,
+      "name": "bed-07",
+      "non_zero_samples": 93108,
+      "sha256": "1135e4cf8a2c90e90cf34b577dbb17497927705138f4c3fe0b15ab8a1b47e5db",
+      "yield": 0.363703
+    },
+    {
+      "bytes": 512000,
+      "name": "bed-08",
+      "non_zero_samples": 97499,
+      "sha256": "d55bfbd6eab37b3c3cb383a00dba449dd7d2ce12ffe5e4da40f305044c8ea586",
+      "yield": 0.380855
+    },
+    {
+      "bytes": 512000,
+      "name": "bed-09",
+      "non_zero_samples": 104385,
+      "sha256": "2ccc3d6b17fbbc3cd20793b6f5882da2ba31d9b54de4aada7b8bce74a93dc02d",
+      "yield": 0.407754
+    },
+    {
+      "bytes": 512000,
+      "name": "bed-10",
+      "non_zero_samples": 100789,
+      "sha256": "b51e4bc2261723463bc70251b5b6ecf6aa54953bca63bc82e5dc17551636bb33",
+      "yield": 0.393707
+    },
+    {
+      "bytes": 512000,
+      "name": "bed-11",
+      "non_zero_samples": 98491,
+      "sha256": "7518277d214a270d83a634b783e8a40d25ef9a51dc2a0d330d2fd1d59bb34164",
+      "yield": 0.38473
+    },
+    {
+      "bytes": 512000,
+      "name": "bed-12",
+      "non_zero_samples": 95219,
+      "sha256": "e08224727405cc44d65079f43101ed0d79d43ea42aeaa2f64b6515e9438797a6",
+      "yield": 0.371949
+    },
+    {
+      "bytes": 512000,
+      "name": "bed-13",
+      "non_zero_samples": 74994,
+      "sha256": "1acb1166a381615675a3cb7412480ad0c9e51c12d88e8013bc88e32f2de09df7",
+      "yield": 0.292945
+    },
+    {
+      "bytes": 512000,
+      "name": "bed-14",
+      "non_zero_samples": 90771,
+      "sha256": "a268e094d3dc048908c7af6cff1c86d6dcf027d169402fb033aa4458e29dbbda",
+      "yield": 0.354574
+    },
+    {
+      "bytes": 512000,
+      "name": "bed-15",
+      "non_zero_samples": 82591,
+      "sha256": "0766940bedade03d60b94a499d7df142425a1e0721837059a63c2e824e3ed23f",
+      "yield": 0.322621
+    },
+    {
+      "bytes": 512000,
+      "name": "bed-16",
+      "non_zero_samples": 67635,
+      "sha256": "a3e3f4c7c95de6d81bd00f6e9099826f2ae0859a989ab0802068a6e85245d994",
+      "yield": 0.264199
+    },
+    {
+      "bytes": 512000,
+      "name": "bed-17",
+      "non_zero_samples": 78880,
+      "sha256": "11dd5e2eee9685b72a031e78e5069c800243907ee2b7b238b189dba06635d80b",
+      "yield": 0.308125
+    },
+    {
+      "bytes": 512000,
+      "name": "bed-18",
+      "non_zero_samples": 85663,
+      "sha256": "a189960703c6d6323b129cb9b5ead4d87e1eabdf66f96af6ea4e90a1db36e64d",
+      "yield": 0.334621
+    },
+    {
+      "bytes": 512000,
+      "name": "bed-19",
+      "non_zero_samples": 95566,
+      "sha256": "5aa46be43f099c9cb2708d5aebf4057aea28bdec46a27490cb19213a6c4571a3",
+      "yield": 0.373305
+    },
+    {
+      "bytes": 512000,
+      "name": "bed-20",
+      "non_zero_samples": 100003,
+      "sha256": "74ef6fb7d0399ff5e7fd605a63f5ee9a4dbb00895c4ca1e27758fb6366e3fcb3",
+      "yield": 0.390637
+    },
+    {
+      "bytes": 512000,
+      "name": "bed-21",
+      "non_zero_samples": 101156,
+      "sha256": "e01b33fc128f27f5cd7bbb02dc6389888e31c7e4c1d2a91e627fda6c69c64495",
+      "yield": 0.395141
+    },
+    {
+      "bytes": 512000,
+      "name": "bed-22",
+      "non_zero_samples": 99664,
+      "sha256": "5b7169341f5b19a419adba3b5b76e9efcde46824ab8c48293b563c02bfd0d94d",
+      "yield": 0.389313
+    },
+    {
+      "bytes": 512000,
+      "name": "bed-23",
+      "non_zero_samples": 94878,
+      "sha256": "78672d0a59c33bd1f2902f155d8992226ee723cdddd0c058975593ce6b44df11",
+      "yield": 0.370617
+    },
+    {
+      "bytes": 512000,
+      "name": "bed-24",
+      "non_zero_samples": 97299,
+      "sha256": "2897b6b5a33c8363283e63597ee9446f2277893703579f269f94d656c905871b",
+      "yield": 0.380074
+    }
+  ],
+  "rotation": {
+    "agreement": "within 5%, two independent methods",
+    "capture_interval_seconds": 4.845,
+    "implied_step_degrees": 15.04,
+    "note": "The turntable runs continuously and cannot be stopped without moving it, so every frame was captured while the object was in motion. The scanner rotates about 3.9 degrees during the ~1.25 s capture window.",
+    "period_seconds_derived_from_clouds": 110,
+    "period_seconds_stopwatch": 116
+  },
+  "schema_version": 1,
+  "target": {
+    "mounting": "centred on the turntable as closely as the owner could manage",
+    "object": "1/18 scale model truck bed, roughly 110 x 95 x 24 mm",
+    "standoff": "turntable centre about 250 mm from the scanner",
+    "surface": "partially sprayed matte, partially bare - the coating had worn off in places"
+  },
+  "what": "24 depth frames of a 1/18-scale model truck bed on a continuously rotating turntable, captured one revolution at 15-degree steps. The first real multi-view dataset in this repository.",
+  "why": "This object is what started the project: the vendor scanning software mis-aligned it, and a second pass around the turntable made the result worse rather than better.",
+  "yields": {
+    "max": 0.4159,
+    "min": 0.2642
+  }
+}
