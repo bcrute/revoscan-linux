@@ -51,7 +51,7 @@ import math
 import random
 import struct
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Final, Protocol
 
 from scanner3d.errors import DoctorStatus, ScannerError
@@ -194,18 +194,30 @@ class Box:
     #: frozen, so no Box can mutate the default out from under another.
     pose: Rigid = IDENTITY_POSE
 
+    #: The camera origin and the rotation, precomputed in the box's own frame.
+    #: Derived state, never passed in. A frame is 256000 rays and every one of
+    #: them needs these; computing ``pose.inverse()`` per ray made rendering a
+    #: 12-frame sweep take 48 seconds. They are set through ``object.__setattr__``
+    #: because the dataclass is frozen, which is the standard way to hold
+    #: derived state on an immutable value.
+    #: Excluded from repr and eq so two boxes with the same geometry stay
+    #: equal regardless of what either has cached.
+    _local_origin: Point = field(init=False, repr=False, compare=False)
+    _local_rotation: Rigid = field(init=False, repr=False, compare=False)
+
     def __post_init__(self) -> None:
         if not all(e > 0.0 and math.isfinite(e) for e in self.half_extents):
             raise ShapeUnusable(
                 f"box half-extents must all be positive and finite, got {self.half_extents!r}"
             )
+        inverse = self.pose.inverse()
+        object.__setattr__(self, "_local_origin", inverse.apply((0.0, 0.0, 0.0)))
+        object.__setattr__(self, "_local_rotation", Rigid.of(inverse.rotation, (0.0, 0.0, 0.0)))
 
     def intersect(self, direction: Point) -> float | None:
         # Work in the box's own frame: transform the ray rather than the box.
-        inverse = self.pose.inverse()
-        origin = inverse.apply((0.0, 0.0, 0.0))
-        spin = Rigid.of(inverse.rotation, (0.0, 0.0, 0.0))
-        local = spin.apply(direction)
+        origin = self._local_origin
+        local = self._local_rotation.apply(direction)
 
         near, far = -math.inf, math.inf
         for axis in range(3):
