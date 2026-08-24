@@ -33,6 +33,7 @@ against a real object - no measurement in this repository has established any.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 
 import pytest
@@ -41,7 +42,24 @@ from scanner3d.fusion import fuse
 from scanner3d.geometry import Rigid, pose_difference
 from scanner3d.mesh import reconstruct
 from scanner3d.registration import register_turntable, voxel_downsample
-from scanner3d.simulate import Box, Shape, Sphere, points_of, turntable_sweep
+from scanner3d.simulate import (
+    FACTORY_INTRINSICS,
+    Box,
+    Shape,
+    Sphere,
+    points_of,
+    render,
+    sheared_intrinsics,
+    turntable_sweep,
+)
+from scanner3d.validation import (
+    CaliperMeasurement,
+    FittedQuantity,
+    Tolerance,
+    Verdict,
+    fit_sphere,
+    validate,
+)
 
 #: Where the object sits: the median working distance measured across the nine
 #: committed frames.
@@ -61,6 +79,9 @@ CELL = 0.6
 GATE = 3.0
 
 BOX_HALF = (8.0, 12.0, 14.0)
+
+#: The synthetic ball the M4 rehearsal below measures.
+SPHERE_DIAMETER = 40.0
 
 
 def _at(point: tuple[float, float, float]) -> Rigid:
@@ -204,3 +225,72 @@ def test_a_mesh_from_unvalidated_depth_says_so(swept, registered):
     # The closure caveat must travel with the artifact: a closed mesh is a
     # property of the algorithm, not evidence the object was seen all round.
     assert "every side" in joined or "closes" in joined
+
+
+# --- the M4 workflow, rehearsed against ground truth --------------------------
+
+
+def _caliper() -> CaliperMeasurement:
+    return CaliperMeasurement(
+        label="ball bearing diameter",
+        value=SPHERE_DIAMETER,
+        uncertainty=0.05,
+        measured_by="tests/test_pipeline.py",
+        instrument="synthetic; stands in for digital calipers",
+    )
+
+
+def _tolerance() -> Tolerance:
+    return Tolerance.declare(
+        quantity=FittedQuantity.SPHERE_DIAMETER,
+        limit=0.5,
+        declared_by="tests/test_pipeline.py",
+        rationale="declared before the comparison, which is the whole point of the type",
+    )
+
+
+def _fit_of(intrinsics=None, depth_scale_factor: float = 1.0):
+    frame = render([Sphere(centre=(0.0, 0.0, 117.0), radius=SPHERE_DIAMETER / 2.0)])
+    if intrinsics is not None:
+        frame = dataclasses.replace(frame, intrinsics=intrinsics)
+    if depth_scale_factor != 1.0:
+        frame = dataclasses.replace(frame, depth_scale=frame.depth_scale * depth_scale_factor)
+    return fit_sphere(list(points_of(frame)))
+
+
+def test_a_correct_capture_passes_against_its_caliper_measurement():
+    # Declared BEFORE the fit is computed. The module enforces this and it is
+    # not a formality: writing these two lines the other way round raises
+    # ToleranceDeclaredLate, which is how this test was first written.
+    tolerance = _tolerance()
+    result = validate(_fit_of(), _caliper(), tolerance)
+    assert result.passed is True
+    assert result.verdict is Verdict.PASS
+    assert abs(result.difference) < 0.01
+
+
+def test_a_wrong_depth_scale_fails_rather_than_being_absorbed():
+    """A scale error is a real disagreement and must read as one."""
+    tolerance = _tolerance()
+    result = validate(_fit_of(depth_scale_factor=1.03), _caliper(), tolerance)
+    assert result.passed is False
+    assert result.verdict is Verdict.FAIL
+    assert result.difference is not None and result.difference > tolerance.limit
+
+
+def test_a_sheared_capture_is_inconclusive_and_not_a_failure():
+    """The distinction the harness exists to make, and it is not a subtlety.
+
+    A wrong principal point does not make the diameter *wrong by a knowable
+    amount* - it makes the fitted diameter a measurement of the target convolved
+    with an unknown shear, which is not a measurement of the target at all. So
+    the honest verdict is INCONCLUSIVE, not FAIL: the experiment could not
+    decide, and reporting a failure would imply a disagreement whose size means
+    something. Reporting a pass would be far worse.
+    """
+    tolerance = _tolerance()
+    sheared = sheared_intrinsics(FACTORY_INTRINSICS, cx=42.43747329711914 + 277.56)
+    result = validate(_fit_of(intrinsics=sheared), _caliper(), tolerance)
+    assert result.passed is None
+    assert result.verdict is Verdict.INCONCLUSIVE
+    assert any("shear" in reason for reason in result.inconclusive_reasons)
