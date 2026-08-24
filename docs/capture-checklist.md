@@ -62,6 +62,35 @@ both scale and distortion.
 would pass a plane-fit check cleanly while `cx` was badly wrong. Do not use a
 flat target for this.
 
+### The diameter alone will lie to you
+
+Simulated directly, with `k = 0.3089` (the shear implied if the true `cx` were
+the frame centre), on synthetic spheres of known radius:
+
+| Sphere | Fitted radius | RMS residual |
+| --- | --- | --- |
+| clean, r = 20 | 20.0000 | 9.0e-15 |
+| sheared, r = 20 | 20.2577 | **1.5938** (8.0% of radius) |
+| sheared, r = 10 | 10.1340 | 0.7925 (7.9% of radius) |
+| sheared, r = 20 at z = 250 | 20.2385 | 1.5810 (7.9% of radius) |
+
+Two things fall out of that table, and both matter:
+
+1. **The distortion is independent of distance.** 7.9–8.0% of radius whether the
+   sphere sits at 117 or 250. Shear deforms shape by a constant proportion, so
+   you cannot escape it by moving the target, and you do not need to hunt for a
+   distance where it shows up.
+2. **The fitted radius is only 1.3% too large.** This is the trap. Measure the
+   diameter alone and you see a small discrepancy that looks exactly like a
+   modest scale error — and the natural response is to "correct" the depth scale
+   to close it. That would bake a principal-point fault into the calibration as
+   a scale fudge, and every subsequent measurement would carry it.
+
+**So the residual is the tell, not the radius.** A sheared sphere fits as a
+slightly-too-large sphere *with a large residual*. Report both, always. A
+diameter that agrees to 1% with a residual of 8% of radius is not a pass; it is
+evidence that `cx` is wrong.
+
 **Do:**
 1. Measure the sphere's diameter with the calipers. Take **five** readings at
    different orientations. Record every reading, not just the mean — the spread
