@@ -1,3 +1,113 @@
+# Coder report — commit the repo, build the M4-M7 pipeline
+
+Signal: **implementing**. The repository is under version control for the first
+time and the reconstruction pipeline exists end to end. A workflow's reviewers
+are still finishing three modules at the time of writing.
+
+## 1. The repository had never been committed
+
+Zero tracked files, unborn `main`. Every line of code and every piece of
+measured evidence existed only as loose working-tree files. That is now fixed,
+and the first commit is 166 files.
+
+Second commit preserves the **nine real depth frames** as
+`tests/fixtures/frames/`. They cannot be regenerated without the physical
+scanner, every quantitative claim in `docs/depth-to-pointcloud.md` is computed
+from them, and they previously lived only under a scratchpad path embedding a
+session id that exists on no other machine — so the real-frame tests skipped on
+any fresh checkout and none of those claims could be reproduced. Recomputing
+from the committed bytes reproduces the documented figures exactly: 2304000
+samples, 79.4788% zeros, smallest non-zero code 17.
+
+## 2. What was built
+
+| Module | Purpose |
+| --- | --- |
+| `geometry` | rigid transforms, rotation about an arbitrary axis, Horn's alignment, pose metrics |
+| `simulate` | synthetic frames of known shapes, plus ground-truth turntable poses |
+| `validation` | sphere/plane fits compared against a caliper reading with a predeclared tolerance |
+| `registration` | turntable alignment reporting loop-closure error |
+| `fusion` | voxel-grid merge of registered clouds |
+| `mesh` | marching cubes over the fused occupancy grid, OBJ/PLY export |
+
+`geometry` and `simulate` were written by the lead; the other four by a
+five-agent workflow with an adversarial reviewer each.
+
+## 3. Three findings worth the planner's attention
+
+**A degeneracy guard that could never fire.** `rigid_from_correspondences`
+documented refusing degenerate input and had a guard for it. The guard tested
+the norm of the eigenvector the Jacobi routine returns — but Jacobi accumulates
+orthogonal rotations from the identity, so that vector is always unit length.
+The consequence was the worst kind: a collinear set returned the wrong transform
+with a residual at the float64 floor, so a caller trusting the residual, which
+is what this codebase tells them to do, got no warning. Fixed by checking the
+rank of the point set directly.
+
+**The shear indicator issues false clearances.** Found by feeding a defect of
+known magnitude from `simulate` into `validation`. It works excellently on a
+whole sphere (correlation 0.997, k recovered to 0.1%) and does not work at all
+on what one camera view can see: correlation saturates near 0.25 against a 0.35
+threshold, so a 278 px principal-point error — the largest this unit could
+have — reads as *not detected* while `shear_indicator_reliable` reads True.
+Coverage, not fault magnitude, is the limit. Full analysis and the measured
+tables in `docs/shear-detection-limits.md`. **The safety fix is not yet
+applied** — the reviewer was still editing that module.
+
+**Loop closure needed a numerical fix to be measurable at all.**
+`Rigid.rotation_angle` uses `atan2` rather than `acos`, because `acos` is
+ill-conditioned near the identity (`acos(1-e) ~ sqrt(2e)`) and puts a ~1e-8 rad
+noise floor on exactly the measurement loop closure exists to make. Measured
+1.7e-16 rad against 6.3e-8 rad on a 36-step revolution.
+
+## 4. The pipeline composes, checked against ground truth
+
+`tests/test_pipeline.py` runs synthetic frames through registration, fusion and
+meshing and compares the recovered poses against transforms the pipeline was
+never given. Current behaviour: 12 frames register to under 1 degree against
+known truth, loop closure ~1.2 degrees, fusion merges 35k points to 8k, and the
+mesh is watertight with extents matching the synthetic object within the outward
+offset the mesh module documents.
+
+An independent check confirmed that documented offset quantitatively: an
+occupancy-grid surface stands off outward by +0.68 to +0.78 x voxel size, so a
+mesh reads larger than the cloud it came from. The mesh module already states
+this, and states that closure is a property of the algorithm rather than
+evidence the object was seen from every side.
+
+## 5. The capture checklist
+
+`docs/capture-checklist.md` is the physical half of M4 and M6, grounded in the
+committed frames rather than guesswork: median depth code 23398 implies ~117
+unknown units, field of view 36.3 x 25.0 degrees, target 40-70 units across.
+
+Three things it gets right that are easy to get wrong: a sphere is the best M4
+target because its diameter is orientation-free ground truth *and* shear turns a
+sphere into a tilted ellipsoid; a flat target cannot serve at all because shear
+maps planes to planes; and the turntable target must **not** be the sphere,
+because a sphere looks identical from every angle. It also records that the
+sphere must be *swept* as well as photographed, since a single view cannot give
+the coverage the shear indicator needs.
+
+## 6. M5's exit criterion was withdrawn
+
+It demanded comparison against SDK-derived output. The vendor SDK cannot connect
+to this unit at all, so the criterion was unreachable by construction. Replaced
+with caliper ground truth plus a predeclared tolerance — strictly stronger, since
+agreement between two implementations never established that either was right.
+
+## 7. Not done
+
+- The shear-indicator safety fix (see 3), pending the reviewer finishing.
+- `registration` tests had not landed at the time of writing.
+- No CLI wiring for the new modules; not in the assignment.
+- No live device work of any kind this round.
+- Nothing pushed. `main` is local only.
+
+---
+
+<!-- previous report retained below -->
+
 # Coder report — firmware continuation + software focus
 
 Signal: **review**. The software track is complete with all gates green. A
