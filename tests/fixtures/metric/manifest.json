@@ -2,6 +2,13 @@
   "conditions": {
     "approximate_distance": 120,
     "capture_path": "scanner3d depth-frame --execute-depth-frame-capture",
+    "derived_from_data": {
+      "axis_centre_depth": 151.6,
+      "axis_tilt_from_frame_vertical_degrees": 6.4,
+      "nearest_surface": 122.7,
+      "tilt_note": "Consistent across all three frames. Most likely the raised scanner head looking down rather than the can leaning. Harmless here: it tips the axis within the y-z plane, which stays perpendicular to x, so shear visibility stayed at 0.994."
+    },
+    "distance_note": "The owner's 120 is a rough desk measurement against a raised scanner head and was NOT used in any calculation. The fit reads the radius off the point cloud and the scanner supplies every z, so an inaccurate standoff estimate cannot bias the diameter.",
     "scanner_serial": "A22704522A6F00A64",
     "surface": "BARE, untreated, specular aluminium - deliberately unsprayed"
   },
