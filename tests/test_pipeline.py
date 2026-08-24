@@ -266,6 +266,7 @@ def test_a_correct_capture_passes_against_its_caliper_measurement():
     result = validate(_fit_of(), _caliper(), tolerance)
     assert result.passed is True
     assert result.verdict is Verdict.PASS
+    assert result.difference is not None
     assert abs(result.difference) < 0.01
 
 
