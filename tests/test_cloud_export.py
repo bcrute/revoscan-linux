@@ -233,10 +233,13 @@ def expected_points(conversion: DepthConversion) -> list[tuple[float, ...]]:
 
 # --- one real captured frame --------------------------------------------------
 
-#: Where this session's captured frames were written. Deliberately not a
-#: repository fixture: these are ephemeral scratch artifacts of the capture
-#: tasks, not committed evidence, so the tests below read one if it is still
-#: there and skip - loudly, with the reason - if it is not.
+#: The nine real captures, committed. These cannot be regenerated without the
+#: physical scanner, so they are repository evidence rather than scratch;
+#: ``manifest.json`` beside them carries each frame's sha256.
+FIXTURE_FRAMES = Path(__file__).parent / "fixtures" / "frames"
+
+#: Where the capture tasks originally wrote them. Kept as a fallback only: the
+#: path embeds a session id that will not exist on any other machine.
 SCRATCHPAD = Path(
     "/tmp/claude-1000/-home-ben-repositories-3d-scanner/"
     "147e7b71-d25d-4357-bb4a-1f6a3964c3bb/scratchpad"
@@ -252,9 +255,12 @@ def real_frame_path() -> Path | None:
     if override:
         candidate = Path(override)
         return candidate if candidate.is_file() else None
-    if not SCRATCHPAD.is_dir():
-        return None
-    for candidate in sorted(SCRATCHPAD.glob("*/depth-frame-raw.bin")):
+    candidates: list[Path] = []
+    if FIXTURE_FRAMES.is_dir():
+        candidates.extend(sorted(FIXTURE_FRAMES.glob("*.bin")))
+    if SCRATCHPAD.is_dir():
+        candidates.extend(sorted(SCRATCHPAD.glob("*/depth-frame-raw.bin")))
+    for candidate in candidates:
         if candidate.is_file() and candidate.stat().st_size == EXPECTED_FRAME_BYTES:
             return candidate
     return None

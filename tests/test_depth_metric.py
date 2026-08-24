@@ -708,10 +708,15 @@ def test_points_come_back_in_raster_order():
 
 # --- one real captured frame, structural assertions only ----------------------
 
-#: Where this session's captured frames were written. Deliberately not a
-#: repository fixture: these are ephemeral scratch artifacts of the capture
-#: tasks, not committed evidence, so the test below reads one if it is still
-#: there and skips - loudly - if it is not.
+#: The nine real captures, committed. Every quantitative claim in
+#: ``docs/depth-to-pointcloud.md`` is computed from exactly these bytes, and they
+#: cannot be regenerated without the physical scanner, so they are repository
+#: evidence rather than scratch. ``manifest.json`` beside them carries each
+#: frame's sha256 and per-frame counts.
+FIXTURE_FRAMES = Path(__file__).parent / "fixtures" / "frames"
+
+#: Where the capture tasks originally wrote them. Kept as a fallback only: the
+#: path embeds a session id that will not exist on any other machine.
 SCRATCHPAD = Path(
     "/tmp/claude-1000/-home-ben-repositories-3d-scanner/"
     "147e7b71-d25d-4357-bb4a-1f6a3964c3bb/scratchpad"
@@ -724,18 +729,27 @@ DOCUMENTED_CAPTURES = tuple(f"base_{index}" for index in range(1, 6))
 FRAME_PATH_ENV = "SCANNER3D_REAL_DEPTH_FRAME"
 
 
+def real_frame_paths() -> tuple[Path, ...]:
+    """Every real 512000-byte capture available on this machine, fixtures first."""
+    found: list[Path] = []
+    if FIXTURE_FRAMES.is_dir():
+        found.extend(sorted(FIXTURE_FRAMES.glob("*.bin")))
+    named = [SCRATCHPAD / name / "depth-frame-raw.bin" for name in DOCUMENTED_CAPTURES]
+    others = sorted(SCRATCHPAD.glob("*/depth-frame-raw.bin")) if SCRATCHPAD.is_dir() else []
+    found.extend([*named, *others])
+    return tuple(
+        path for path in found if path.is_file() and path.stat().st_size == EXPECTED_FRAME_BYTES
+    )
+
+
 def real_frame_path() -> Path | None:
     """One real 512000-byte capture, or ``None`` if none is on this machine."""
     override = os.environ.get(FRAME_PATH_ENV)
     if override:
         candidate = Path(override)
         return candidate if candidate.is_file() else None
-    named = [SCRATCHPAD / name / "depth-frame-raw.bin" for name in DOCUMENTED_CAPTURES]
-    others = sorted(SCRATCHPAD.glob("*/depth-frame-raw.bin")) if SCRATCHPAD.is_dir() else []
-    for candidate in [*named, *others]:
-        if candidate.is_file() and candidate.stat().st_size == EXPECTED_FRAME_BYTES:
-            return candidate
-    return None
+    paths = real_frame_paths()
+    return paths[0] if paths else None
 
 
 def test_a_real_captured_frame_converts_with_exact_accounting():
