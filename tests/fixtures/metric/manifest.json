@@ -33,6 +33,20 @@
       "non_zero_samples": 102900,
       "sha256": "378f5e2540451b59d2099e29fc01019d982d8eca05caddf833c8f85df55e311c",
       "yield": 0.401953
+    },
+    {
+      "bytes": 512000,
+      "name": "can-shiny-098-1",
+      "non_zero_samples": 66891,
+      "sha256": "7ee3565acd51d696a91d48b8088348a2b6bf8d8885d5d3d5e03dfe1c3280ca93",
+      "yield": 0.261293
+    },
+    {
+      "bytes": 512000,
+      "name": "can-shiny-098-2",
+      "non_zero_samples": 66872,
+      "sha256": "c38341b0397f5178bca225ff95b8db9c548eaac4b3ddd3c7f2dcc036fa349566",
+      "yield": 0.261219
     }
   ],
   "measured_result": {
@@ -55,6 +69,24 @@
     "verdict_reason": "A shear was detected, so the harness declines to attribute the -0.295 to scale rather than to the shear. That is the correct outcome, not an evasion."
   },
   "schema_version": 1,
+  "second_distance": {
+    "clipping": "none - zero returns on either frame edge, so the silhouette is intact",
+    "derived_nearest_surface": 98.0,
+    "error_vs_calipers": -1.368,
+    "finding": "The error is FOUR AND A HALF TIMES worse at 98 than at 122.7 (-1.368 against -0.295), while remaining highly repeatable within each distance (spreads 0.017 and 0.044). A distance-dependent error of that shape is not a depth-scale error, which would be a constant fraction, and it is not the detected shear, which grows with z rather than shrinking. Unmodelled lens distortion is the leading explanation: the deprojection is an ideal pinhole, cx sits 6.6% across the frame so a centred object is already ~17 degrees off-axis, and at 98 the can subtends +-16.5 degrees about that, putting its silhouette deep in the periphery.",
+    "fitted_diameters": [
+      56.632,
+      56.649
+    ],
+    "frames_attempted": 9,
+    "frames_kept": 2,
+    "owner_estimate": 95,
+    "relative_error": -0.0236,
+    "spread": 0.017,
+    "surface": "BARE, untreated aluminium - same can, unmoved except in depth",
+    "yield": 0.261,
+    "yield_note": "Yield FELL from 40% at 122.7 to 26% at 98. Closer is not better on this sensor."
+  },
   "target": {
     "instrument": "digital calipers",
     "measured_by": "owner",
