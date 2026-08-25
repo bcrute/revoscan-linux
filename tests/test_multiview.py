@@ -27,6 +27,25 @@ is a coarse starting point for ICP, not an alignment, and every test cloud's
 extent is a bare number with no physical unit - see the module's own
 docstring for why.
 
+The other two properties tested here are just as central:
+
+* **Drift is measured without reference to angles, by comparing frames far
+  apart in capture order.** A cleanly registered sweep must show that
+  agreement is FLAT across every gap; a sweep with accumulating error must
+  show it RISE with the gap. Either half alone is a weak test - a flat clean
+  sweep could just mean the metric never reacts to anything - so
+  :func:`test_model_drift_is_flat_when_clean_and_rises_with_the_gap_when_drifting`
+  asserts both in one place, deliberately.
+* **`refine_against_model` is a documented NEGATIVE result.** Measured against
+  synthetic ground truth it cut the self-consistency residual 40% while
+  DOUBLING the true pose error - free six-degree-of-freedom refinement against
+  a self-consistency objective is under-constrained, so poses can agree with
+  each other better while drifting together away from the truth. Nothing here
+  asserts that it improves a scan; the tests below check only what it
+  documents about itself: that ``residual_improved`` names the residual and
+  not accuracy, that a refinement which does not improve the residual leaves
+  the input transforms untouched, and that the anchor frame never moves.
+
 Test data
 ---------
 A single-view :func:`~scanner3d.simulate.render` - like a real depth frame -
@@ -48,6 +67,7 @@ import dataclasses
 import functools
 import json
 import math
+from collections.abc import Sequence
 
 import pytest
 
@@ -56,7 +76,9 @@ from scanner3d.geometry import (
     Point,
     Rigid,
     determinant,
+    distance,
     ensure_rotation,
+    normalize,
     pose_difference,
     rotation_about_axis,
 )
@@ -67,11 +89,17 @@ from scanner3d.multiview import (
     CloudDegenerate,
     CloudTooSmall,
     CoarseAlignment,
+    ModelDrift,
+    ModelRefinement,
     MultiviewNotAllowed,
+    TurntableRefinement,
     coarse_align,
+    model_drift,
     octahedral_rotations,
     overlap_fraction,
     principal_frame,
+    refine_against_model,
+    refine_on_turntable,
 )
 from scanner3d.registration import cloud_extent, voxel_downsample
 from scanner3d.simulate import Box, points_of, render
@@ -426,3 +454,608 @@ def test_the_refusals_are_scanner_errors_carrying_a_doctor_status():
     assert issubclass(CloudTooSmall, MultiviewNotAllowed)
     assert issubclass(CloudDegenerate, MultiviewNotAllowed)
     assert MultiviewNotAllowed.status is DoctorStatus.UNSUPPORTED_MODE
+
+
+# --------------------------------------------------------------------------
+# model_drift: self-agreement between frames far apart in capture order
+# --------------------------------------------------------------------------
+
+#: A short turntable-like sweep of the asymmetric box, reused for both
+#: model_drift and refine_against_model below. Six frames keeps every call in
+#: this section well under a tenth of a second - model_drift is quadratic in
+#: frame count and refine_against_model re-indexes the whole model per frame
+#: per iteration, so both stay cheap only because the sweep is kept small.
+_SWEEP_AXIS: Point = (0.1, 1.0, 0.05)
+_SWEEP_STEP = 0.35
+_SWEEP_FRAMES = 6
+
+#: Off the origin in all three axes - not the point ``rotation_about_axis``
+#: defaults to - so a bug that silently dropped ``through`` and rotated about
+#: the origin instead would show up as a real displacement, not a coincidence.
+_SWEEP_THROUGH: Point = (0.4, -0.2, 0.3)
+
+#: Accumulates with capture index, standing in for the kind of error a
+#: chained pairwise registration builds up - a different axis from the sweep
+#: itself, so the drift is not just "the same turn, slightly wrong".
+_DRIFT_AXIS: Point = (0.0, 0.3, 1.0)
+_DRIFT_EPSILON = 0.02
+
+
+def _turntable_frames(
+    canonical: Sequence[Point],
+    *,
+    frames: int = _SWEEP_FRAMES,
+    drift_epsilon: float = 0.0,
+    drift_axis: Point = _DRIFT_AXIS,
+) -> tuple[list[tuple[Point, ...]], list[Rigid]]:
+    """A sweep of one canonical cloud, and the registered pose that undoes it.
+
+    With ``drift_epsilon`` at zero the registered poses are exact inverses of
+    the capture poses, so every frame lands back on ``canonical`` precisely -
+    a perfectly registered model. A nonzero value composes an extra rotation
+    onto each registered pose that grows with the frame index, the way error
+    accumulates down a chain of pairwise fits; because it turns about a fixed
+    axis by an angle proportional to the index, two frames i and j disagree by
+    almost exactly ``(j - i) * drift_epsilon`` radians, which is what makes the
+    residual-versus-gap growth below a controlled, not merely plausible, effect.
+
+    ``drift_axis`` defaults to an axis unrelated to the sweep's own, for
+    :func:`model_drift` and :func:`refine_against_model`, which have six free
+    parameters and do not care where the error came from. :func:`refine_on_turntable`
+    only has one, so its own fixture passes ``_SWEEP_AXIS`` here instead: the
+    "drift" is then indistinguishable from a mis-measured turntable step -
+    exactly the error that function exists to correct - rather than an error
+    it has no way to express at all.
+    """
+    clouds: list[tuple[Point, ...]] = []
+    transforms: list[Rigid] = []
+    for index in range(frames):
+        capture_pose = rotation_about_axis(_SWEEP_AXIS, index * _SWEEP_STEP, through=_SWEEP_THROUGH)
+        clouds.append(tuple(capture_pose.apply_all(canonical)))
+        registered = capture_pose.inverse()
+        if drift_epsilon:
+            drift = rotation_about_axis(drift_axis, index * drift_epsilon, through=_SWEEP_THROUGH)
+            registered = drift.compose(registered)
+        transforms.append(registered)
+    return clouds, transforms
+
+
+@functools.cache
+def _clean_sweep() -> tuple[tuple[tuple[Point, ...], ...], tuple[Rigid, ...]]:
+    clouds, transforms = _turntable_frames(_asymmetric_box())
+    return tuple(clouds), tuple(transforms)
+
+
+@functools.cache
+def _drifted_sweep() -> tuple[tuple[tuple[Point, ...], ...], tuple[Rigid, ...]]:
+    clouds, transforms = _turntable_frames(_asymmetric_box(), drift_epsilon=_DRIFT_EPSILON)
+    return tuple(clouds), tuple(transforms)
+
+
+@functools.cache
+def _turntable_drifted_sweep() -> tuple[tuple[tuple[Point, ...], ...], tuple[Rigid, ...]]:
+    """Like :func:`_drifted_sweep`, but the injected error turns about the sweep's
+    own axis - a mis-measured step, the one kind of error a one-DOF-per-frame
+    turntable refinement can actually express and therefore genuinely correct.
+    """
+    clouds, transforms = _turntable_frames(
+        _asymmetric_box(), drift_epsilon=_DRIFT_EPSILON, drift_axis=_SWEEP_AXIS
+    )
+    return tuple(clouds), tuple(transforms)
+
+
+def test_model_drift_is_flat_when_clean_and_rises_with_the_gap_when_drifting():
+    """The one test this whole batch stands or falls on.
+
+    A flat, near-zero residual on the perfectly registered sweep proves the
+    metric is not manufacturing disagreement out of nothing; a residual that
+    climbs with the capture-order gap on the drifted sweep proves it is
+    actually sensitive to accumulated error, and does so in the one place
+    loop closure cannot look - between frames that were never fitted to each
+    other. Neither half alone would prove much: a flat result on its own could
+    just mean the metric never reacts, and a rising result on its own could be
+    noise rather than a trend tied to the gap.
+    """
+    clean_clouds, clean_transforms = _clean_sweep()
+    drifted_clouds, drifted_transforms = _drifted_sweep()
+
+    clean = model_drift(clean_clouds, clean_transforms, tolerance=6.0, min_index_gap=1, sample=100)
+    drifted = model_drift(
+        drifted_clouds, drifted_transforms, tolerance=6.0, min_index_gap=1, sample=100
+    )
+
+    assert all(pair.compared > 0 for pair in clean.pairs), "the fixture must actually overlap"
+    assert all(pair.compared > 0 for pair in drifted.pairs), "the fixture must actually overlap"
+    assert all(pair.residual < 1e-9 for pair in clean.pairs), "flat and near zero when clean"
+
+    def _mean_residual_by_gap(result: ModelDrift) -> list[float]:
+        by_gap: dict[int, list[float]] = {}
+        for pair in result.pairs:
+            by_gap.setdefault(pair.index_gap, []).append(pair.residual)
+        return [sum(by_gap[gap]) / len(by_gap[gap]) for gap in sorted(by_gap)]
+
+    drifted_means = _mean_residual_by_gap(drifted)
+    assert drifted_means == sorted(drifted_means), "residual must rise monotonically with the gap"
+    assert drifted_means[0] > 0.0, "a real drift, not a degenerate zero everywhere"
+    # The largest gap must disagree far more than the smallest - not merely by
+    # some rounding-sized amount - and the drifted sweep must clearly exceed
+    # what the clean sweep showed at the same gap.
+    assert drifted_means[-1] > drifted_means[0] * 3.0
+    assert drifted_means[0] > max((p.residual for p in clean.pairs), default=0.0) * 1e6
+
+
+def test_model_drift_residual_is_bounded_above_by_the_tolerance():
+    """By construction: nothing further apart than ``tolerance`` counts as matched."""
+    clouds, transforms = _drifted_sweep()
+    tolerance = 6.0
+
+    result = model_drift(clouds, transforms, tolerance=tolerance, min_index_gap=1, sample=100)
+
+    assert result.pairs, "the fixture must produce at least one pair"
+    for pair in result.overlapping:
+        assert pair.residual <= tolerance
+
+
+def test_a_non_overlapping_pair_is_reported_with_compared_zero_not_dropped():
+    """A pair with no spatial overlap still appears in the record, just as evidence of nothing."""
+    cluster = tuple((float(i), float(i % 3), 0.0) for i in range(20))
+    far = tuple((p[0] + 10_000.0, p[1], p[2]) for p in cluster)
+    clouds = [cluster, cluster, far]
+    transforms = [Rigid.identity(), Rigid.identity(), Rigid.identity()]
+
+    result = model_drift(clouds, transforms, tolerance=0.5, min_index_gap=1, sample=50)
+
+    assert len(result.pairs) == 3, "no pair is silently dropped, overlapping or not"
+    empty = next(p for p in result.pairs if p.first == 0 and p.second == 2)
+    assert empty.compared == 0
+    assert empty.overlap == 0.0
+    assert math.isinf(empty.residual)
+    assert empty not in result.overlapping
+    # And the pair that does overlap is not swept up by the same fate.
+    overlapping = next(p for p in result.pairs if p.first == 0 and p.second == 1)
+    assert overlapping.compared > 0
+    assert overlapping in result.overlapping
+
+
+def test_model_drift_refuses_invalid_input():
+    clouds, transforms = _clean_sweep()
+
+    with pytest.raises(MultiviewNotAllowed, match="one transform per cloud"):
+        model_drift(clouds, transforms[:-1], tolerance=1.0)
+    with pytest.raises(MultiviewNotAllowed, match="at least two frames"):
+        model_drift(clouds[:1], transforms[:1], tolerance=1.0)
+    with pytest.raises(MultiviewNotAllowed, match="positive"):
+        model_drift(clouds, transforms, tolerance=0.0)
+    with pytest.raises(MultiviewNotAllowed, match="positive"):
+        model_drift(clouds, transforms, tolerance=-1.0)
+
+
+def test_model_drift_as_dict_carries_the_schema_version():
+    clouds, transforms = _drifted_sweep()
+
+    result = model_drift(clouds, transforms, tolerance=6.0, min_index_gap=1, sample=100)
+    record = json.loads(json.dumps(result.as_dict()))
+
+    assert record["schema_version"] == SCHEMA_VERSION
+    assert record["pairs_examined"] == len(result.pairs)
+    assert record["pairs_overlapping"] == len(result.overlapping)
+    assert record["worst"]["index_gap"] == result.worst.index_gap  # type: ignore[union-attr]
+
+
+# --------------------------------------------------------------------------
+# refine_against_model: a documented negative result
+#
+# Measured against synthetic ground truth (see the function's own docstring),
+# this cut the self-consistency residual 40% while DOUBLING the true pose
+# error. Nothing below asserts that it improves a scan - that would be
+# asserting something the module itself reports is false. What is tested is
+# only what the module documents about its own behaviour: what the residual
+# flag means, what happens when nothing improves, and that the anchor holds.
+# --------------------------------------------------------------------------
+
+
+@functools.cache
+def _refined_result() -> ModelRefinement:
+    """One ordinary refinement pass over the drifted sweep.
+
+    Self-consistency has real room to improve here, so this reliably exercises
+    the branch where ``residual_improved`` is True - which the "nothing
+    happens" fixture below cannot, since that one returns the input untouched
+    by construction.
+    """
+    clouds, transforms = _drifted_sweep()
+    return refine_against_model(
+        clouds, transforms, tolerance=6.0, iterations=3, sample=80, anchor=0
+    )
+
+
+def test_residual_improved_reflects_the_residual_not_an_accuracy_claim():
+    """The flag is defined by the residual history alone - nothing else feeds it.
+
+    This does NOT establish that a falling residual means a better scan; the
+    module's own limitations say plainly that it measured the opposite on
+    synthetic ground truth. This only pins down what the flag actually is.
+    """
+    result = _refined_result()
+
+    assert result.initial_residual is not None
+    assert result.final_residual is not None
+    assert result.residual_improved == (result.final_residual < result.initial_residual)
+    joined = " ".join(result.limitations)
+    assert "MEASURED WARNING" in joined
+    assert "is not a claim about accuracy" in joined
+    # The warning must keep saying that a falling residual can accompany a WORSE
+    # scan. An earlier version claimed refinement roughly doubles pose error;
+    # that was measured with the two rotations compared in opposite senses and
+    # was wrong. What replaced it is the finding that survived remeasurement:
+    # the residual improved in all eight runs while the true pose error improved
+    # in only six, so this flag cannot tell the good cases from the bad ones.
+    assert "cannot distinguish" in joined
+
+
+def test_refine_against_model_leaves_transforms_unchanged_when_the_residual_does_not_improve():
+    """No correspondence can survive a tolerance this far below the point spacing.
+
+    With nothing ever found to correct against, every pose is left exactly as
+    given on every pass, so the residual history cannot fall - and the module's
+    own contract is to hand back the ORIGINAL transforms in that case, not an
+    approximation of them.
+    """
+    clouds, transforms = _drifted_sweep()
+
+    result = refine_against_model(clouds, transforms, tolerance=1e-9, iterations=2, sample=60)
+
+    assert result.residual_improved is False
+    assert result.transforms == transforms, "the exact input, not merely a close pose"
+    assert any("did NOT improve the residual" in note for note in result.limitations)
+
+
+def test_refine_against_model_keeps_the_anchor_frame_exactly_fixed():
+    """Re-anchoring is what stops the whole model drifting bodily through space.
+
+    Checked on a run where refinement actually did something (see
+    :func:`_refined_result`): a fixture where nothing changes would pass this
+    trivially and prove nothing about the re-anchoring step itself.
+    """
+    _, transforms = _drifted_sweep()
+    result = _refined_result()
+    assert result.residual_improved is True, "the fixture must actually refine something"
+
+    anchored = pose_difference(transforms[result.anchor], result.transforms[result.anchor])
+    assert anchored.rotation_angle < 1e-9
+    assert anchored.translation_magnitude < 1e-9
+
+
+def test_refine_against_models_residual_history_has_one_entry_per_pass_plus_the_start():
+    """The starting residual counts too, so the history is never merely the deltas.
+
+    Checked on two very different runs - one that never corrects anything, one
+    that runs to convergence - because the invariant has to hold regardless of
+    *why* the loop stopped, not just in the one case that happens to be tested
+    elsewhere.
+    """
+    clouds, transforms = _drifted_sweep()
+    never_corrects = refine_against_model(
+        clouds, transforms, tolerance=1e-9, iterations=2, sample=60
+    )
+    runs_to_convergence = _refined_result()
+
+    for result in (never_corrects, runs_to_convergence):
+        assert len(result.residual_history) == result.iterations_run + 1
+
+
+def test_refine_against_model_stops_early_once_improvement_falls_below_the_threshold():
+    """A generous ``min_improvement`` is satisfied almost immediately, well short
+    of the iteration budget - and the record says so rather than just running quietly to the cap.
+    """
+    clouds, transforms = _drifted_sweep()
+
+    result = refine_against_model(
+        clouds, transforms, tolerance=6.0, iterations=5, sample=80, min_improvement=0.5
+    )
+
+    assert result.converged is True
+    assert result.iterations_run < 5
+    assert len(result.residual_history) == result.iterations_run + 1
+
+
+def test_a_looser_improvement_threshold_converges_no_later_than_a_tighter_one():
+    """The direction of the convergence comparison, pinned down by its effect.
+
+    A single run at one threshold cannot tell "stops early because the
+    threshold is loose" apart from "stops early because the threshold is
+    tight" - the residual's own shape on this fixture actually plateaus by
+    iteration 3 regardless of the threshold, so a run at only one
+    ``min_improvement`` could pass against a version with the comparison
+    backwards (``>`` instead of ``<``) by coincidence. Comparing a loose
+    threshold against a tight one is what pins the direction down: a loose
+    bar must be cleared sooner, never later, than a tight one.
+    """
+    clouds, transforms = _drifted_sweep()
+
+    loose = refine_against_model(
+        clouds, transforms, tolerance=6.0, iterations=5, sample=80, min_improvement=0.8
+    )
+    tight = refine_against_model(
+        clouds, transforms, tolerance=6.0, iterations=5, sample=80, min_improvement=0.05
+    )
+
+    assert loose.iterations_run <= tight.iterations_run
+    assert loose.iterations_run < 5, "the fixture must actually demonstrate an early stop"
+
+
+def test_refine_against_model_refuses_invalid_input():
+    clouds, transforms = _clean_sweep()
+
+    with pytest.raises(MultiviewNotAllowed, match="one each"):
+        refine_against_model(clouds, transforms[:-1], tolerance=1.0)
+    with pytest.raises(MultiviewNotAllowed, match="at least three frames"):
+        refine_against_model(clouds[:2], transforms[:2], tolerance=1.0)
+    with pytest.raises(MultiviewNotAllowed, match="not a frame index"):
+        refine_against_model(clouds, transforms, tolerance=1.0, anchor=-1)
+    with pytest.raises(MultiviewNotAllowed, match="not a frame index"):
+        refine_against_model(clouds, transforms, tolerance=1.0, anchor=len(clouds))
+    with pytest.raises(MultiviewNotAllowed, match="iterations must be at least 1"):
+        refine_against_model(clouds, transforms, tolerance=1.0, iterations=0)
+    with pytest.raises(MultiviewNotAllowed, match="positive"):
+        refine_against_model(clouds, transforms, tolerance=0.0)
+    with pytest.raises(MultiviewNotAllowed, match="positive"):
+        refine_against_model(clouds, transforms, tolerance=-1.0)
+
+
+def test_refine_against_model_as_dict_carries_the_schema_version():
+    result = _refined_result()
+
+    record = json.loads(json.dumps(result.as_dict()))
+
+    assert record["schema_version"] == SCHEMA_VERSION
+    assert record["frames"] == len(result.transforms)
+    assert record["anchor"] == result.anchor
+    assert record["residual_improved"] == result.residual_improved
+    assert len(record["residual_history"]) == len(result.residual_history)
+    assert any("MEASURED WARNING" in note for note in record["limitations"])
+
+
+# --------------------------------------------------------------------------
+# refine_on_turntable: the same idea as refine_against_model, with one DOF
+#
+# Whether this actually reduces true pose error against known ground truth is
+# a separate, still-open measurement - nothing below asserts that it does, or
+# that it doesn't. What is tested is the one claim that does not depend on
+# that answer: every correction this function makes IS a pure rotation about
+# the given axis, never anything else. That claim is what makes the six-DOF
+# failure of refine_against_model unreachable here, and it can be checked
+# today regardless of how the accuracy question eventually turns out.
+# --------------------------------------------------------------------------
+
+
+@functools.cache
+def _turntable_refined_result() -> TurntableRefinement:
+    """One ordinary turntable-constrained refinement pass over the turntable-axis
+    drifted sweep - a mis-measured step is exactly what this function can correct,
+    so this reliably exercises the branch where corrections are genuinely nonzero.
+    """
+    clouds, transforms = _turntable_drifted_sweep()
+    return refine_on_turntable(
+        clouds,
+        transforms,
+        direction=_SWEEP_AXIS,
+        through=_SWEEP_THROUGH,
+        tolerance=6.0,
+        iterations=3,
+        sample=80,
+        anchor=0,
+    )
+
+
+def test_refine_on_turntable_confines_every_correction_to_a_pure_rotation_about_the_axis():
+    """The entire reason this function exists, checked directly rather than assumed.
+
+    ``refine_against_model`` hands every frame six free parameters and
+    measurably makes scans worse by finding a self-consistent WRONG answer.
+    This function is supposed to make that failure unreachable by allowing
+    only one degree of freedom per frame - but a test that only checks the
+    residual moved would not tell the two apart; a self-consistent wrong
+    answer lowers the residual too. So this checks the actual MOTION applied
+    to each frame instead, treating the function as a black box: take its own
+    input and output poses, compose out everything that was already there, and
+    demand that what is left is nothing but a rotation about ``direction``
+    through ``through`` by exactly ``result.corrections[i]``. Three separate
+    facts, not one:
+
+    * the rotation's own axis is parallel to ``direction`` - checked by
+      confirming the rotation's own axis direction is left FIXED by the
+      relative motion's rotation part, which is what "this vector IS the
+      axis" means geometrically (equivalent to, but numerically safer than,
+      extracting the axis via a skew-symmetric decomposition, which is
+      ill-conditioned for the small corrections this fixture produces);
+    * the rotation fixes the ``through`` line, not merely one that happens to
+      be parallel to it;
+    * its angle equals the correction this function itself reports.
+
+    Checked on the anchor-excluded frames of a fixture built so corrections
+    are genuinely non-zero - a run where nothing moved would pass this
+    vacuously and prove nothing.
+    """
+    _, transforms = _turntable_drifted_sweep()
+    result = _turntable_refined_result()
+    assert result.residual_improved is True, "the fixture must actually refine something"
+    assert any(c != 0.0 for c in result.corrections[1:]), "and by a genuinely nonzero amount"
+
+    unit_axis = normalize(_SWEEP_AXIS)
+    through = _SWEEP_THROUGH
+    for index in range(1, len(transforms)):  # frame 0 is the anchor; covered separately below
+        observed = result.transforms[index].compose(transforms[index].inverse())
+        rotation_only = Rigid.of(observed.rotation, (0.0, 0.0, 0.0))
+
+        assert distance(rotation_only.apply(unit_axis), unit_axis) < 1e-9, "axis is not `direction`"
+        assert distance(observed.apply(through), through) < 1e-9, "does not fix the `through` line"
+        assert observed.rotation_angle == pytest.approx(abs(result.corrections[index]), abs=1e-9)
+
+
+def test_refine_on_turntable_keeps_the_anchor_frame_exactly_fixed():
+    """The re-anchoring subtracts the anchor's own angle from every correction,
+    so the anchor's correction is exactly - not approximately - 0.0, and a
+    rotation by exactly 0.0 is exactly the identity: the anchor's returned pose
+    must be bit-for-bit its input, not merely close to it.
+    """
+    _, transforms = _turntable_drifted_sweep()
+    result = _turntable_refined_result()
+    assert result.residual_improved is True, "the fixture must actually refine something"
+
+    assert result.corrections[result.anchor] == 0.0
+    assert result.transforms[result.anchor] == transforms[result.anchor]
+
+
+def test_refine_on_turntables_residual_history_has_one_entry_per_pass_plus_the_start():
+    clouds, transforms = _turntable_drifted_sweep()
+    never_corrects = refine_on_turntable(
+        clouds,
+        transforms,
+        direction=_SWEEP_AXIS,
+        through=_SWEEP_THROUGH,
+        tolerance=1e-9,
+        iterations=2,
+        sample=60,
+    )
+    runs_to_convergence = _turntable_refined_result()
+
+    for result in (never_corrects, runs_to_convergence):
+        assert len(result.residual_history) == result.iterations_run + 1
+
+
+def test_refine_on_turntable_leaves_transforms_unchanged_when_the_residual_does_not_improve():
+    """As with :func:`refine_against_model`: a tolerance this far below the point
+    spacing finds no correspondence to correct against, ever, so nothing moves.
+    """
+    clouds, transforms = _turntable_drifted_sweep()
+
+    result = refine_on_turntable(
+        clouds,
+        transforms,
+        direction=_SWEEP_AXIS,
+        through=_SWEEP_THROUGH,
+        tolerance=1e-9,
+        iterations=2,
+        sample=60,
+    )
+
+    assert result.residual_improved is False
+    assert result.transforms == transforms, "the exact input, not merely a close pose"
+    assert all(c == 0.0 for c in result.corrections)
+    assert result.worst_correction == 0.0
+    assert any("did NOT improve the residual" in note for note in result.limitations)
+
+
+def test_a_looser_improvement_threshold_converges_no_later_on_turntable_refinement_too():
+    """Same reasoning, and the same trap, as the unconstrained version's equivalent test:
+    a single run cannot tell "stopped early because the threshold is loose" apart
+    from "the comparison is backwards"; comparing a loose against a tight
+    threshold on one fixture can - but only if the two thresholds actually land
+    on different sides of every pass's improvement fraction. This fixture's
+    residual falls to exactly zero after its second pass, so a threshold as
+    loose as 0.8 turned out to still separate identically from 0.05 either way
+    round; 0.99 (looser than the very first pass's ~93% improvement) against
+    0.01 (tighter than a zero delta can ever satisfy, so it runs to the full
+    budget) is what actually pins the comparison's direction down.
+    """
+    clouds, transforms = _turntable_drifted_sweep()
+
+    loose = refine_on_turntable(
+        clouds,
+        transforms,
+        direction=_SWEEP_AXIS,
+        through=_SWEEP_THROUGH,
+        tolerance=6.0,
+        iterations=6,
+        sample=80,
+        min_improvement=0.99,
+    )
+    tight = refine_on_turntable(
+        clouds,
+        transforms,
+        direction=_SWEEP_AXIS,
+        through=_SWEEP_THROUGH,
+        tolerance=6.0,
+        iterations=6,
+        sample=80,
+        min_improvement=0.01,
+    )
+
+    assert loose.iterations_run <= tight.iterations_run
+    assert loose.iterations_run < 6, "the fixture must actually demonstrate an early stop"
+    assert tight.iterations_run == 6, "and the tight threshold must actually run to the budget"
+
+
+def test_worst_correction_is_the_largest_magnitude_correction():
+    zero = refine_on_turntable(
+        *_turntable_drifted_sweep(),
+        direction=_SWEEP_AXIS,
+        through=_SWEEP_THROUGH,
+        tolerance=1e-9,
+        iterations=2,
+        sample=60,
+    )
+    nonzero = _turntable_refined_result()
+
+    assert zero.worst_correction == 0.0, "nothing moved, so nothing to report as worst"
+    assert nonzero.worst_correction == max(abs(c) for c in nonzero.corrections)
+    assert nonzero.worst_correction > 0.0
+
+
+def test_refine_on_turntable_refuses_invalid_input():
+    clouds, transforms = _clean_sweep()
+    through: Point = _SWEEP_THROUGH
+
+    with pytest.raises(MultiviewNotAllowed, match="one each"):
+        refine_on_turntable(
+            clouds, transforms[:-1], direction=_SWEEP_AXIS, through=through, tolerance=1.0
+        )
+    with pytest.raises(MultiviewNotAllowed, match="at least three frames"):
+        refine_on_turntable(
+            clouds[:2], transforms[:2], direction=_SWEEP_AXIS, through=through, tolerance=1.0
+        )
+    with pytest.raises(MultiviewNotAllowed, match="not a frame index"):
+        refine_on_turntable(
+            clouds, transforms, direction=_SWEEP_AXIS, through=through, tolerance=1.0, anchor=-1
+        )
+    with pytest.raises(MultiviewNotAllowed, match="not a frame index"):
+        refine_on_turntable(
+            clouds,
+            transforms,
+            direction=_SWEEP_AXIS,
+            through=through,
+            tolerance=1.0,
+            anchor=len(clouds),
+        )
+    with pytest.raises(MultiviewNotAllowed, match="iterations must be at least 1"):
+        refine_on_turntable(
+            clouds, transforms, direction=_SWEEP_AXIS, through=through, tolerance=1.0, iterations=0
+        )
+    with pytest.raises(MultiviewNotAllowed, match="positive"):
+        refine_on_turntable(
+            clouds, transforms, direction=_SWEEP_AXIS, through=through, tolerance=0.0
+        )
+    with pytest.raises(MultiviewNotAllowed, match="positive"):
+        refine_on_turntable(
+            clouds, transforms, direction=_SWEEP_AXIS, through=through, tolerance=-1.0
+        )
+    with pytest.raises(MultiviewNotAllowed, match="finite non-zero"):
+        refine_on_turntable(
+            clouds, transforms, direction=(0.0, 0.0, 0.0), through=through, tolerance=1.0
+        )
+    with pytest.raises(MultiviewNotAllowed, match="finite non-zero"):
+        refine_on_turntable(
+            clouds, transforms, direction=(math.nan, 1.0, 0.0), through=through, tolerance=1.0
+        )
+
+
+def test_refine_on_turntable_as_dict_carries_schema_version_and_corrections_in_degrees():
+    result = _turntable_refined_result()
+
+    record = json.loads(json.dumps(result.as_dict()))
+
+    assert record["schema_version"] == SCHEMA_VERSION
+    assert record["corrections_deg"] == [math.degrees(c) for c in result.corrections]
+    assert record["worst_correction_deg"] == pytest.approx(math.degrees(result.worst_correction))
+    assert record["limitations"], "some caveat must travel with every result"

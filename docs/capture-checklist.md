@@ -1,9 +1,11 @@
 # Capture checklist: what to put in front of the scanner, and what to measure
 
-Status: a work order, not a result. Everything below is the physical half of M4
-(metric validation) and M6 (registration) — the part no amount of software can
-do. The software half is built and tested; these captures are what close the
-milestones.
+Status: partly a result now. The M4 scale question has been answered by caliper
+against real captures — the unit is millimetres — and the registration work in
+M6 has been measured on a real two-lap sweep. What remains here is still the
+physical half that no amount of software can do: the accuracy of that scale
+across the working range, and the captures that would confirm on real scans what
+has so far only been shown on real geometry with a simulated flip.
 
 Budget roughly 30 minutes. You need: the scanner, your calipers, a turntable,
 one **sphere**, and one **asymmetric object**. Those two must be different
@@ -11,40 +13,97 @@ objects, for a reason given below that is easy to get wrong.
 
 ## Why this is needed at all
 
-No distance this scanner has ever produced has been metrically validated. The
-depth scale is a float32 that decodes to `1/200`, and what it measures is
-unknown. Across the nine committed frames the median non-zero depth code is
-23398, which at that scale implies a distance of **117 unknown units**.
+The depth scale is a float32 that decodes to `1/200`, and for most of this
+project's life what it measured was unknown. Across the nine earliest committed
+frames the median non-zero depth code is 23398, which at that scale implies a
+distance of 117 of *something*.
 
-The Revopoint MINI is documented as working at roughly 100–200 mm. So 117 is
-*consistent with* millimetres — and consistency is not proof. It is exactly the
-kind of coincidence that has fooled this project before (see "The trap" in
-[depth-to-pointcloud.md](depth-to-pointcloud.md)). One caliper measurement
-settles it. Until then the code keeps saying `UNVALIDATED_UNIT`, and it is right
-to.
+**That question is now answered: the unit is millimetres.** A can measuring
+58.0 mm across the flange-free middle by caliper was scanned at roughly 122.7 mm
+standoff and came back 57.705 mm — an error of −0.51%. See
+[metric-validation.md](metric-validation.md) for the full sweep.
+
+Two things this does NOT mean, both worth keeping in mind while capturing:
+
+**The scale is identified, not trusted.** Across distances the measured error
+ranges from −0.49% to −2.26%, and no correction model explains that spread. A
+number in millimetres is not yet a number you should quote to three decimal
+places.
+
+**The code may still say `UNVALIDATED_UNIT`.** That flag describes what has been
+proven *in software*, and the reader should check the source rather than assume
+this document and the code agree. The measurement above is what a caliper
+showed; the flag is what the pipeline asserts, and those are different claims.
+
+The reason this distinction gets its own paragraph is that a plausible-looking
+number has fooled this project before — see "The trap" in
+[depth-to-pointcloud.md](depth-to-pointcloud.md). 117 was *consistent with*
+millimetres long before it was *shown* to be millimetres, and consistency was
+never proof.
 
 ## The working envelope, measured
 
-From the nine committed frames and the factory intrinsics:
+From the nine committed frames and the factory intrinsics, with the unit now
+known to be millimetres (see above):
 
 | Quantity | Value |
 | --- | --- |
 | Depth codes actually returned | 1st percentile 16817, median 23398, 99th 58002 |
-| Implied distance (unit unknown) | ~84 to ~290, median ~117 |
+| Implied distance | ~84 to ~290 mm, median ~117 mm |
 | Horizontal field of view | −2.70° to +33.58° (span 36.3°) |
 | Vertical field of view | −12.11° to +12.92° (span 25.0°) |
-| Visible width at median distance | ~83 units |
-| Visible height at median distance | ~52 units |
+| Visible width at median distance | ~83 mm |
+| Visible height at median distance | ~52 mm |
 
-**Target size:** something **40–70 units across** fills a useful fraction of the
-frame at the median working distance. If the unit turns out to be millimetres,
-that is a 40–70 mm object — a golf ball, a small bearing, a 3D-printed test
-cube. Much smaller and you get too few returns; much larger and it will not fit.
+**Target size:** something **40–70 mm across** fills a useful fraction of the
+frame at the median working distance — a golf ball, a small bearing, a
+3D-printed test cube. Much smaller and you get too few returns; much larger
+and it will not fit.
 
 **Note the field of view is wildly asymmetric.** The principal point `cx` sits
 6.6% across a 640-wide frame — near the left edge, not the centre. That is
 either a real property of this sensor or a wrong calibration value, and
 distinguishing those is capture 2 below.
+
+## Working distance and standoff, measured
+
+Two real findings on the truck bed itself bracket how far from the scanner
+the object should sit — one about moving closer, one a hard limit on going
+further. Neither is specific to a turntable; both are about the distance
+between the scanner and the object, however that distance is achieved.
+
+### Closer is better, within the envelope
+
+Two real capture sets, differing only in standoff:
+
+| Standoff (median depth) | Per-pair alignment rmse | Frame overlap | Self-agreement at matched capture-order gaps |
+| --- | --- | --- | --- |
+| ~140 mm | 0.65 | 100% | 1.84 |
+| ~250 mm | 0.723 | 94.8% | 3.07 |
+
+Self-agreement improved **1.7x** at the closer standoff, and every column
+moved the same direction — this is not a trade-off with a cost hidden in it.
+Work as close as the object and its motion allow.
+
+### A hard ceiling on standoff, and it is closer than it looks
+
+Depth arrives as a 16-bit code at 0.005 mm per count, so the largest distance
+this sensor can represent at all is `65535 x 0.005 = 327.675 mm`. Past that
+the code has nowhere to go. The deepest returns seen across committed frames
+already sit near **290 mm**.
+
+This matters most if the scanner ends up mounted rather than handheld,
+looking down at an angle. At 45 degrees the slant range to the object is
+`height x sqrt(2)`:
+
+| Mount height | Slant range at 45° | Verdict |
+| --- | --- | --- |
+| 12 inches | 431 mm | **unrepresentable** — past the sensor's ceiling |
+| 8 inches | 290 mm | the practical maximum, with no margin |
+| 6 inches | 212 mm | comfortably inside proven territory |
+
+Prefer 6 inches of mount height (or the equivalent handheld standoff) over 8,
+and do not mount higher than 8 inches at 45 degrees at all.
 
 ## Capture 1 — scale, with a sphere or an upright cylinder
 
@@ -82,7 +141,7 @@ the frame centre), on synthetic spheres of known radius:
 Two things fall out of that table, and both matter:
 
 1. **The distortion is independent of distance.** 7.9–8.0% of radius whether the
-   sphere sits at 117 or 250. Shear deforms shape by a constant proportion, so
+   sphere sits at 117 mm or 250 mm. Shear deforms shape by a constant proportion, so
    you cannot escape it by moving the target, and you do not need to hunt for a
    distance where it shows up.
 2. **The fitted radius is only 1.3% too large.** This is the trap. Measure the
@@ -100,10 +159,10 @@ evidence that `cx` is wrong.
 1. Measure the sphere's diameter with the calipers. Take **five** readings at
    different orientations. Record every reading, not just the mean — the spread
    is your ground-truth uncertainty, and a verdict without it is not a verdict.
-2. Place it at roughly the median working distance (~117 units; if that is mm,
-   about 12 cm) against a plain, non-reflective background.
+2. Place it at roughly the median working distance (~117 mm, so about 12 cm)
+   against a plain, non-reflective background.
 3. Capture. Then capture twice more without touching anything.
-4. Move it nearer (~85 units) and repeat. Move it further (~250 units) and
+4. Move it nearer (~85 mm) and repeat. Move it further (~250 mm) and
    repeat.
 5. **Then put the sphere on the turntable and sweep it, exactly as in capture 3.**
    This step is not optional and the reason is measured, not theoretical — see
@@ -154,11 +213,11 @@ Good candidates, in rough order of preference:
 
 - **A pill bottle, cardboard tube, candle, or plastic jar** — matte, right size,
   stands up on its own.
-- **A soup or drink can** — good size (~66 units across) and a very clean
+- **A soup or drink can** — good size (~66 mm across) and a very clean
   diameter to measure, but bare aluminium is shiny; a strip of masking tape or
   a dusting of chalk fixes that and is standard practice.
 - **A dowel, socket, or large bolt** — fine if wide enough to fill a useful part
-  of the frame. Below about 40 units across you get too few returns.
+  of the frame. Below about 40 mm across you get too few returns.
 - **Avoid anything squat** (a coin, a puck, a jar lid): a cylinder shorter than
   it is wide makes the axis hard to estimate from the points alone.
 
@@ -196,7 +255,8 @@ identical from every angle. An upright cylinder standing on the turntable's own
 axis *also* looks identical from every angle, for the same reason — it is
 rotationally symmetric about the very axis you are turning it around. Either one
 carries no information about how far it rotated, and registration would report a
-perfect, meaningless alignment.
+perfect, meaningless alignment. (Re-confirmed synthetically: a cylinder
+centred on the rotation axis returned exactly 0.0° of recovered rotation.)
 
 Use something clearly **asymmetric**: a small figurine, a bracket, a crumpled
 shape, a 3D print with distinct features. It must look different from every side.
@@ -235,12 +295,96 @@ its cost.
 surfaces are seen. A single level sweep never observes the top of an object, and
 the fused result will have a hole there.
 
+### Capture density is a quality lever, measured
+
+Loop-closure error on a real two-lap capture, varying only the step between
+consecutive frames:
+
+| Step between frames | Drift per lap |
+| --- | --- |
+| 7.8° | 65° |
+| 3.9° | 23° |
+
+Halving the step cut the error **2.8x** — better than proportional. Error
+accumulates roughly linearly with laps: two laps measured about 2.2x the
+error of one lap. This is not turntable-specific: it is the size of the jump
+between consecutive captures that matters, whether that jump comes from a
+turntable's index or from how far the scanner (or the object) moved by hand.
+Smaller, more frequent captures beat fewer, larger ones by more than the
+frame count alone would predict.
+
+### Move continuously rather than stopping at each step, measured
+
+A continuous capture stream sustained **4.65 fps with zero dropped frames**,
+which against a turntable taking about 2 minutes per revolution works out to
+roughly **2°/frame** — a finer step than the "24 frames at 15°" target above,
+for the same revolution. Large jumps between consecutive frames are where
+alignment silently fails; moving steadily — turning the object at a constant
+rate, or walking around it at an even pace, rather than stopping and
+restarting — avoids ever taking one. This is separate from the 5-second gap
+in "Leave at least 5 seconds between captures" below: that gap is about
+discrete stop-and-shoot captures. Continuous motion has no stop to gap.
+
+### Capture two full laps, not one, measured
+
+One closed lap proves the trajectory returned to where it started; it gives
+the software nothing to check accumulated drift against along the way. A
+second lap — or, handheld, deliberately passing back over ground already
+covered — revisits the same viewpoints, which the software can detect
+geometrically and correct drift against. On a real two-lap capture this took
+the held-out closure error from a median of **14.4° to 0.9°**. Without a
+revisit there is nothing to correct against, so plan every capture to come
+back around to somewhere it has already been, not just to close a single loop.
+
 ## Capture 4 — fusion and mesh, free
 
 No extra work. Capture 3's frames feed fusion and meshing directly. The only
 thing worth adding is one sweep of an object with a **known simple dimension**
 (a cube with caliper-measured edges), so the final mesh can be checked against a
 real number end to end rather than only at the point-cloud stage.
+
+## If the object must be captured in two orientations
+
+Some objects cannot be captured in one orientation at all — reaching the
+underside means physically turning the object over and capturing it again.
+Matching that second capture back to the first is harder than it looks, for
+one specific structural reason, and it changes how the object should be
+oriented for capture.
+
+**A shape missing one face is symmetric under its own half-turn, regardless of
+proportions.** An object that rests on one face throughout a capture — a
+tray, a bed, anything scanned with its underside against whatever it sits
+on — has four side faces that are each a plain rectangle, and a rectangle is
+always identical to itself after a 180-degree turn about its own centre.
+Stretching the object longer or narrower does not break that symmetry; it is
+a property of the shape family, not the aspect ratio. A truck bed is close
+enough to this shape to inherit the problem.
+
+**Verified on the user's own truck bed geometry:** matching an
+upright scan against a flipped one, the best-scoring candidate after
+full-resolution alignment was the WRONG answer — an upside-down twin of the
+object, 179 degrees from the truth — beating the correct flip by about 1%.
+More alignment compute does not fix this: the two answers are genuinely
+equally good fits to the shape alone.
+
+**The practical consequence:** the object is distinguishable from its own
+upside-down twin only because of its asymmetric features — wheel wells, the
+recess under the cab, and anything else that differs between its two sides.
+**Those features have to be captured well in both orientations.** If a wheel
+well is only captured facing up in one scan and never seen facing down in
+the other, nothing asymmetric connects the two captures, and they cannot be
+matched with confidence. When flipping the object over, deliberately
+re-cover its distinguishing features from the new orientation — do not just
+recapture the featureless flat panels again.
+
+**This is not yet proven end to end.** A way to tell the true flip apart from
+its twin — using where the object was resting, not its shape — exists and
+recovered the correct answer on this object's real geometry with a
+*simulated* flip. It has not yet been run on two real physical scans of a
+flipped object. Whatever eventually confirms or replaces it, capturing the
+asymmetric features in both orientations is the one thing that makes any such
+matching possible at all — that is the capture advice, independent of which
+method ends up doing the matching.
 
 ## Two hardware faults found while capturing, and how to avoid them
 
@@ -320,5 +464,18 @@ validation harness records who declared it and when for exactly that reason.
 - Lens distortion is not modelled anywhere. The deprojection is an ideal
   pinhole. These captures will not establish a distortion model, only whether
   one is needed.
-- A single validated distance is not a validated *range*. That is why capture 1
-  asks for three distances rather than one.
+- **Resolved: a single validated distance is not a validated
+  *range*.** Three standoffs were captured and measured (98, 123 and 244 mm),
+  and the depth scale is confirmed as millimetres — see
+  [metric-validation.md](metric-validation.md). What that work opened instead:
+  a **calibration correction is still not established**. Errors ranged from
+  −0.49% to −2.26% across those distances and surfaces, and no model for that
+  spread has been found — a constant scale error and a constant
+  principal-point shear were both tested and both ruled out by their distance
+  signatures.
+- **Matching a flipped scan back to its upright pair is not yet proven on
+  real captures.** A way to disambiguate the true flip from its
+  shape-alone twin exists and worked on this object's real geometry with a
+  simulated flip; it has not been tested on two real physical scans of a
+  flipped object yet. See "If the object must be captured in two
+  orientations" above for what to capture in the meantime.
