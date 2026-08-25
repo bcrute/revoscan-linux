@@ -60,6 +60,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Final
 
+from scanner3d.discovery import find_scanners
 from scanner3d.errors import DoctorStatus, ScannerError
 from scanner3d.v4l2_capture import (
     AUTHORIZED_SERIAL,
@@ -298,11 +299,47 @@ def _field(buf: bytes, name: str) -> int:
     return value
 
 
+#: How long to wait for the scanner to come back after a stream is closed.
+#:
+#: MEASURED, not guessed: this device RE-ENUMERATES on the USB bus every time a
+#: depth stream is closed. Its bus address climbs by one each capture. It
+#: disappears for about 0.39 s and then returns, so anything that opens a stream
+#: immediately after closing one sees "no such device" and looks, to a user,
+#: exactly like the scanner having been unplugged.
+#:
+#: The ceiling here is many times the measured gap because the consequence of
+#: waiting slightly too long is a pause, and the consequence of not waiting long
+#: enough is a failure the user cannot interpret.
+REENUMERATION_TIMEOUT_S: Final = 6.0
+
+
+def wait_for_scanner(
+    serial: str = AUTHORIZED_SERIAL, *, timeout_s: float = REENUMERATION_TIMEOUT_S
+) -> bool:
+    """Block until the scanner is enumerable again, or the timeout expires.
+
+    Returns whether it came back. Callers that open a stream shortly after
+    closing one should call this first - see :data:`REENUMERATION_TIMEOUT_S` for
+    why the device is absent at all.
+    """
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            if any(device.serial == serial for device in find_scanners()):
+                return True
+        except ScannerError:
+            pass
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
 def stream_frames(
     serial: str = AUTHORIZED_SERIAL,
     *,
     frames: int,
     on_frame: Callable[[bytes, FrameRecord], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
     decimate: int = 1,
     duration_s: float = MAX_DURATION_S,
     buffers: int = REQUESTED_BUFFERS,
@@ -320,8 +357,17 @@ def stream_frames(
     mapping the moment it is queued again, so a caller holding a view would see
     it change underneath them.
 
+    ``should_stop`` is polled after each buffer has been RE-QUEUED, and ending
+    the stream there is the only safe place to end it early. A callback that
+    raises instead skips the ``VIDIOC_QBUF`` for the buffer it was handed, so
+    cleanup then runs with a buffer still owned by userspace — measured on this
+    hardware, that makes the device re-enumerate, which to a caller looks
+    exactly like the scanner being unplugged. Stopping through this flag
+    returns every buffer first and leaves the device usable immediately.
+
     Cleanup runs in ``finally`` — ``STREAMOFF``, unmap, release, close — so a
-    callback that raises still leaves the device in the state it was found.
+    callback that raises still leaves the device closed rather than held, but
+    "closed" and "healthy" are not the same thing and only the flag gives both.
     """
     ensure_request(frames, decimate, duration_s)
 
@@ -437,6 +483,12 @@ def stream_frames(
                 kept += 1
 
             fcntl.ioctl(fd, VIDIOC_QBUF, buf, True)
+
+            # Polled here, AFTER re-queueing, so the driver owns every buffer
+            # again before the finally block tears the mapping down.
+            if should_stop is not None and should_stop():
+                stopped_early, reason = True, "caller asked to stop"
+                break
     finally:
         # Each step is suppressed on its own: a failure in one must not skip the
         # rest, or a run that died mid-stream would leave the device held open.

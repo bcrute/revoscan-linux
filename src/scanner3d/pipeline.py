@@ -72,6 +72,87 @@ DEFAULT_KEEP_FRACTION: Final = 0.8
 #: error would be noise wearing a decimal point.
 MIN_CLOSURES_TO_SPLIT: Final = 4
 
+#: Per-point measurement noise, measured on this scanner: repeated frames of a
+#: stationary surface disagree by about this much. Every threshold below is
+#: expressed as a multiple of it, because that is the quantity that makes them
+#: portable to another scanner rather than to this one alone.
+NOISE_FLOOR: Final = 0.65
+
+#: How far the surface should travel between kept frames, as a multiple of the
+#: noise floor.
+#:
+#: These bounds are CALIBRATED AGAINST OUTCOMES, not derived. An earlier version
+#: of this constant was estimated from the object's radius and an assumed
+#: geometry, and it was wrong in the worst way: it called the two best-measured
+#: settings "too slow" and the worst one "good". What follows is the measured
+#: relationship instead, where travel is the median measured by
+#: :func:`frame_travel` and drift is held-out closure error per revolution:
+#:
+#:     travel   multiple   drift per lap
+#:     1.7        2.6x        31.2 deg
+#:     2.5        3.8x         0.5 deg
+#:     3.8        5.8x        23.4 deg
+#:     7.8       12.0x        65.2 deg
+#:
+#: Below about 2 the frames are so alike that each alignment measures noise more
+#: than motion, and those errors accumulate over many more steps. Above about 6
+#: alignment begins to fail outright, and by 12 it is badly wrong.
+#:
+#: HOW FAR TO TRUST THIS: four points, two captures, and the 2.5 row is from a
+#: capture of the object in a different orientation, so it is not a clean
+#: comparison with the rest. The band is deliberately drawn wider than the
+#: points justify narrowing it to. It is guidance for turning a knob, not a
+#: calibration.
+TRAVEL_MIN_MULTIPLE: Final = 3.0
+TRAVEL_MAX_MULTIPLE: Final = 9.0
+
+
+def frame_travel(cloud: Sequence[Point], transform: Rigid) -> float:
+    """Median distance the surface moved between two frames, in depth units.
+
+    This is the quantity that decides whether a rotation speed is sensible, and
+    it is deliberately NOT an angle. What matters to alignment is how far the
+    surface moved relative to the sensor's noise, and a small object turning
+    fast moves its surface less than a large one turning slowly at the same
+    angular rate. Degrees are a property of the turntable; millimetres are a
+    property of the problem.
+
+    The median is used rather than the mean because points near the rotation
+    axis barely move however fast it turns, and averaging them in would report
+    a speed lower than what the geometry that carries the alignment actually
+    experiences.
+    """
+    if not cloud:
+        return 0.0
+    moved = sorted(math.dist(point, transform.apply(point)) for point in cloud)
+    return moved[len(moved) // 2]
+
+
+def travel_verdict(travel: float) -> tuple[str, str]:
+    """Turn a measured travel into a verdict and an instruction.
+
+    Returns ``(verdict, advice)``. The advice names the physical action - turn
+    the knob one way or the other - because that is what the person holding the
+    scanner can actually do about it.
+    """
+    low = TRAVEL_MIN_MULTIPLE * NOISE_FLOOR
+    high = TRAVEL_MAX_MULTIPLE * NOISE_FLOOR
+    if travel <= 0.0:
+        return ("no motion", "Nothing is moving. Is the turntable running?")
+    if travel < low:
+        return (
+            "too slow",
+            f"Frames are only {travel:.1f} apart, under the {low:.1f} that alignment "
+            "needs to see motion rather than noise. Speed the rotation up.",
+        )
+    if travel > high:
+        return (
+            "too fast",
+            f"Frames are {travel:.1f} apart, over the {high:.1f} where alignment starts "
+            "to fail. Slow the rotation down.",
+        )
+    return ("good", f"{travel:.1f} between frames is in the band that registers well.")
+
 
 class PipelineNotAllowed(ScannerError):
     """A reconstruction was requested that this module refuses to attempt."""
