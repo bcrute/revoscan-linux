@@ -48,7 +48,56 @@ different reasons:
    being asked about. A real revisit needs almost no motion to align: on the
    real capture that motivated this module, verified revisits came back at
    0.05 to 1.4 degrees of rotation, nowhere near the default thresholds. That
-   wide margin, not a marginal one, is what makes verification trustworthy.
+   wide margin, not a marginal one, is what makes verification trustworthy -
+   MOST of the time. See "The local-minimum problem" below for when it is not,
+   and :func:`_beaten_by_an_alternative` for the second pass that catches it.
+
+The local-minimum problem, measured on real data
+----------------------------------------------------
+Seeding from identity asks one question: "did aligning these two frames need
+almost no motion?" That question has a false-positive answer. When two
+frames are separated by a large rotation - half a revolution, the object seen
+from the opposite side - point-to-point ICP started at identity cannot escape
+that local minimum. It converges, reports success, and returns a transform
+near identity anyway, because :data:`~scanner3d.registration.DEFAULT_KEEP_FRACTION`
+trims to the closest-agreeing SUBSET of correspondences: if some fraction of
+each frame's content coincidentally lands near something in the other frame
+under identity - not uncommon for a real object with any repeated or bulky
+structure - the trim keeps only that agreeing subset and reports its residual,
+which can look excellent, while the majority of each cloud that does not
+correspond is simply rejected as "no partner within the gate" rather than
+counted against the fit.
+
+Measured on the user's real sweep: of 34 candidates that passed every
+existing threshold, FIVE were false, at true separations of 176 and 181
+degrees. Their residuals against the independently-chained poses were 179.4
+to 179.7 degrees - not a near miss, the opposite side of the object. NO
+existing threshold separates them from the 29 genuine revisits: false
+positives measured rmse 1.13-1.22 and overlap (matched_fraction) 0.220-0.397;
+genuine ones measured rmse 1.17-1.58 and overlap 0.257-0.642 - overlapping
+ranges, and the false ones have the BETTER rmse. Tightening rotation,
+translation, rmse, correspondence-count or overlap thresholds cannot fix
+this, because the false fit is not marginal by any of those measures - it is
+a different kind of wrong that a single-seed, single-threshold check cannot
+see: identity is A local minimum, and nothing checks whether it is the GLOBAL
+one.
+
+The fix is to check. :func:`_beaten_by_an_alternative` reruns ICP from a
+handful of alternative starting orientations - proposed by
+:func:`scanner3d.multiview.coarse_align`, which already exists in this
+codebase to search a general SO(3) starting point capture-agnostically (no
+turntable, no angular step, no revolution count - see that module's own
+docstring) - and accepts the identity-seeded fit only if none of them explain
+the SAME data materially better. "Materially better" is
+:data:`DEFAULT_ALTERNATIVE_MARGIN`, an explicit, documented, measured
+parameter - see :func:`_fit_quality` for what "better" means here and why
+raw ``rmse`` alone is exactly the quantity the bug hides behind (the false
+fit's rmse was the BETTER one, on real data, per the numbers above).
+
+Cost is paid deliberately narrowly: the alternative search only runs for a
+candidate that ALREADY passed the identity-seeded thresholds - most Stage 2
+candidates are rejected there, cheaply, exactly as before this existed. See
+:func:`detect_revisits`'s own docstring for the measured added cost.
 
 Verified pairs become :class:`Revisit` records, and
 :meth:`RevisitReport.pose_edges` turns them directly into
@@ -115,6 +164,8 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Final
 
+from scanner3d.compute import PYTHON_BACKEND, ComputeBackend
+from scanner3d.compute import select_backend as _select_compute_backend
 from scanner3d.depth_metric import (
     NO_RETURN_SAMPLE,
     SAMPLES_FORMAT,
@@ -123,8 +174,9 @@ from scanner3d.depth_metric import (
 )
 from scanner3d.errors import DoctorStatus, ScannerError
 from scanner3d.geometry import Point, Rigid
+from scanner3d.multiview import MultiviewNotAllowed, coarse_align
 from scanner3d.posegraph import PoseEdge
-from scanner3d.registration import Cloud, RegistrationNotAllowed, icp
+from scanner3d.registration import Cloud, IcpResult, RegistrationNotAllowed, icp
 
 SCHEMA_VERSION: Final = 1
 
@@ -149,6 +201,38 @@ DEFAULT_MAX_ROTATION: Final = math.radians(12.0)
 DEFAULT_MAX_TRANSLATION: Final = 20.0
 DEFAULT_MAX_RMSE: Final = 1.6
 DEFAULT_MIN_CORRESPONDENCES: Final = 400
+
+#: How many alternative starting orientations - beyond identity - a candidate
+#: that already passed every threshold above is re-verified against, before
+#: it is trusted. See the module docstring's "The local-minimum problem".
+#: :func:`scanner3d.multiview.coarse_align` ranks its own candidates cheaply
+#: first, so this is "how many of its TOP-ranked candidates get the
+#: expensive full-ICP refinement", not how many exist - it proposes up to 25
+#: (one principal-axis candidate plus the 24-strong octahedral group).
+#: 0 disables the check and restores this module's pre-fix behaviour, for a
+#: caller who has measured that its added cost is not worth paying on their
+#: data; it is not the default, because the default must be correct.
+DEFAULT_ALTERNATIVE_SEEDS: Final = 3
+
+#: How much better (see :func:`_fit_quality`) an alternative seed's refined
+#: fit must be than the identity-seeded fit for the latter to be rejected as
+#: a local minimum rather than the global one. Named and measured, not a
+#: magic number: on the hand-built fixture reproducing the real false-positive
+#: pattern (see ``tests/test_revisit.py``), the false fit's quality ratio
+#: against its best alternative measured ~2.3; on a genuine revisit built the
+#: same way, identity's own quality measured ~1.7x BETTER than its best
+#: alternative (a ratio below 1.0 the way this constant is applied). 1.5 sits
+#: with real margin on both sides of that gap rather than splitting it evenly,
+#: matching this module's own established preference (see
+#: :data:`DEFAULT_MAX_ROTATION` and siblings) for a wide margin over a
+#: marginal one.
+DEFAULT_ALTERNATIVE_MARGIN: Final = 1.5
+
+#: Below this angle, a candidate :func:`scanner3d.multiview.coarse_align`
+#: proposes is too close to identity to be a meaningfully different
+#: hypothesis - refining it would just re-find the identity fit a second
+#: time, at full ICP cost, for no new information.
+MIN_ALTERNATIVE_ROTATION: Final = math.radians(10.0)
 
 
 class RevisitNotAllowed(ScannerError):
@@ -335,12 +419,44 @@ class Revisit:
 
 
 @dataclass(frozen=True, slots=True)
+class RejectedRevisit:
+    """A pair that passed every identity-seeded threshold, and was rejected
+    anyway because an alternative starting orientation explained the SAME
+    data materially better - see the module docstring's "The local-minimum
+    problem". Reported rather than silently dropped, the same choice
+    :class:`scanner3d.posegraph.PoseGraphResult.rejected_edges` makes for
+    the analogous decision there: a caller can see exactly what was caught
+    and why, not just a count.
+    """
+
+    i: int
+    j: int
+    identity_rmse: float
+    identity_matched_fraction: float
+    alternative_rmse: float
+    alternative_matched_fraction: float
+    alternative_rotation_angle: float
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "i": self.i,
+            "j": self.j,
+            "identity_rmse": self.identity_rmse,
+            "identity_matched_fraction": self.identity_matched_fraction,
+            "alternative_rmse": self.alternative_rmse,
+            "alternative_matched_fraction": self.alternative_matched_fraction,
+            "alternative_rotation_angle_radians": self.alternative_rotation_angle,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class RevisitReport:
     """Every pair Stage 1 proposed, and which of them Stage 2 confirmed."""
 
     frames: int
     candidates: tuple[RevisitCandidate, ...]
     verified: tuple[Revisit, ...]
+    rejected_as_local_minimum: tuple[RejectedRevisit, ...]
     min_index_gap: int
     max_candidates: int
     limitations: tuple[str, ...]
@@ -380,6 +496,7 @@ class RevisitReport:
             "max_candidates": self.max_candidates,
             "candidates": [c.as_dict() for c in self.candidates],
             "revisits": [r.as_dict() for r in self.verified],
+            "rejected_as_local_minimum": [r.as_dict() for r in self.rejected_as_local_minimum],
             "limitations": list(self.limitations),
         }
 
@@ -420,6 +537,8 @@ def _ensure_parameters(
     max_translation: float,
     max_rmse: float,
     min_correspondences: int,
+    alternative_seeds: int,
+    alternative_margin: float,
 ) -> None:
     if frames < 2:
         raise RevisitNotAllowed(f"{frames} frame(s) is not a sequence to search for revisits in")
@@ -446,6 +565,16 @@ def _ensure_parameters(
         raise RevisitNotAllowed(
             f"min_correspondences must be at least 1, got {min_correspondences}"
         )
+    if alternative_seeds < 0:
+        raise RevisitNotAllowed(
+            f"alternative_seeds must be non-negative, got {alternative_seeds}; 0 disables the "
+            "local-minimum check rather than being a negative count of anything"
+        )
+    if not math.isfinite(alternative_margin) or alternative_margin <= 1.0:
+        raise RevisitNotAllowed(
+            f"alternative_margin must be finite and greater than 1.0, got {alternative_margin!r}; "
+            "1.0 or below would reject a candidate for tying itself, which is not a margin"
+        )
 
 
 def _default_max_depth(clouds: Sequence[tuple[Point, ...]]) -> float:
@@ -471,6 +600,104 @@ def _default_max_depth(clouds: Sequence[tuple[Point, ...]]) -> float:
     return largest
 
 
+def _resolve_backend(backend: str | ComputeBackend) -> tuple[str, ComputeBackend | None]:
+    """``(resolved name, live backend or None)``. ``None`` means "run the
+    original, unaccelerated code path" - matches
+    :func:`scanner3d.icp_plane._resolve_backend` and
+    :func:`scanner3d.registration._resolve_backend` exactly, duplicated
+    rather than imported for the same reason every other private helper in
+    this codebase is duplicated across sibling modules - see either of
+    theirs for the fuller reasoning.
+    """
+    if isinstance(backend, str):
+        if backend == PYTHON_BACKEND:
+            return PYTHON_BACKEND, None
+        selection = _select_compute_backend(backend)
+        if selection.resolved == PYTHON_BACKEND:
+            return PYTHON_BACKEND, None
+        return selection.resolved, selection.backend
+    return backend.name, backend
+
+
+def _fit_quality(fit: IcpResult) -> float:
+    """``rmse`` divided by ``matched_fraction``: lower is better, and this -
+    not raw ``rmse`` alone - is what :func:`_beaten_by_an_alternative`
+    compares seeds on.
+
+    Raw ``rmse`` is exactly the quantity the local-minimum bug hides behind:
+    it is computed only over the correspondences that survived the gate and
+    the trim, so a seed that explains a SMALL, coincidentally-agreeing
+    fraction of a cloud can report a deceptively excellent residual over
+    that fraction while saying nothing about the rest - measured on the real
+    false-positive pairs, whose rmse was BETTER than the genuine revisits'
+    (see the module docstring). Dividing by ``matched_fraction`` penalises
+    exactly that: a fit that explains less of the cloud needs a
+    proportionally better residual to look equally good. On the fixture this
+    module's tests build to reproduce the real pattern, this is what
+    separates identity's quality (worse once coverage is accounted for) from
+    a genuinely competing alternative's (much better); raw rmse comparison
+    alone gets the two backwards.
+
+    ``matched_fraction`` of exactly 0.0 - every source point rejected, no
+    correspondence at all - returns infinity rather than dividing by zero:
+    an unmatched fit cannot be "good" at any rmse.
+    """
+    if fit.matched_fraction <= 0.0:
+        return math.inf
+    return fit.rmse / fit.matched_fraction
+
+
+def _beaten_by_an_alternative(
+    source: Sequence[Point],
+    target: Sequence[Point],
+    identity_fit: IcpResult,
+    *,
+    alternative_seeds: int,
+    alternative_margin: float,
+    backend: str | ComputeBackend,
+) -> IcpResult | None:
+    """Whether some alternative starting orientation explains ``(source,
+    target)`` materially better than ``identity_fit`` already does - see the
+    module docstring's "The local-minimum problem". Returns the winning
+    alternative fit if so, for the caller to report; ``None`` if identity
+    stands (including when ``alternative_seeds`` is 0, or when
+    :func:`scanner3d.multiview.coarse_align` cannot propose anything - too
+    few points, or a degenerate cloud - in which case there is nothing to
+    check against and identity's own thresholds are the only evidence there
+    ever was).
+
+    Alternatives come from :func:`scanner3d.multiview.coarse_align`'s own
+    ranking, refining only its top ``alternative_seeds`` candidates (past
+    :data:`MIN_ALTERNATIVE_ROTATION`) with full ICP - that ranking is cheap
+    and already ordered, so this does not need to refine all ~25 it can
+    propose to find a genuine competitor. Refinement stops as soon as one
+    alternative has already beaten identity by :data:`DEFAULT_ALTERNATIVE_MARGIN`
+    (or the caller's override): once identity is known to lose, spending more
+    ICP calls to find an EVEN better alternative buys nothing.
+    """
+    if alternative_seeds <= 0:
+        return None
+    try:
+        alignment = coarse_align(source, target)
+    except MultiviewNotAllowed:
+        return None
+    identity_quality = _fit_quality(identity_fit)
+    tried = 0
+    for candidate in alignment.candidates:
+        if candidate.transform.rotation_angle < MIN_ALTERNATIVE_ROTATION:
+            continue
+        if tried >= alternative_seeds:
+            break
+        tried += 1
+        try:
+            alt_fit = icp(source, target, initial=candidate.transform, backend=backend)
+        except RegistrationNotAllowed:
+            continue
+        if identity_quality >= alternative_margin * _fit_quality(alt_fit):
+            return alt_fit
+    return None
+
+
 def detect_revisits(
     clouds: Sequence[Cloud],
     *,
@@ -482,6 +709,9 @@ def detect_revisits(
     max_translation: float = DEFAULT_MAX_TRANSLATION,
     max_rmse: float = DEFAULT_MAX_RMSE,
     min_correspondences: int = DEFAULT_MIN_CORRESPONDENCES,
+    alternative_seeds: int = DEFAULT_ALTERNATIVE_SEEDS,
+    alternative_margin: float = DEFAULT_ALTERNATIVE_MARGIN,
+    backend: str | ComputeBackend = PYTHON_BACKEND,
 ) -> RevisitReport:
     """Find pairs in ``clouds`` where the camera saw the same viewpoint twice.
 
@@ -502,6 +732,29 @@ def detect_revisits(
     few points) simply does not verify; that is an ordinary, expected
     outcome for most proposed pairs; not an error this call raises.
 
+    A candidate that passes those thresholds is not yet trusted: identity
+    can be A local minimum without being the GLOBAL one - see the module
+    docstring's "The local-minimum problem", measured on real data. Only
+    THEN does :func:`_beaten_by_an_alternative` spend the extra cost of
+    checking ``alternative_seeds`` alternative starting orientations; most
+    Stage 2 candidates never reach this, because most never pass the cheap
+    thresholds above in the first place. Measured cost of the added check
+    itself: see ``tests/test_revisit.py`` and the task report for numbers on
+    this module's own fixtures - it is one :func:`~scanner3d.multiview.coarse_align`
+    call (cheap; a decimated-cloud coarse score) plus up to ``alternative_seeds``
+    full ICP calls (the expensive part, the same cost as the identity
+    verification itself), and only for candidates that already looked like a
+    revisit. Set ``alternative_seeds=0`` to restore this module's pre-fix
+    behaviour if you have measured that the extra cost is not worth paying
+    on your own data - it is not the default.
+
+    ``backend`` selects what runs every ICP call in Stage 2 - the identity
+    verification and any alternative-seed refinement - see
+    :mod:`scanner3d.compute`. It does not affect
+    :func:`~scanner3d.multiview.coarse_align`'s own coarse scoring pass,
+    which is a separate, self-contained implementation with no backend seam
+    of its own.
+
     ``max_depth`` bounds every signature's histogram; left as ``None`` it is
     the largest z seen in any cloud, so no absolute depth is assumed - see
     :func:`_default_max_depth`.
@@ -516,6 +769,12 @@ def detect_revisits(
         max_translation=max_translation,
         max_rmse=max_rmse,
         min_correspondences=min_correspondences,
+        alternative_seeds=alternative_seeds,
+        alternative_margin=alternative_margin,
+    )
+    _resolved_backend_name, compute_backend = _resolve_backend(backend)
+    icp_backend: str | ComputeBackend = (
+        compute_backend if compute_backend is not None else PYTHON_BACKEND
     )
     prepared = [_ensure_cloud(cloud, what=f"frame {index}") for index, cloud in enumerate(clouds)]
     resolved_max_depth = max_depth if max_depth is not None else _default_max_depth(prepared)
@@ -535,9 +794,10 @@ def detect_revisits(
     )
 
     verified: list[Revisit] = []
+    rejected_as_local_minimum: list[RejectedRevisit] = []
     for _distance, i, j in chosen:
         try:
-            fit = icp(prepared[i], prepared[j])
+            fit = icp(prepared[i], prepared[j], backend=icp_backend)
         except RegistrationNotAllowed:
             # No overlap at the identity, or too few points to solve on -
             # an ordinary outcome for a pair that is not a real revisit.
@@ -548,6 +808,27 @@ def detect_revisits(
             and fit.rmse < max_rmse
             and fit.correspondences > min_correspondences
         ):
+            continue
+        alternative = _beaten_by_an_alternative(
+            prepared[i],
+            prepared[j],
+            fit,
+            alternative_seeds=alternative_seeds,
+            alternative_margin=alternative_margin,
+            backend=icp_backend,
+        )
+        if alternative is not None:
+            rejected_as_local_minimum.append(
+                RejectedRevisit(
+                    i=i,
+                    j=j,
+                    identity_rmse=fit.rmse,
+                    identity_matched_fraction=fit.matched_fraction,
+                    alternative_rmse=alternative.rmse,
+                    alternative_matched_fraction=alternative.matched_fraction,
+                    alternative_rotation_angle=alternative.transform.rotation_angle,
+                )
+            )
             continue
         verified.append(
             Revisit(
@@ -574,6 +855,10 @@ def detect_revisits(
         f"only the closest {max_candidates} proposed pairs by signature distance were sent to "
         "Stage 2; a genuine revisit whose signature happened to rank worse than that many other "
         "pairs would not be found. Raising max_candidates costs one ICP call per pair.",
+        "A candidate that passes every threshold is still rejected if an alternative starting "
+        "orientation explains it materially better (see alternative_seeds, alternative_margin, "
+        "and rejected_as_local_minimum) - identity converging is not, on its own, proof that "
+        "identity is the right answer.",
         "This module only says two frames saw the same viewpoint - it does not decide the "
         "trajectory is wrong or correct it. See scanner3d.posegraph.optimise_poses for that.",
     ]
@@ -583,11 +868,20 @@ def detect_revisits(
             "this sequence genuinely has no revisit, or every genuine revisit's signature "
             "ranked outside max_candidates."
         )
+    if rejected_as_local_minimum:
+        limitations.append(
+            f"{len(rejected_as_local_minimum)} candidate(s) passed every identity-seeded "
+            "threshold and were rejected anyway: an alternative starting orientation explained "
+            "the same data materially better, meaning identity was a local minimum wearing a "
+            "convergence flag, not the true relationship. See rejected_as_local_minimum for "
+            "which pairs and why."
+        )
 
     return RevisitReport(
         frames=frames,
         candidates=candidates,
         verified=tuple(verified),
+        rejected_as_local_minimum=tuple(rejected_as_local_minimum),
         min_index_gap=min_index_gap,
         max_candidates=max_candidates,
         limitations=tuple(limitations),

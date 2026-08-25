@@ -16,11 +16,23 @@ authors = [{ name = "Ben Crute" }]
 dependencies = []
 
 [project.optional-dependencies]
+# numpy accelerates scanner3d.compute's "numpy" backend. Optional by design:
+# the hardware and protocol layers, and the "python" backend, stay
+# dependency-free and this package installs and runs with it entirely
+# absent - see scanner3d.compute's module docstring.
+numpy = ["numpy>=2.0"]
+# scipy accelerates scanner3d.compute's "scipy" backend (KD-tree nearest-
+# neighbour search). Same optionality rule as numpy - scipy already depends
+# on numpy, so this extra does not need to repeat it.
+scipy = ["scipy>=1.11"]
 dev = [
   "pytest>=8.3",
   "pytest-cov>=5.0",
   "ruff>=0.7",
   "mypy>=1.13",
+  "numpy>=2.0",
+  "scipy>=1.11",
+  "scipy-stubs>=1.11",
 ]
 
 [project.scripts]

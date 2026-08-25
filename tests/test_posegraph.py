@@ -38,6 +38,8 @@ from __future__ import annotations
 import functools
 import json
 import math
+import random
+import statistics
 from dataclasses import dataclass
 
 import pytest
@@ -45,9 +47,12 @@ import pytest
 from scanner3d.errors import DoctorStatus
 from scanner3d.geometry import Point, Rigid, ensure_rotation, pose_difference, rotation_about_axis
 from scanner3d.posegraph import (
+    MIN_ROBUST_EDGES,
     EdgeResidual,
     PoseEdge,
     PoseGraphNotAllowed,
+    PoseGraphRobustDisconnected,
+    _robust_weights,
     average_rotations,
     edge_residual,
     edge_residuals,
@@ -492,3 +497,402 @@ def test_edge_residual_combined_matches_hypot_of_its_two_halves():
         edge_index=0, i=0, j=1, rotation_error_radians=0.3, translation_error=0.4
     )
     assert residual.combined == pytest.approx(0.5)
+
+
+# --- 8. robust estimation -----------------------------------------------------------
+#
+# WHY THIS EXISTS: on a real 70-frame sweep, 5 of 34 detected "revisits"
+# were false - ICP seeded from the identity, given two clouds a HALF
+# revolution apart, failed to escape the local minimum and reported a
+# near-identity transform between frames that were actually 176-181 degrees
+# apart. Every LOCAL statistic (rmse, overlap, correspondence count) on
+# those five sat inside the range the true revisits also occupied - there
+# is no per-edge threshold that separates them. Held-out closure error went
+# from 2.735 degrees (chained, unoptimised) to 30.486 degrees (optimised) -
+# 11x WORSE - because the optimiser trusted every edge equally and a
+# minority of wrong ones captured the fit. That is the exact failure this
+# section exists to prevent.
+
+#: Iteration/tolerance budget for robust tests: loose enough to keep this
+#: section's own runtime reasonable on the 120-node headline fixture below,
+#: tight enough that the recovery each test asserts is a real property of
+#: the fit rather than an artefact of stopping early - see the measured
+#: numbers each assertion checks against.
+_ROBUST_ITERATIONS = 150
+_ROBUST_TOLERANCE = 1e-8
+
+
+@functools.cache
+def _robust_headline_fixture():
+    """REAL usage, not the module's own biased-chain headline fixture: poses
+    are the EXACT composition of the sequential edges (recovery_fraction=1.0
+    - no bias at all), matching how a real caller actually builds the poses
+    it hands to this module (see :func:`scanner3d.registration.register_turntable`'s
+    ``_chain_poses``) before this module ever runs. That distinction is not
+    cosmetic - see ``posegraph._robust_weights``'s own docstring: a first
+    version of this fixture reused the module's OTHER headline fixture,
+    which protects sequential edges that still carry a real, nonzero
+    systematic-bias residual, and it could not have caught the real bug
+    this one exists for, because that bug is specifically about a
+    protected population satisfied to float64 precision by construction.
+
+    Ten laps (120 nodes, 108 dense closures - one nearly every node, not a
+    sparse handful) is kept from the original fixture: measured directly, a
+    SPARSER graph (tried at 20 and 80 nodes with a handful of closures
+    spanning wide gaps) lets a single 179-degree edge distort a whole
+    unconstrained neighbourhood during the very first, still-unweighted
+    relaxation pass, before robust reweighting gets a say - collateral
+    damage that inflates nearby HONEST closures' residuals enough to blur
+    the separation robust fitting needs. Dense coverage keeps a wrong
+    edge's distortion local, exactly as the ten-lap count did for the
+    original fixture's different reason.
+
+    108 closures get a small, honest amount of independent noise (0.2 to 3
+    degrees, matching the scale of real ICP noise on a genuine revisit); 5
+    are corrupted to ~179 degrees - two frames a half revolution apart
+    mistaken for the same viewpoint, the exact real failure.
+    """
+    fixture = _loop_fixture(laps=10, per_lap=12, recovery_fraction=1.0)
+    # Sequential edges are PROTECTED and, because the poses above are the
+    # exact composition of these same edges, satisfied to float64 precision
+    # - the real-usage property this fixture exists to exercise.
+    protected_sequential = tuple(
+        PoseEdge(e.i, e.j, e.transform, e.weight, True) for e in fixture.sequential_edges
+    )
+    axis: Point = (1.0, 2.0, 2.0)
+    rng = random.Random(5)
+    wrong_indices = (3, 20, 45, 70, 95)
+    closures = []
+    wrong_pairs = []
+    for idx, edge in enumerate(fixture.closure_edges):
+        if idx in wrong_indices:
+            wrong = rotation_about_axis(axis, math.radians(179.0))
+            closures.append(PoseEdge(edge.i, edge.j, wrong, 1.0))
+            wrong_pairs.append((edge.i, edge.j))
+        else:
+            noise = rotation_about_axis(axis, rng.uniform(math.radians(0.2), math.radians(3.0)))
+            closures.append(PoseEdge(edge.i, edge.j, noise.compose(edge.transform), 1.0))
+    return fixture, protected_sequential, tuple(closures), tuple(wrong_pairs)
+
+
+@functools.cache
+def _robust_headline_results():
+    fixture, protected_sequential, closures, _wrong_pairs = _robust_headline_fixture()
+    all_edges = protected_sequential + closures
+    nonrobust = optimise_poses(
+        list(fixture.chain),
+        list(all_edges),
+        anchor=0,
+        iterations=_ROBUST_ITERATIONS,
+        tolerance=_ROBUST_TOLERANCE,
+    )
+    robust = optimise_poses(
+        list(fixture.chain),
+        list(all_edges),
+        anchor=0,
+        iterations=_ROBUST_ITERATIONS,
+        tolerance=_ROBUST_TOLERANCE,
+        robust=True,
+        robust_passes=8,
+    )
+    return fixture, all_edges, nonrobust, robust
+
+
+def test_robust_recovers_close_to_clean_when_wrong_edges_are_added():
+    """THE HEADLINE robust test, on a REAL-usage-shaped fixture (see
+    ``_robust_headline_fixture``): sequential edges satisfied to float64
+    precision, exactly like a real caller's composed chain, not merely
+    protected while still carrying a residual of their own.
+
+    Non-robust fitting on this fixture must be measurably WRECKED by the 5
+    wrong edges; robust fitting must recover most of the way back. Both
+    are asserted explicitly - a test that checked only one half would not
+    prove the feature does anything.
+    """
+    fixture, _all_edges, nonrobust, robust = _robust_headline_results()
+    last = len(fixture.chain) - 1
+    nonrobust_error = _true_error(nonrobust.poses, fixture.true_poses, last)
+    robust_error = _true_error(robust.poses, fixture.true_poses, last)
+
+    message = (
+        f"non-robust {math.degrees(nonrobust_error):.2f} deg, "
+        f"robust {math.degrees(robust_error):.2f} deg"
+    )
+    # Sanity check on the fixture itself: the wrong edges must actually
+    # have hurt, or this proves nothing about recovering from them.
+    assert math.degrees(nonrobust_error) > 25.0, message
+    assert robust_error < nonrobust_error / 2.0, message
+    assert math.degrees(robust_error) < 20.0, message
+
+
+def test_robust_reports_exactly_the_wrong_edges_as_rejected():
+    _fixture, _protected_sequential, _closures, wrong_pairs = _robust_headline_fixture()
+    _fixture2, _all_edges, _nonrobust, robust = _robust_headline_results()
+    rejected_pairs = {(residual.i, residual.j) for residual in robust.rejected_edges}
+    assert rejected_pairs == set(wrong_pairs), (rejected_pairs, wrong_pairs)
+    assert robust.robust is True
+    assert robust.robust_passes_run >= 1
+
+
+def test_robust_headline_fixtures_sequential_edges_are_satisfied_by_construction():
+    """The property that makes this fixture "real usage" rather than a
+    restatement of the module's other headline test: every sequential
+    edge's residual, BEFORE any fitting at all, is at the float64 floor,
+    because the poses were built by composing exactly these edges - see
+    :func:`scanner3d.registration.register_turntable`'s ``_chain_poses``.
+    """
+    fixture, protected_sequential, _closures, _wrong_pairs = _robust_headline_fixture()
+    residuals = edge_residuals(fixture.chain, list(protected_sequential))
+    worst = max(r.rotation_error_radians for r in residuals)
+    assert worst < 1e-9, worst
+
+
+def test_robust_weights_scale_excludes_protected_edges_at_the_real_data_scale():
+    """THE test that matters, at the exact level the bug lives at: a direct
+    reproduction of ``_robust_weights`` on the user's real proportions, not
+    routed through a full multi-pass relaxation where residuals shift
+    between passes and can obscure the mechanism - see the fixture above's
+    own docstring on why even a carefully-built full fixture did not
+    reliably reproduce this on its own once relaxation had a few passes to
+    smooth things over.
+
+    69 protected edges at EXACTLY zero residual (the real sequential-edge
+    count, satisfied to float64 precision by construction) mixed with 17
+    closures: 14 honest ones in the real 0.53-8.15 degree range, and 3 at
+    the real measured 179.69, 179.63 and 179.42 degrees. The old formula -
+    scale from every edge, protected included - crushes the scale to the
+    1e-9 floor and rejects NOTHING, reproducing the real failure exactly.
+    The fixed formula must reject exactly the 3 wrong closures.
+    """
+    protected = [PoseEdge(0, 1, Rigid.identity(), 1.0, True) for _ in range(69)]
+    protected_residuals = [EdgeResidual(i, 0, 1, 0.0, 0.0) for i in range(69)]
+
+    honest_degrees = [0.53, 0.71, 0.88, 1.08, 1.42, 1.9, 2.3, 2.85, 3.25, 4.4, 5.1, 6.0, 7.2, 8.15]
+    wrong_degrees = [179.69, 179.63, 179.42]
+    closures = [
+        PoseEdge(2, 3, Rigid.identity(), 1.0, False) for _ in honest_degrees + wrong_degrees
+    ]
+    closure_residuals = [
+        EdgeResidual(69 + i, 2, 3, math.radians(deg), 0.0)
+        for i, deg in enumerate(honest_degrees + wrong_degrees)
+    ]
+
+    edges = protected + closures
+    residuals = protected_residuals + closure_residuals
+
+    # The bug, reproduced directly: computing the scale from every edge's
+    # residual (protected included) crushes it toward the 1e-9 floor and
+    # rejects nothing, on data shaped exactly like the real graph.
+    buggy_values = [r.combined for r in residuals]
+    buggy_median = statistics.median(buggy_values)
+    assert buggy_median < 1e-6, (
+        f"fixture sanity check failed: expected the all-edges median to be crushed near "
+        f"zero by the 69 protected zeros, got {buggy_median!r}"
+    )
+
+    _weights, rejected = _robust_weights(edges, residuals, threshold=3.0)
+    rejected_pairs = {(edges[i].i, edges[i].j) for i in rejected}
+    assert len(rejected) == len(wrong_degrees), (
+        f"expected exactly {len(wrong_degrees)} rejected, got {len(rejected)}: {rejected_pairs}"
+    )
+    # Every rejected edge must be one of the wrong closures (index 69+14 and
+    # up), never a protected edge (never eligible) or an honest closure.
+    assert all(index >= 69 + len(honest_degrees) for index in rejected), sorted(rejected)
+
+
+def test_optimise_poses_does_not_reject_anything_when_every_edge_agrees():
+    """A robust estimator that quietly discards good data is worse than none.
+
+    24 independent, individually noisy measurements of the SAME true
+    relative pose - exactly what several agreeing closures onto one
+    genuine revisit would look like. None of them is wrong; robust fitting
+    must keep every one and land on (very nearly) the same answer plain
+    relaxation does.
+    """
+    axis: Point = (0.3, 0.6, 0.58)
+    true_angle = math.radians(20.0)
+    rng = random.Random(0)
+    edges = [
+        PoseEdge(
+            0, 1, rotation_about_axis(axis, -true_angle + rng.gauss(0.0, math.radians(0.3))), 1.0
+        )
+        for _ in range(24)
+    ]
+    nodes = [Rigid.identity(), rotation_about_axis(axis, true_angle)]
+
+    nonrobust = optimise_poses(nodes, edges, anchor=0, iterations=200, tolerance=1e-12)
+    robust = optimise_poses(nodes, edges, anchor=0, iterations=200, tolerance=1e-12, robust=True)
+
+    assert robust.rejected_edges == ()
+    # "Very nearly" the same answer, not bit-identical: the Cauchy kernel
+    # is a smooth curve, not a hard pass/fail gate, so even a KEPT edge with
+    # nonzero residual is weighted fractionally differently than plain
+    # relaxation would weight it. What matters is that nothing was rejected
+    # and the two answers are close - degrees, not tens of degrees, apart.
+    difference = pose_difference(nonrobust.poses[1], robust.poses[1])
+    assert math.degrees(difference.rotation_angle) < 1.0
+    assert difference.translation_magnitude < 1e-6
+
+
+def test_robust_refuses_when_rejection_would_disconnect_a_node():
+    """A node reachable only through edges that all get rejected must not get a pose.
+
+    Six edges agree tightly on node 1's pose; node 2 is reached only by two
+    edges that flatly contradict each other (identity vs. 90 degrees) and
+    nothing else. Once both lose the argument with the consensus the first
+    six edges establish, node 2 has no surviving path to the anchor at all,
+    and this must refuse rather than return a pose for it anyway.
+    """
+    axis: Point = (0.3, 0.6, 0.58)
+    agreed = rotation_about_axis(axis, -math.radians(20.0))
+    edges = [PoseEdge(0, 1, agreed, 1.0) for _ in range(6)]
+    edges.append(PoseEdge(1, 2, Rigid.identity(), 1.0))
+    edges.append(PoseEdge(0, 2, rotation_about_axis(axis, -math.radians(90.0)), 1.0))
+    nodes = [Rigid.identity(), rotation_about_axis(axis, math.radians(20.0)), Rigid.identity()]
+
+    with pytest.raises(PoseGraphRobustDisconnected):
+        optimise_poses(nodes, edges, anchor=0, iterations=200, tolerance=1e-12, robust=True)
+
+
+def test_robust_rejection_is_deterministic():
+    """Same input, same rejections - no randomness anywhere in the robust pass."""
+    fixture = _loop_fixture(laps=4, per_lap=12, recovery_fraction=0.82)
+    per_lap = fixture.per_lap
+    protected_sequential = [
+        PoseEdge(e.i, e.j, e.transform, e.weight, True) for e in fixture.sequential_edges
+    ]
+    wrong_edges = [PoseEdge(k, k + per_lap // 2, Rigid.identity(), 1.0) for k in (0, 4, 8, 12, 16)]
+    edges = protected_sequential + list(fixture.closure_edges) + wrong_edges
+
+    first = optimise_poses(
+        list(fixture.chain), edges, anchor=0, iterations=150, tolerance=1e-8, robust=True
+    )
+    second = optimise_poses(
+        list(fixture.chain), edges, anchor=0, iterations=150, tolerance=1e-8, robust=True
+    )
+
+    assert [(r.i, r.j) for r in first.rejected_edges] == [(r.i, r.j) for r in second.rejected_edges]
+    for pose_a, pose_b in zip(first.poses, second.poses, strict=True):
+        assert pose_a == pose_b
+
+
+def test_robust_edges_below_the_minimum_are_never_rejected():
+    """Rejection must be earned by disagreement, never manufactured by having few edges.
+
+    Three wildly contradictory edges - fewer than MIN_ROBUST_EDGES - cannot
+    define a "majority" for anything to disagree with, so robust=True must
+    behave exactly like robust=False here.
+    """
+    axis: Point = (0.3, 0.6, 0.58)
+    nodes = [Rigid.identity(), Rigid.identity()]
+    edges = [
+        PoseEdge(0, 1, Rigid.identity(), 1.0),
+        PoseEdge(0, 1, rotation_about_axis(axis, math.radians(90.0)), 1.0),
+        PoseEdge(0, 1, rotation_about_axis(axis, math.radians(-90.0)), 1.0),
+    ]
+    assert len(edges) < MIN_ROBUST_EDGES
+
+    nonrobust = optimise_poses(nodes, edges, anchor=0, iterations=200, tolerance=1e-12)
+    robust = optimise_poses(nodes, edges, anchor=0, iterations=200, tolerance=1e-12, robust=True)
+    assert robust.rejected_edges == ()
+    assert robust.poses[1] == nonrobust.poses[1]
+    assert any("below" in note for note in robust.limitations)
+
+
+def test_robust_false_is_bit_identical_to_before_the_feature_existed():
+    """The default is robust=False, and it must change nothing about existing behaviour."""
+    fixture = _loop_fixture()
+    edges = list(fixture.sequential_edges) + list(fixture.closure_edges)
+    explicit_false = optimise_poses(
+        list(fixture.chain), edges, anchor=0, iterations=200, tolerance=1e-9, robust=False
+    )
+    default = optimise_poses(list(fixture.chain), edges, anchor=0, iterations=200, tolerance=1e-9)
+    assert explicit_false.poses == default.poses
+    assert explicit_false.error_history == default.error_history
+    assert default.robust is False
+    assert default.robust_passes_run == 0
+    assert default.rejected_edges == ()
+
+
+def test_the_honest_noise_scenario_still_rejects_nothing_after_the_scale_fix():
+    """Re-run of the many-honest-measurements-zero-outliers claim, because
+    changing which population the scale comes from could plausibly have
+    reintroduced the false-positive problem the folded-normal calibration
+    fixed. It has not: this is the identical scenario and assertion as
+    test_optimise_poses_does_not_reject_anything_when_every_edge_agrees,
+    kept here as its own named check specifically for the scale-population
+    change.
+    """
+    axis: Point = (0.3, 0.6, 0.58)
+    true_angle = math.radians(20.0)
+    rng = random.Random(0)
+    edges = [
+        PoseEdge(
+            0, 1, rotation_about_axis(axis, -true_angle + rng.gauss(0.0, math.radians(0.3))), 1.0
+        )
+        for _ in range(24)
+    ]
+    nodes = [Rigid.identity(), rotation_about_axis(axis, true_angle)]
+    robust = optimise_poses(nodes, edges, anchor=0, iterations=200, tolerance=1e-12, robust=True)
+    assert robust.rejected_edges == ()
+
+
+def test_robust_handles_every_edge_protected_without_dividing_by_an_empty_population():
+    """No edge is eligible for rejection at all - not merely few - and this
+    must be handled explicitly rather than computing a median of nothing.
+    """
+    axis: Point = (0.3, 0.6, 0.58)
+    nodes = [Rigid.identity(), Rigid.identity(), Rigid.identity()]
+    edges = [
+        PoseEdge(0, 1, rotation_about_axis(axis, math.radians(20.0)), 1.0, True),
+        PoseEdge(1, 2, rotation_about_axis(axis, math.radians(-20.0)), 1.0, True),
+        PoseEdge(0, 2, Rigid.identity(), 1.0, True),
+        PoseEdge(0, 2, rotation_about_axis(axis, math.radians(90.0)), 1.0, True),
+    ]
+    nonrobust = optimise_poses(nodes, edges, anchor=0, iterations=200, tolerance=1e-12)
+    robust = optimise_poses(nodes, edges, anchor=0, iterations=200, tolerance=1e-12, robust=True)
+    assert robust.rejected_edges == ()
+    assert robust.poses == nonrobust.poses
+    assert any("eligible" in note for note in robust.limitations)
+
+
+def test_robust_weights_itself_handles_zero_eligible_edges_without_crashing():
+    """The same claim, aimed directly at ``_robust_weights``: with
+    ``optimise_poses``, the OUTER ``attempt_robust`` guard already stops an
+    all-protected graph from ever reaching this function at all, so that
+    path alone would not prove ``_robust_weights`` handles an empty eligible
+    population itself - only that its caller happens not to trigger it. This
+    calls it directly with every edge protected, so ``eligible`` is
+    genuinely empty (not merely small), and confirms it returns the
+    unchanged weights and no rejections rather than raising on
+    ``statistics.median([])``.
+    """
+    edges = [PoseEdge(0, 1, Rigid.identity(), 1.0, True) for _ in range(5)]
+    residuals = [EdgeResidual(i, 0, 1, math.radians(50.0), 0.0) for i in range(5)]
+    weights, rejected = _robust_weights(edges, residuals, threshold=3.0)
+    assert weights == [edge.weight for edge in edges]
+    assert rejected == frozenset()
+
+
+# --- 9. robust guards -----------------------------------------------------------------
+
+
+def test_optimise_poses_refuses_bad_robust_parameters():
+    fixture = _loop_fixture()
+    edges = list(fixture.sequential_edges) + list(fixture.closure_edges)
+    with pytest.raises(PoseGraphNotAllowed):
+        optimise_poses(list(fixture.chain), edges, robust=True, robust_passes=0)
+    with pytest.raises(PoseGraphNotAllowed):
+        optimise_poses(list(fixture.chain), edges, robust=True, outlier_threshold=0.0)
+    with pytest.raises(PoseGraphNotAllowed):
+        optimise_poses(list(fixture.chain), edges, robust=True, outlier_threshold=-1.0)
+    with pytest.raises(PoseGraphNotAllowed):
+        optimise_poses(list(fixture.chain), edges, robust=True, outlier_threshold=math.inf)
+
+
+def test_pose_edge_protected_defaults_false_and_survives_as_dict():
+    plain = PoseEdge(0, 1, Rigid.identity(), 1.0)
+    assert plain.protected is False
+    protected = PoseEdge(0, 1, Rigid.identity(), 1.0, True)
+    assert protected.as_dict()["protected"] is True
+    assert plain.as_dict()["protected"] is False

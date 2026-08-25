@@ -40,20 +40,28 @@ from __future__ import annotations
 import functools
 import json
 import math
+import random
 
 import pytest
 
+from scanner3d.compute import _probe_scipy
 from scanner3d.geometry import IDENTITY_MATRIX, Point, Rigid, rotation_about_axis
 from scanner3d.posegraph import PoseEdge, optimise_poses
 from scanner3d.registration import cloud_extent, voxel_downsample
 from scanner3d.revisit import (
     RevisitNotAllowed,
+    _fit_quality,
     depth_signature_from_points,
     depth_signature_from_raw,
     detect_revisits,
     signature_distance,
 )
 from scanner3d.simulate import Box, points_of, render
+
+SCIPY_AVAILABLE, _SCIPY_REASON = _probe_scipy()
+needs_scipy = pytest.mark.skipif(
+    not SCIPY_AVAILABLE, reason=f"scipy not installed: {_SCIPY_REASON}"
+)
 
 # A deliberately oblique axis - see the module docstring on why an axis
 # aligned with the box's own symmetry (its local x, y or z) produces false
@@ -134,6 +142,237 @@ def _near_miss_clouds() -> tuple[tuple[Point, ...], ...]:
 @functools.cache
 def _near_miss_report():
     return detect_revisits(_near_miss_clouds(), min_index_gap=3, max_candidates=20)
+
+
+# --- the local-minimum bug: hand-built to reproduce the real measured pattern -----------
+#
+# Rendering two ~180-degree box views (as the fixtures above do) does not
+# reproduce the real bug: the box is close enough to genuinely rotationally
+# symmetric about this axis that identity-seeded ICP finds a real, complete
+# match (matched_fraction ~1.0) - not the deceptive PARTIAL match the real
+# capture showed (overlap 0.220-0.397, rmse BETTER than the genuine
+# revisits'). Reproducing that specific pattern needs precise control over
+# how much of each cloud coincidentally agrees under identity versus how
+# much only agrees at the TRUE separation - control a rendered scene does not
+# give directly. So this is built by hand: a "core" cluster present,
+# near-identically, in both clouds (what makes identity look plausible) plus
+# a "distinguishing" cluster unique to each, related by the TRUE ~179-degree
+# rotation (what identity gets wrong and an alternative seed can recover).
+#
+# Measured on this fixture (see the task report for the full numbers): the
+# identity fit lands at rmse~0.47, matched_fraction~0.37, comfortably inside
+# every existing threshold - and its raw rmse is BETTER than the best
+# alternative's (~0.55), reproducing the exact inversion that makes rmse
+# alone useless here. Coverage-adjusted (:func:`scanner3d.revisit._fit_quality`)
+# identity measures ~1.26 against the best alternative's ~0.55 - a ~2.3x gap,
+# comfortably past :data:`~scanner3d.revisit.DEFAULT_ALTERNATIVE_MARGIN`.
+
+_FALSE_REVISIT_CENTRE: Point = (0.0, 0.0, 50.0)
+_FALSE_REVISIT_AXIS: Point = (0.03, 0.02, 1.0)
+_FALSE_REVISIT_TRUE_ANGLE_DEG = 179.0
+_FALSE_REVISIT_CORE_N = 700
+_FALSE_REVISIT_DIST_N = 1200
+
+
+def _cluster(n: int, centre: Point, radius: float, *, seed: int) -> list[Point]:
+    rng = random.Random(seed)
+    return [
+        (
+            centre[0] + rng.uniform(-radius, radius),
+            centre[1] + rng.uniform(-radius, radius),
+            centre[2] + rng.uniform(-radius, radius),
+        )
+        for _ in range(n)
+    ]
+
+
+def _jitter_points(points: list[Point], amount: float, *, seed: int) -> list[Point]:
+    rng = random.Random(seed)
+    return [
+        (p[0] + rng.gauss(0, amount), p[1] + rng.gauss(0, amount), p[2] + rng.gauss(0, amount))
+        for p in points
+    ]
+
+
+@functools.cache
+def _false_revisit_clouds() -> tuple[tuple[Point, ...], tuple[Point, ...]]:
+    """Two hand-built clouds ~179 degrees apart that fool identity-seeded
+    verification alone - see the section comment above for the construction
+    and the measured numbers.
+    """
+    core = _cluster(_FALSE_REVISIT_CORE_N, _FALSE_REVISIT_CENTRE, 8.0, seed=1)
+    dist_a = _cluster(
+        _FALSE_REVISIT_DIST_N,
+        (_FALSE_REVISIT_CENTRE[0] + 25.0, _FALSE_REVISIT_CENTRE[1], _FALSE_REVISIT_CENTRE[2]),
+        10.0,
+        seed=2,
+    )
+    true_transform = rotation_about_axis(
+        _FALSE_REVISIT_AXIS,
+        math.radians(_FALSE_REVISIT_TRUE_ANGLE_DEG),
+        through=_FALSE_REVISIT_CENTRE,
+    )
+    dist_b = [true_transform.apply(p) for p in dist_a]
+    cloud_a = tuple(_jitter_points(core, 0.3, seed=3) + _jitter_points(dist_a, 0.3, seed=4))
+    cloud_b = tuple(_jitter_points(core, 0.3, seed=5) + _jitter_points(dist_b, 0.3, seed=6))
+    return cloud_a, cloud_b
+
+
+# --- 0. the local-minimum bug: current code accepts it, fixed code rejects it -----------
+
+
+def test_identity_seeded_verification_alone_accepts_a_false_180_degree_revisit():
+    """THE HEADLINE. Demonstrates the bug is real, not assumed: with the
+    local-minimum check disabled (``alternative_seeds=0``, this module's
+    pre-fix behaviour - still reachable through the parameter, not deleted -
+    identity-seeded verification ALONE wrongly accepts a pair whose true
+    separation is 179 degrees, exactly the pattern measured on the user's
+    real capture. Confirmed to fail before writing the fix; see the task
+    report for the standalone reproduction this test was built from.
+    """
+    a, b = _false_revisit_clouds()
+    report = detect_revisits([a, b], min_index_gap=1, max_candidates=1, alternative_seeds=0)
+    assert len(report.verified) == 1, "the false pair was not even accepted with the check off"
+    revisit = report.verified[0]
+    assert math.degrees(revisit.rotation_angle) < 12.0  # inside DEFAULT_MAX_ROTATION
+    assert revisit.correspondences > 400  # inside DEFAULT_MIN_CORRESPONDENCES
+
+
+def test_detect_revisits_rejects_the_false_180_degree_revisit_by_default():
+    """THE FIX. The exact same pair the test above shows current code
+    wrongly accepting is correctly rejected with the default (nonzero)
+    ``alternative_seeds`` - the only difference between the two tests.
+    """
+    a, b = _false_revisit_clouds()
+    report = detect_revisits([a, b], min_index_gap=1, max_candidates=1)
+    assert report.verified == (), "the false 180-degree pair still verified with the fix active"
+    assert len(report.rejected_as_local_minimum) == 1
+    rejected = report.rejected_as_local_minimum[0]
+    assert (rejected.i, rejected.j) == (0, 1)
+    assert math.degrees(rejected.alternative_rotation_angle) > 90.0
+    assert any("local minimum" in limitation for limitation in report.limitations)
+
+
+def test_alternative_margin_is_genuinely_read_not_a_fixed_threshold():
+    """``alternative_margin`` must actually change the verdict, not just be
+    accepted and ignored. Measured on this fixture, the false pair's
+    coverage-adjusted ratio is ~2.3x - comfortably past the DEFAULT margin
+    (1.5, see the two tests above) but NOT past a margin of 3.0. A caller
+    who explicitly asks for a more lenient margin must get the more lenient
+    answer.
+    """
+    a, b = _false_revisit_clouds()
+    lenient = detect_revisits([a, b], min_index_gap=1, max_candidates=1, alternative_margin=3.0)
+    assert len(lenient.verified) == 1, (
+        "a margin of 3.0 (above the measured ~2.3x ratio) should have been too lenient to "
+        "reject the false pair - alternative_margin does not appear to be read"
+    )
+    assert lenient.rejected_as_local_minimum == ()
+
+
+def test_fit_quality_prefers_higher_coverage_over_lower_raw_rmse():
+    """The crux of the fix, isolated: a fit with WORSE raw rmse but much
+    higher coverage must score BETTER (lower) than one with better raw rmse
+    but partial coverage - otherwise the comparison would be made on exactly
+    the quantity the bug hides behind (see the module docstring: the false
+    fit's raw rmse measured BETTER than the genuine revisits'). Built from
+    real :class:`~scanner3d.registration.IcpResult` objects on the
+    false-revisit fixture, not hand-constructed doubles, so this is a claim
+    about the real computation.
+    """
+    from scanner3d.multiview import coarse_align
+    from scanner3d.registration import icp
+
+    a, b = _false_revisit_clouds()
+    identity_fit = icp(a, b)
+    alignment = coarse_align(a, b)
+    alt_candidate = next(
+        c for c in alignment.candidates if math.degrees(c.transform.rotation_angle) > 90.0
+    )
+    alt_fit = icp(a, b, initial=alt_candidate.transform)
+
+    assert alt_fit.matched_fraction > identity_fit.matched_fraction
+    # Raw rmse comparison gets this backwards - identity's rmse looks better:
+    assert identity_fit.rmse < alt_fit.rmse
+    # Coverage-adjusted correctly reverses it - identity is the worse fit:
+    assert _fit_quality(identity_fit) > _fit_quality(alt_fit)
+
+
+@needs_scipy
+def test_backend_does_not_change_which_pairs_verify():
+    """Same verified set with and without an accelerated backend - checked
+    on BOTH the genuine loop (identity wins clearly) and the false-positive
+    pair (identity is correctly beaten), not just the easy case. Skips
+    cleanly, not failing, when scipy is unavailable.
+    """
+    python_loop = detect_revisits(
+        _loop_clouds(), min_index_gap=3, max_candidates=20, backend="python"
+    )
+    scipy_loop = detect_revisits(
+        _loop_clouds(), min_index_gap=3, max_candidates=20, backend="scipy"
+    )
+    assert {(r.i, r.j) for r in python_loop.verified} == {(r.i, r.j) for r in scipy_loop.verified}
+
+    a, b = _false_revisit_clouds()
+    python_false = detect_revisits([a, b], min_index_gap=1, max_candidates=1, backend="python")
+    scipy_false = detect_revisits([a, b], min_index_gap=1, max_candidates=1, backend="scipy")
+    assert python_false.verified == ()
+    assert scipy_false.verified == ()
+    assert len(python_false.rejected_as_local_minimum) == 1
+    assert len(scipy_false.rejected_as_local_minimum) == 1
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"alternative_seeds": -1},
+        {"alternative_margin": 1.0},
+        {"alternative_margin": 0.5},
+        {"alternative_margin": math.nan},
+    ],
+)
+def test_detect_revisits_refuses_new_parameters_outside_their_ranges(kwargs: dict[str, object]):
+    clouds = [[(0.0, 0.0, float(k + 1))] * 6 for k in range(8)]
+    with pytest.raises(RevisitNotAllowed):
+        detect_revisits(clouds, **kwargs)  # type: ignore[arg-type]
+
+
+def test_alternative_seeds_zero_matches_pre_fix_behaviour_on_the_genuine_loop():
+    """``alternative_seeds=0`` is not just "off" for the false-positive case -
+    it must not change anything for a genuine revisit either, since it is
+    documented as restoring this module's exact pre-fix code path.
+    """
+    report = detect_revisits(
+        _loop_clouds(), min_index_gap=3, max_candidates=20, alternative_seeds=0
+    )
+    assert len(report.verified) == 1
+    assert (report.verified[0].i, report.verified[0].j) == (0, 12)
+    assert report.rejected_as_local_minimum == ()
+
+
+def test_local_minimum_check_cost_is_informational_only(capsys: pytest.CaptureFixture[str]) -> None:
+    """Measures the added Stage 2 cost this check pays, on the existing loop
+    fixture - only for the one candidate that already passes the
+    identity-seeded thresholds, per the module docstring. Asserts nothing
+    about the specific numbers; they belong in the task report, not a
+    pass/fail here - a timing assertion in a test suite is flaky by nature.
+    """
+    import time
+
+    clouds = list(_loop_clouds())
+    start = time.perf_counter()
+    detect_revisits(clouds, min_index_gap=3, max_candidates=20, alternative_seeds=0)
+    without = time.perf_counter() - start
+
+    start = time.perf_counter()
+    detect_revisits(clouds, min_index_gap=3, max_candidates=20)
+    with_check = time.perf_counter() - start
+
+    print(
+        f"\nlocal-minimum check cost on the 13-frame loop fixture: "
+        f"without={without * 1000:.1f}ms with={with_check * 1000:.1f}ms "
+        f"(+{(with_check - without) * 1000:.1f}ms)"
+    )
 
 
 # --- 1. the core claim: finds the genuine revisit, at the right gap ---------------------

@@ -6,11 +6,12 @@ import argparse
 import errno
 import hashlib
 import json
+import math
 import struct
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any, TextIO, cast
+from typing import Any, Final, TextIO, cast
 
 from scanner3d import __version__, paired_capture
 from scanner3d.cloud_export import CloudExport, export_depth_frame
@@ -2146,6 +2147,194 @@ def _cmd_paired_rgb_series(args: argparse.Namespace) -> int:
     return outcome.exit_code
 
 
+SWEEP_COMMAND = "sweep"
+RECONSTRUCT_COMMAND = "reconstruct"
+
+#: Metres per depth code, as the factory record decodes it. Validated against a
+#: caliper: a 58.0 mm can measured 57.705 mm, an error of -0.51%. The unit is
+#: millimetres; the ACCURACY across the working range is not established, and
+#: ranges from -0.49% to -2.26% with no correction model.
+DEPTH_SCALE_METRES: Final = 0.004999999888241291
+
+
+def _cmd_sweep(args: argparse.Namespace) -> int:
+    """Stream frames to disk, writing each as it arrives rather than buffering."""
+    from scanner3d.v4l2_stream import stream_frames
+
+    args.output.mkdir(parents=True, exist_ok=True)
+    written = 0
+
+    def on_frame(buf: bytes, _record: object) -> None:
+        nonlocal written
+        (args.output / f"frame_{written:04d}.raw").write_bytes(buf)
+        written += 1
+        if written % 25 == 0 and not args.json:
+            print(f"  {written} frames kept", file=sys.stderr, flush=True)
+
+    kwargs: dict[str, object] = {
+        "frames": args.frames,
+        "decimate": args.decimate,
+        "duration_s": args.duration,
+        "on_frame": on_frame,
+    }
+    if args.serial:
+        kwargs["serial"] = args.serial
+    try:
+        result = stream_frames(**kwargs)  # type: ignore[arg-type]
+    except ScannerError as exc:
+        print(f"capture refused: {exc}", file=sys.stderr)
+        return EXIT_CODES[getattr(exc, "status", DoctorStatus.INTERNAL_ERROR)]
+    except OSError as exc:
+        print(f"capture failed: {exc}", file=sys.stderr)
+        return EXIT_CODES[DoctorStatus.INTERNAL_ERROR]
+
+    payload: dict[str, object] = {
+        "command": {"name": SWEEP_COMMAND, "output": str(args.output)},
+        "kept": written,
+        "delivered": result.delivered,
+        "dropped_by_sequence": result.dropped_by_sequence,
+        "short_frames": result.short_frames,
+        "first_frame_ms": result.first_frame_ms,
+        "stopped_early": result.stopped_early,
+        "stop_reason": result.stop_reason,
+    }
+    if not args.json:
+        print(f"kept {written} of {result.delivered} delivered frames to {args.output}")
+        print(f"  dropped_by_sequence {result.dropped_by_sequence}  short {result.short_frames}")
+        print(f"  stopped_early {result.stopped_early}: {result.stop_reason}")
+        if result.dropped_by_sequence:
+            print(
+                "  NOTE: dropped frames leave gaps in the sweep. Registration tolerates "
+                "some, but a path with many gaps may not revisit its own viewpoints.",
+            )
+    _emit(payload, args)
+    return 0
+
+
+def _cmd_reconstruct(args: argparse.Namespace) -> int:
+    """Register a captured sweep offline and report what the evidence says."""
+    from scanner3d.depth_metric import DepthUnitAssumption, deproject_depth_frame
+    from scanner3d.pipeline import reconstruct_sweep
+    from scanner3d.simulate import FACTORY_INTRINSICS
+
+    paths = sorted(args.frames.glob("frame_*.raw"))[:: max(1, args.stride)]
+    if len(paths) < 3:
+        print(
+            f"{args.frames} holds {len(paths)} usable frames at stride {args.stride}; "
+            "a sweep needs at least three",
+            file=sys.stderr,
+        )
+        return EXIT_CODES[DoctorStatus.INTERNAL_ERROR]
+
+    unit = DepthUnitAssumption(
+        label="mm",
+        stated_by="caliper measurement recorded in docs/metric-validation.md",
+        basis="a 58.0 mm can measured 57.705 mm at about 122.7 mm standoff",
+    )
+    clouds: list[tuple[tuple[float, float, float], ...]] = []
+    for path in paths:
+        conversion = deproject_depth_frame(
+            path.read_bytes(),
+            intrinsics=FACTORY_INTRINSICS,
+            depth_scale=DEPTH_SCALE_METRES,
+            unit=unit,
+        )
+        points = [(p.x, p.y, p.z) for p in conversion.points if 60.0 < p.z < 300.0]
+        step = max(1, len(points) // 2200)
+        clouds.append(tuple(points[::step]))
+
+    if not args.json:
+        print(f"{len(clouds)} frames, about {len(clouds[0])} points each", flush=True)
+
+    def progress(message: str) -> None:
+        if not args.json:
+            print(message, file=sys.stderr, flush=True)
+
+    try:
+        result = reconstruct_sweep(
+            clouds,
+            backend=args.backend,
+            workers=args.workers,
+            point_to_plane=not args.point_to_point,
+            robust=not args.no_robust,
+            on_progress=progress,
+        )
+    except ScannerError as exc:
+        print(f"reconstruction refused: {exc}", file=sys.stderr)
+        return EXIT_CODES[getattr(exc, "status", DoctorStatus.INTERNAL_ERROR)]
+
+    if args.poses_out is not None:
+        args.poses_out.write_text(
+            json.dumps([pose.as_dict() for pose in result.poses], indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    payload: dict[str, object] = {
+        **result.as_dict(),
+        "command": {
+            "name": RECONSTRUCT_COMMAND,
+            "frames_directory": str(args.frames),
+            "stride": args.stride,
+            "backend": args.backend,
+            "workers": args.workers,
+            "offline": (
+                "this command resolved no scanner and opened no device node; every "
+                "input came from files on disk"
+            ),
+            "dimensional_accuracy_claimed": False,
+        },
+    }
+    if not args.json:
+        _render_reconstruction(result, sys.stdout)
+    _emit(payload, args)
+    return 0
+
+
+def _render_reconstruction(result: object, stream: TextIO) -> None:
+    """Print the scores, leading with the one that cannot be gamed."""
+    chained = getattr(result, "chained_score", None)
+    optimised = getattr(result, "optimised_score", None)
+    print(f"\nframes {getattr(result, 'frames', '?')}", file=stream)
+    print(f"revisited viewpoints found: {getattr(result, 'revisits_found', 0)}", file=stream)
+
+    if optimised is None or chained is None:
+        print("\nNOT SCORED, and not corrected.", file=stream)
+        print(
+            "Too few revisited viewpoints to withhold any. Without a viewpoint the "
+            "scanner returned to, there is nothing a drifting trajectory can be "
+            "caught against, so no number here would mean anything.",
+            file=stream,
+        )
+    else:
+        print("\nHELD-OUT CLOSURE ERROR (measured against constraints never fitted):", file=stream)
+        print(
+            f"  before optimisation  median {math.degrees(chained.median_error_radians):7.3f} deg"
+            f"   worst {math.degrees(chained.worst_error_radians):7.3f}",
+            file=stream,
+        )
+        print(
+            f"  after  optimisation  median {math.degrees(optimised.median_error_radians):7.3f} deg"
+            f"   worst {math.degrees(optimised.worst_error_radians):7.3f}",
+            file=stream,
+        )
+        print(
+            f"  {optimised.used_for_fitting} constraints used for fitting, "
+            f"{optimised.held_out} withheld and used only to score",
+            file=stream,
+        )
+        factor = getattr(result, "improvement_factor", None)
+        if factor is not None and factor < 1.0:
+            print(
+                f"\n  WARNING: optimisation made this WORSE ({1.0 / factor:.1f}x). That usually "
+                "means a false revisit - two views a failed alignment claimed were the "
+                "same. Re-run with --no-robust to compare, and inspect the sweep.",
+                file=stream,
+            )
+
+    for limitation in getattr(result, "limitations", ()):
+        print(f"\n  - {limitation}", file=stream)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="scanner3d",
@@ -2840,6 +3029,79 @@ def build_parser() -> argparse.ArgumentParser:
     to_ply.add_argument("--json", action="store_true", help="emit JSON instead of text")
     to_ply.add_argument("--json-out", type=Path, help="also write the JSON result to this path")
     to_ply.set_defaults(func=_cmd_depth_frame_to_ply)
+
+    sweep = sub.add_parser(
+        SWEEP_COMMAND,
+        help="capture a continuous sweep of depth frames to a directory "
+        "(opt-in; STARTS a stream on the scanner)",
+        description=(
+            "Stream depth frames while the object or the scanner moves. Continuous "
+            "capture is what makes registration work: measured on this hardware, "
+            "large angular steps make alignment fail silently, while a streamed "
+            "sweep at about 2 degrees per frame does not. Come back around to "
+            "where you started - a path that revisits its own viewpoints is the "
+            "only thing that lets drift be detected and corrected afterwards."
+        ),
+    )
+    sweep.add_argument("output", type=Path, help="directory to write raw frames into")
+    sweep.add_argument(
+        "--frames", type=int, default=1250, help="frames to DELIVER before stopping (default 1250)"
+    )
+    sweep.add_argument(
+        "--decimate",
+        type=int,
+        default=3,
+        help="keep one frame in N (default 3, giving about 2 degrees per kept frame "
+        "on a turntable running one revolution in two minutes)",
+    )
+    sweep.add_argument("--serial", help="scanner serial to target")
+    sweep.add_argument(
+        "--duration", type=float, default=400.0, help="hard stop after this many seconds"
+    )
+    sweep.add_argument("--json", action="store_true", help="emit JSON instead of text")
+    sweep.add_argument("--json-out", type=Path, help="also write the JSON result to this path")
+    sweep.set_defaults(func=_cmd_sweep)
+
+    recon = sub.add_parser(
+        RECONSTRUCT_COMMAND,
+        help="register a captured sweep and report held-out closure error (offline)",
+        description=(
+            "Register a directory of captured frames and score the result against "
+            "evidence the optimiser was never given. Half the revisited viewpoints "
+            "are withheld and used only to measure the answer, because a pipeline "
+            "scored on constraints it was fitted to will report success on a scan "
+            "that is badly wrong - measured on real data, a trajectory 65 degrees "
+            "out reported healthy alignment rmse, full frame overlap and good "
+            "self-consistency. This command resolves no scanner and opens no "
+            "device node."
+        ),
+    )
+    recon.add_argument("frames", type=Path, help="directory of raw depth frames")
+    recon.add_argument("--stride", type=int, default=1, help="use one frame in N (default 1)")
+    recon.add_argument(
+        "--backend",
+        default="auto",
+        help="compute backend: auto, python, numpy or scipy (default auto)",
+    )
+    recon.add_argument(
+        "--workers", type=int, default=1, help="processes for pairwise alignment (default 1)"
+    )
+    recon.add_argument(
+        "--point-to-point",
+        action="store_true",
+        help="use point-to-point matching instead of point-to-plane. Measured on a "
+        "real capture, point-to-point drifted 14.4 degrees per lap where "
+        "point-to-plane drifted 2.6",
+    )
+    recon.add_argument(
+        "--no-robust",
+        action="store_true",
+        help="do not reject closure constraints that disagree with the consensus",
+    )
+    recon.add_argument("--poses-out", type=Path, help="write the registered poses here as JSON")
+    recon.add_argument("--json", action="store_true", help="emit JSON instead of text")
+    recon.add_argument("--json-out", type=Path, help="also write the JSON result to this path")
+    recon.set_defaults(func=_cmd_reconstruct)
 
     return parser
 

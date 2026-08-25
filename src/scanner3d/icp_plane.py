@@ -88,6 +88,24 @@ point-to-point measures. The two numbers are not directly comparable, and
 comparing this module against point-to-point honestly means comparing
 RECOVERED POSE ERROR against known truth, not comparing the two RMSEs
 against each other.
+
+Selectable compute backend
+----------------------------
+:func:`icp_point_to_plane` and :func:`estimate_normals` take an optional
+``backend`` - see :mod:`scanner3d.compute` for the full protocol and the
+measured reason a KD-tree backend can be substantially faster. It routes
+exactly the two costs :mod:`scanner3d.compute`'s own profiling identified as
+this module's dominant ones - the correspondence search
+(:func:`_correspond_via_backend`) and the k-nearest-neighbour search inside
+:func:`estimate_normals` - through the selected backend. It changes NOTHING
+else: the 6x6 linearised solve (:func:`_solve_point_to_plane`), the gate
+arithmetic, the trim, and the convergence test are the identical code,
+unconditionally, regardless of ``backend``. The default, ``"python"``, does
+not merely produce equivalent output to the code that existed before this
+parameter did - it IS that code, unmodified, on the unmodified
+:class:`_NearestIndex` path; the backend-driven path is only ever reached by
+an explicit request for a live :class:`~scanner3d.compute.ComputeBackend` or
+a non-``"python"`` backend name, never by a caller who did not ask for it.
 """
 
 from __future__ import annotations
@@ -95,10 +113,12 @@ from __future__ import annotations
 import heapq
 import itertools
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Final
 
+from scanner3d.compute import PYTHON_BACKEND, ComputeBackend
+from scanner3d.compute import select_backend as _select_compute_backend
 from scanner3d.errors import DoctorStatus, ScannerError
 from scanner3d.geometry import (
     IDENTITY_MATRIX,
@@ -263,6 +283,41 @@ def _ensure_parameters(
             raise IcpPlaneParametersUnusable(f"{name} {value!r} must be a finite positive size")
 
 
+# --- compute backend resolution --------------------------------------------------
+
+
+def _resolve_backend(backend: str | ComputeBackend) -> tuple[str, ComputeBackend | None]:
+    """``(resolved name, live backend or None)``. ``None`` means "run the
+    original, unaccelerated code path exactly as written before ``backend``
+    existed as a parameter" - see the module docstring's "Selectable compute
+    backend" section.
+
+    ``None`` is returned for the string ``"python"`` (the default) and for
+    ``"auto"`` when it resolves to python, so "python" means the SAME thing
+    - the untouched reference implementation - regardless of how it was
+    reached, rather than a second, merely-equivalent code path through
+    :mod:`scanner3d.compute`. A caller who hands a live
+    :class:`~scanner3d.compute.ComputeBackend` INSTANCE is opting into the
+    backend-driven path deliberately, even if that instance's own name is
+    ``"python"``; only the bare string is treated as "use the legacy path".
+
+    Any other string is resolved through :func:`scanner3d.compute.select_backend`,
+    so an unknown name or an explicitly unavailable backend raises exactly
+    the exception that function raises - no wrapping, since
+    :class:`~scanner3d.compute.ComputeBackendUnknown` and
+    :class:`~scanner3d.compute.ComputeBackendUnavailable` are already
+    ``ScannerError`` subclasses with their own :class:`~scanner3d.errors.DoctorStatus`.
+    """
+    if isinstance(backend, str):
+        if backend == PYTHON_BACKEND:
+            return PYTHON_BACKEND, None
+        selection = _select_compute_backend(backend)
+        if selection.resolved == PYTHON_BACKEND:
+            return PYTHON_BACKEND, None
+        return selection.resolved, selection.backend
+    return backend.name, backend
+
+
 # --- a small, general symmetric eigensolver ---------------------------------------
 
 
@@ -366,22 +421,30 @@ def _covariance(points: Sequence[Point], centre: Point) -> list[list[float]]:
 
 
 def estimate_normals(
-    points: Sequence[Point], *, neighbours: int = DEFAULT_NORMAL_NEIGHBOURS
+    points: Sequence[Point],
+    *,
+    neighbours: int = DEFAULT_NORMAL_NEIGHBOURS,
+    backend: str | ComputeBackend = PYTHON_BACKEND,
 ) -> NormalField:
     """One unoriented surface normal per point, from a local PCA neighbourhood.
 
-    For each point, the ``neighbours`` nearest OTHER points (by plain
-    Euclidean distance, found by brute-force scan - see the note below on why
-    that is the right tradeoff here) are gathered together with the point
-    itself, and the eigenvector of the SMALLEST eigenvalue of their centred
-    covariance is returned as the normal: the direction the local patch
-    varies LEAST along, which is "off the surface" for anything that
-    resembles one. :data:`NORMAL_ISOTROPY_RATIO` guards the case where no
-    direction is clearly least - an isotropic neighbourhood carries no
-    surface information at all - and a point with fewer than
+    For each point, the ``neighbours`` nearest OTHER points are gathered
+    together with the point itself, and the eigenvector of the SMALLEST
+    eigenvalue of their centred covariance is returned as the normal: the
+    direction the local patch varies LEAST along, which is "off the surface"
+    for anything that resembles one. :data:`NORMAL_ISOTROPY_RATIO` guards the
+    case where no direction is clearly least - an isotropic neighbourhood
+    carries no surface information at all - and a point with fewer than
     :data:`MIN_NORMAL_NEIGHBOURS` neighbours in the whole cloud is refused
     for the same reason a covariance of three points is refused: not enough
     to distinguish a surface from noise.
+
+    By default (``backend="python"``) the ``neighbours`` nearest OTHER points
+    are found by plain Euclidean distance, by brute-force scan - see the note
+    below on why that is the right tradeoff here. ``backend`` selects a
+    different neighbour search - see :mod:`scanner3d.compute` and the module
+    docstring's "Selectable compute backend" section; nothing else about how
+    a normal is fitted from a neighbourhood changes.
 
     Brute-force neighbour search is quadratic in the cloud size, and that is
     a deliberate, stated tradeoff rather than an oversight: this is called
@@ -401,22 +464,36 @@ def estimate_normals(
             "needs before it fits noise as readily as a real surface"
         )
     n = len(points)
+    _, compute_backend = _resolve_backend(backend)
     estimates: list[NormalEstimate] = []
     sparse = coincident = isotropic = 0
     k_request = min(neighbours, n - 1)
+    # Found once, up front, when a backend is selected - not per point, since
+    # every point asks for the same neighbour COUNT (though not the same
+    # neighbours). The legacy path below is untouched and still searches
+    # per point, exactly as before this parameter existed.
+    precomputed_neighbours: list[tuple[int, ...]] | None = None
+    if compute_backend is not None and k_request >= MIN_NORMAL_NEIGHBOURS:
+        precomputed_neighbours = compute_backend.k_nearest_neighbors(points, neighbours)
     for i, p in enumerate(points):
         if k_request < MIN_NORMAL_NEIGHBOURS:
             estimates.append(NormalEstimate(p, None, max(k_request, 0)))
             sparse += 1
             continue
 
-        def _squared_distance_from_p(j: int, p: Point = p) -> float:
-            return (
-                (points[j][0] - p[0]) ** 2 + (points[j][1] - p[1]) ** 2 + (points[j][2] - p[2]) ** 2
-            )
+        if precomputed_neighbours is not None:
+            neighbour_idx = list(precomputed_neighbours[i])
+        else:
 
-        nearest_idx = heapq.nsmallest(k_request + 1, range(n), key=_squared_distance_from_p)
-        neighbour_idx = [j for j in nearest_idx if j != i][:k_request]
+            def _squared_distance_from_p(j: int, p: Point = p) -> float:
+                return (
+                    (points[j][0] - p[0]) ** 2
+                    + (points[j][1] - p[1]) ** 2
+                    + (points[j][2] - p[2]) ** 2
+                )
+
+            nearest_idx = heapq.nsmallest(k_request + 1, range(n), key=_squared_distance_from_p)
+            neighbour_idx = [j for j in nearest_idx if j != i][:k_request]
         patch = [p, *(points[j] for j in neighbour_idx)]
         centre = (
             math.fsum(q[0] for q in patch) / len(patch),
@@ -675,29 +752,87 @@ def _correspond(
     return pairs, rejected
 
 
+#: What :func:`_correspond` and :func:`_correspond_via_backend` both are:
+#: given the current source cloud and transform estimate, the matched
+#: ``(distance, original_source_point, target_point, target_normal)`` triples
+#: and the reject count. :func:`_iterate` calls one of the two through this
+#: shape without knowing or caring which - see :func:`icp_point_to_plane`.
+_Correspond = Callable[
+    [Sequence[Point], Rigid], tuple[list[tuple[float, Point, Point, Point]], int]
+]
+
+
+def _correspond_via_backend(
+    source: Sequence[Point],
+    transform: Rigid,
+    backend: ComputeBackend,
+    target_points: Sequence[Point],
+    normal_by_point: dict[Point, Point],
+    *,
+    gate: float,
+) -> tuple[list[tuple[float, Point, Point, Point]], int]:
+    """The backend-driven equivalent of :func:`_correspond`: same inputs,
+    same outputs, same gate semantics -
+    :meth:`~scanner3d.compute.ComputeBackend.nearest_neighbors` uses the
+    identical strict "closer than the gate" rule as
+    :meth:`_NearestIndex.nearest`, verified in :mod:`scanner3d.compute`'s own
+    test suite.
+
+    A :class:`~scanner3d.compute.ComputeBackend` only knows about plain point
+    clouds, not points-with-normals, so the normal is recovered by a point-
+    VALUE lookup after the nearest-neighbour search rather than riding along
+    with it the way :class:`_NearestIndex` carries it. This is safe even
+    though two target points could, in principle, share identical
+    coordinates: identical coordinates imply an identical local neighbourhood
+    in :func:`estimate_normals`, and therefore an identical normal - so which
+    of two coincident points the search happens to return cannot change the
+    answer.
+    """
+    pairs: list[tuple[float, Point, Point, Point]] = []
+    rejected = 0
+    moved = backend.apply_transform(transform, source)
+    hits = backend.nearest_neighbors(moved, target_points, gate=gate)
+    for original, hit in zip(source, hits, strict=True):
+        if hit is None:
+            rejected += 1
+            continue
+        distance, target_point = hit
+        pairs.append((distance, original, target_point, normal_by_point[target_point]))
+    return pairs, rejected
+
+
 def _iterate(
     source: Sequence[Point],
-    index: _NearestIndex,
+    correspond: _Correspond,
     *,
     initial: Rigid,
     max_iterations: int,
     threshold: float,
     keep_fraction: float,
+    gate: float,
 ) -> _FitPlane:
     """Match, trim, solve, repeat - the same shape as
     :func:`scanner3d.registration._iterate`, with a point-to-plane solve in
     place of the closed-form Horn fit and a point-to-plane RMSE for the
     convergence check.
+
+    ``correspond`` is either :func:`_correspond` (bound to a
+    :class:`_NearestIndex`) or :func:`_correspond_via_backend` (bound to a
+    :class:`~scanner3d.compute.ComputeBackend`) - chosen once by
+    :func:`icp_point_to_plane`, before this function ever runs. Nothing
+    below this line changed to add that seam: the trim, the solve, and the
+    convergence test are the same code that ran before ``backend`` existed
+    as a parameter.
     """
     transform = initial
     rmse = math.inf
     previous: float | None = None
     correspondences = trimmed = rejected = 0
-    trim_distance = index.gate
+    trim_distance = gate
     converged = False
     iterations = 0
     for iterations in range(1, max_iterations + 1):
-        pairs, rejected = _correspond(source, transform, index)
+        pairs, rejected = correspond(source, transform)
         if len(pairs) < 6:
             raise IcpPlaneCorrespondencesInsufficient(
                 f"only {len(pairs)} of {len(pairs) + rejected} source points found a "
@@ -744,6 +879,14 @@ class IcpPlaneResult:
     on the same data. :attr:`target_points_with_normal` is new: point-to-plane
     can only match against target points a usable normal was found for, and
     this says how many of :attr:`target_points` that was.
+
+    :attr:`resolved_backend` names which :mod:`scanner3d.compute` backend
+    actually ran the correspondence search and the normal estimation -
+    ``"python"``, ``"numpy"`` or ``"scipy"`` - never the bare request
+    (``"auto"``), for the same reason
+    :attr:`scanner3d.compute.BackendSelection.resolved` never is: a result
+    that only reports what was ASKED for, not what RAN, cannot be used to
+    interpret its own timing.
     """
 
     transform: Rigid
@@ -762,6 +905,7 @@ class IcpPlaneResult:
     trim_distance: float
     convergence_threshold: float
     normal_neighbours: int
+    resolved_backend: str
 
     @property
     def offered(self) -> int:
@@ -797,6 +941,7 @@ class IcpPlaneResult:
             "trim_distance": self.trim_distance,
             "convergence_threshold": self.convergence_threshold,
             "normal_neighbours": self.normal_neighbours,
+            "resolved_backend": self.resolved_backend,
         }
 
 
@@ -811,6 +956,7 @@ def icp_point_to_plane(
     max_correspondence_distance: float | None = None,
     keep_fraction: float = DEFAULT_KEEP_FRACTION,
     normal_neighbours: int = DEFAULT_NORMAL_NEIGHBOURS,
+    backend: str | ComputeBackend = PYTHON_BACKEND,
 ) -> IcpPlaneResult:
     """Point-to-plane ICP: the transform carrying ``source`` onto ``target``.
 
@@ -828,6 +974,13 @@ def icp_point_to_plane(
     is identical in mechanism to point-to-point; only the SOLVE step, per
     iteration, differs. See the module docstring for what that step does not
     do and when it refuses rather than guesses.
+
+    ``backend`` selects what runs the correspondence search and the normal
+    estimation's neighbour search - see :mod:`scanner3d.compute` and the
+    module docstring's "Selectable compute backend" section. The default,
+    ``"python"``, is the unmodified code path this function has always run;
+    :attr:`IcpPlaneResult.resolved_backend` names what actually ran, which
+    matters most for ``"auto"``.
     """
     source_points = _ensure_cloud(source, what="ICP source")
     target_points = _ensure_cloud(target, what="ICP target")
@@ -865,22 +1018,53 @@ def icp_point_to_plane(
             f"than the {MIN_CLOUD_POINTS} a rigid transform needs"
         )
 
-    normals = estimate_normals(sampled_target, neighbours=normal_neighbours)
+    # Resolved ONCE, and the same resolved object (or its absence) is used
+    # for both the normal search below and the correspondence search in the
+    # loop, so the two never disagree about which backend is running - see
+    # the module docstring's "Selectable compute backend" section.
+    resolved_backend_name, compute_backend = _resolve_backend(backend)
+    normals = estimate_normals(
+        sampled_target,
+        neighbours=normal_neighbours,
+        backend=compute_backend if compute_backend is not None else PYTHON_BACKEND,
+    )
     usable = normals.usable
     if len(usable) < 6:
         raise IcpPlaneCorrespondencesInsufficient(
             f"only {len(usable)} of {len(sampled_target)} target points carry a usable "
             "surface normal - too few for a 6-DOF point-to-plane solve regardless of overlap"
         )
-    index = _NearestIndex([(e.point, e.normal) for e in usable if e.normal is not None], gate=gate)
+
+    correspond: _Correspond
+    if compute_backend is None:
+        index = _NearestIndex(
+            [(e.point, e.normal) for e in usable if e.normal is not None], gate=gate
+        )
+
+        def correspond(
+            src: Sequence[Point], tr: Rigid
+        ) -> tuple[list[tuple[float, Point, Point, Point]], int]:
+            return _correspond(src, tr, index)
+    else:
+        usable_points = [e.point for e in usable if e.normal is not None]
+        normal_by_point = {e.point: e.normal for e in usable if e.normal is not None}
+        backend_object = compute_backend
+
+        def correspond(
+            src: Sequence[Point], tr: Rigid
+        ) -> tuple[list[tuple[float, Point, Point, Point]], int]:
+            return _correspond_via_backend(
+                src, tr, backend_object, usable_points, normal_by_point, gate=gate
+            )
 
     fit = _iterate(
         sampled_source,
-        index,
+        correspond,
         initial=initial,
         max_iterations=max_iterations,
         threshold=tolerance * extent,
         keep_fraction=keep_fraction,
+        gate=gate,
     )
     return IcpPlaneResult(
         transform=fit.transform,
@@ -899,4 +1083,5 @@ def icp_point_to_plane(
         trim_distance=fit.trim_distance,
         convergence_threshold=tolerance * extent,
         normal_neighbours=normal_neighbours,
+        resolved_backend=resolved_backend_name,
     )

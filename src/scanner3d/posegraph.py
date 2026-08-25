@@ -107,11 +107,67 @@ rotation angle in radians with a translation in whatever unit the caller's
 transforms use - a single scalar exists only so edges and iterations can be
 RANKED against each other within one run, and is not a claim that the two
 halves are commensurate.
+
+Robust mode: a minority of wrong edges can still capture the fit
+--------------------------------------------------------------------
+The chordal least-squares fit above trusts every edge according to its
+weight, with no notion that an edge might simply be wrong. On a real 70-frame
+sweep this let 5 of 34 detected "revisits" - each one a genuine failure of
+ICP, seeded from the identity, converging to a near-identity transform
+between two clouds that were actually a HALF revolution apart rather than a
+whole one - drag a good trajectory to 11x worse than doing nothing. Every
+LOCAL statistic on those five (rmse, overlap, correspondence count) sat
+inside the range the true revisits also occupied; nothing about a false edge
+in isolation marks it as false. What marks it is that it disagrees with the
+consensus the OTHER edges agree on, and that is only visible globally, which
+is exactly this module's job and not :mod:`scanner3d.revisit`'s.
+
+``robust=True`` runs Iteratively Reweighted Least Squares with a Cauchy
+kernel on top of the same relaxation: fit, measure every edge's residual
+against the fit, treat the median-scaled residual distribution as the
+population an edge should agree with, down-weight (and, past
+:data:`DEFAULT_OUTLIER_THRESHOLD` robust sigmas, effectively drop) any edge
+that does not, and repeat until the rejected set stops changing. See
+:func:`_robust_weights`.
+
+This is OPT-IN, never silent: the default is ``robust=False``, bit-identical
+to the relaxation described above, and even when enabled the result always
+names precisely which edges were downweighted past rejection and why - see
+:attr:`PoseGraphResult.rejected_edges`. Discarding a constraint the caller
+supplied without saying so is the same category of fault as a silent
+backend downgrade, and this module does not do it by default and does not
+hide it when asked to.
+
+Rejection is earned by disagreement with the fitted solution, not by being
+outnumbered: the Cauchy scale comes from the median of the ELIGIBLE (not
+:attr:`PoseEdge.protected`) edges' residuals only, a statistic that stays
+small exactly as long as a MAJORITY of THOSE agree, regardless of whether
+that majority is 3 edges or 300 - see :data:`MIN_ROBUST_EDGES` for the one
+honest exception, where there are too few eligible edges for "majority" to
+mean anything at all. Protected edges are excluded from the scale itself,
+not merely exempted from rejection: a caller typically protects sequential
+edges that were themselves composed to build the poses being fit, so those
+edges are satisfied to float64 precision BY CONSTRUCTION, and folding a
+population that cannot be rejected into the statistic that decides what
+"typical disagreement" looks like among the population that CAN is a
+category error - one that, measured on real data, silently crushed the
+scale toward zero and rejected nothing at all. See :func:`_robust_weights`
+for the full account, including the real numbers that exposed it. A caller
+sets :attr:`PoseEdge.protected` for whatever reason it trusts an edge on
+grounds this module cannot see; this module still does not know or care
+whether that edge came from chaining or a revisit detector, only that the
+caller marked it exempt.
+
+If rejecting the settled set of edges would disconnect a node that the FULL
+edge set could reach from ``anchor``, :func:`optimise_poses` refuses with
+:exc:`PoseGraphRobustDisconnected` rather than returning a pose for a node
+nothing constrains any more.
 """
 
 from __future__ import annotations
 
 import math
+import statistics
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Final
@@ -136,11 +192,44 @@ MIN_EIGENVALUE_RATIO: Final = 1e-9
 #: same reason.
 _JACOBI_SWEEPS: Final = 64
 
+#: Outer IRLS passes ``robust=True`` runs, at most. Each pass is a full
+#: relaxation to convergence followed by one reweighting; the loop exits
+#: early, well before this ceiling, once the rejected set stops changing
+#: between passes - see :func:`optimise_poses`. On this module's own
+#: headline robust fixture, recovering cleanly from a handful of edges
+#: wrong by half a revolution took 6 passes to stabilise; 8 leaves margin
+#: without being an invitation to iterate forever on a graph that will not
+#: settle.
+DEFAULT_ROBUST_PASSES: Final = 8
+
+#: Robust-sigma cutoff (Cauchy kernel) past which an edge's residual is
+#: treated as disagreeing with the consensus. 3 sigma is the conventional
+#: bar for "clearly not part of this distribution" on a roughly Gaussian
+#: population of residuals; the false edges this feature was built for
+#: measured roughly 30x the scale of the honest ones, so this is a
+#: deliberately unaggressive default, not a knife's-edge tuning.
+DEFAULT_OUTLIER_THRESHOLD: Final = 3.0
+
+#: Fewest edges :func:`_robust_weights` will attempt to find outliers among.
+#: "The majority disagrees with this edge" is not a meaningful sentence
+#: below a handful of edges, so nothing is reweighted or rejected under this
+#: floor - rejection must be earned by disagreement with a real consensus,
+#: never manufactured by having few edges to begin with.
+MIN_ROBUST_EDGES: Final = 4
+
 
 class PoseGraphNotAllowed(ScannerError):
     """A pose-graph input was offered that this module refuses to accept."""
 
     status = DoctorStatus.UNSUPPORTED_MODE
+
+
+class PoseGraphRobustDisconnected(PoseGraphNotAllowed):
+    """Robust rejection would isolate a node the full edge set could reach.
+
+    Raised instead of returning a pose for a node nothing constrains any
+    more - see the module docstring's section on robust mode.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,12 +243,20 @@ class PoseEdge:
     "move this node further to satisfy this edge". This module does not
     distinguish a sequential edge from a closure edge; both are exactly this
     struct, and drawing that distinction is entirely the caller's job.
+
+    ``protected`` exempts this edge from ``robust=True`` rejection
+    regardless of its residual - it is still fitted normally, only never
+    downweighted or reported rejected. A caller who trusts an edge on
+    grounds this module cannot see (a sequential edge from chaining,
+    say) sets this rather than relying on this module to guess which kind
+    of edge it is; it does not, and must not, know or care.
     """
 
     i: int
     j: int
     transform: Rigid
     weight: float = 1.0
+    protected: bool = False
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -167,6 +264,7 @@ class PoseEdge:
             "j": self.j,
             "transform": self.transform.as_dict(),
             "weight": self.weight,
+            "protected": self.protected,
         }
 
 
@@ -220,6 +318,9 @@ class PoseGraphResult:
     converged: bool
     anchor: int
     edge_residuals: tuple[EdgeResidual, ...]
+    robust: bool
+    robust_passes_run: int
+    rejected_edges: tuple[EdgeResidual, ...]
     limitations: tuple[str, ...]
 
     @property
@@ -237,7 +338,8 @@ class PoseGraphResult:
         A large value here after convergence is not necessarily a fault of
         the optimiser - see the module docstring's note on contradictory
         edges, which cannot be resolved and are reported here instead of
-        hidden.
+        hidden. Includes rejected edges: this reports what remains true of
+        every edge given, not only the ones robust mode kept.
         """
         return max(self.edge_residuals, key=lambda r: r.combined, default=None)
 
@@ -254,6 +356,9 @@ class PoseGraphResult:
             "final_error": self.final_error,
             "error_history": list(self.error_history),
             "worst_edge": worst.as_dict() if worst else None,
+            "robust": self.robust,
+            "robust_passes_run": self.robust_passes_run,
+            "rejected_edges": [r.as_dict() for r in self.rejected_edges],
             "limitations": list(self.limitations),
         }
 
@@ -407,8 +512,16 @@ def edge_residuals(poses: Sequence[Rigid], edges: Sequence[PoseEdge]) -> tuple[E
     return tuple(edge_residual(poses, edge, edge_index=index) for index, edge in enumerate(edges))
 
 
-def _total_error(poses: Sequence[Rigid], edges: Sequence[PoseEdge]) -> float:
+def _total_error(
+    poses: Sequence[Rigid], edges: Sequence[PoseEdge], weights: Sequence[float]
+) -> float:
     """A weighted least-squares cost over every edge's residual, for the convergence check.
+
+    ``weights`` is parallel to ``edges`` rather than read from
+    ``edge.weight`` directly, so this doubles as the objective for BOTH
+    plain relaxation (``weights`` is exactly ``[e.weight for e in edges]``)
+    and a robust pass (``weights`` additionally carries that pass's Cauchy
+    multipliers) without two versions of this function existing.
 
     Squared so that one badly-violated edge dominates the figure the way a
     least-squares objective is supposed to - this is what makes the
@@ -416,8 +529,8 @@ def _total_error(poses: Sequence[Rigid], edges: Sequence[PoseEdge]) -> float:
     claims, not an incidental convenience.
     """
     return math.fsum(
-        edge.weight * (residual.rotation_error_radians**2 + residual.translation_error**2)
-        for edge, residual in zip(edges, edge_residuals(poses, edges), strict=True)
+        weight * (residual.rotation_error_radians**2 + residual.translation_error**2)
+        for weight, residual in zip(weights, edge_residuals(poses, edges), strict=True)
     )
 
 
@@ -449,60 +562,61 @@ def _has_redundant_path(node_count: int, edges: Sequence[PoseEdge]) -> bool:
     return False
 
 
-def optimise_poses(
-    nodes: Sequence[Rigid],
-    edges: Sequence[PoseEdge],
-    *,
-    anchor: int = 0,
-    iterations: int = 50,
-    tolerance: float = 1e-9,
-) -> PoseGraphResult:
-    """Relax ``nodes`` so they agree with ``edges`` better, holding ``anchor`` fixed.
+def _reachable_from(
+    anchor: int, node_count: int, edges: Sequence[PoseEdge], *, exclude: frozenset[int]
+) -> frozenset[int]:
+    """Every node reachable from ``anchor`` using every edge except ``exclude``.
 
-    Repeatedly sweeps every node but ``anchor`` in index order; at each one,
-    every incident edge predicts that node's pose from its neighbour's
-    CURRENT estimate (Gauss-Seidel: predictions within a sweep see updates
-    already made earlier in the same sweep), and the predictions are combined
-    - rotations by :func:`average_rotations`, translations by a plain
-    weighted mean - into the node's new pose. See the module docstring for
-    why this is the right tool given no numerical library and a few hundred
-    poses, and for what it cannot do.
-
-    ``anchor`` is never written to, at any point, by anything - not moved and
-    then corrected back, simply never touched - so it comes back bit-for-bit
-    identical to ``nodes[anchor]``. A node with no incident edge at all is
-    likewise left exactly where it started, because nothing predicts a pose
-    for it; that is correct behaviour, not a gap.
-
-    Stops after ``iterations`` sweeps, or earlier once one sweep improves the
-    total weighted squared residual (see :func:`optimise_poses`'s error
-    metric) by less than ``tolerance``, whichever comes first.
+    Union-find again, this time to answer a different question than
+    :func:`_has_redundant_path`: not "does a loop exist" but "which nodes
+    does this specific edge SET connect the anchor to". Used to check
+    whether robust rejection disconnects a node the FULL edge set could
+    still reach - see :func:`optimise_poses`.
     """
-    if len(nodes) < 2:
-        raise PoseGraphNotAllowed(f"{len(nodes)} node(s) is not enough to have a relative pose")
-    if not 0 <= anchor < len(nodes):
-        raise PoseGraphNotAllowed(f"anchor {anchor} is not a node index in range(0, {len(nodes)})")
-    if iterations < 1:
-        raise PoseGraphNotAllowed(f"iterations must be at least 1, got {iterations}")
-    if tolerance < 0.0:
-        raise PoseGraphNotAllowed(f"tolerance must be non-negative, got {tolerance}")
+    parent = list(range(node_count))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
     for index, edge in enumerate(edges):
-        if not 0 <= edge.i < len(nodes) or not 0 <= edge.j < len(nodes):
-            raise PoseGraphNotAllowed(
-                f"edge {index} references node {edge.i} or {edge.j}, out of range(0, {len(nodes)})"
-            )
-        if edge.i == edge.j:
-            raise PoseGraphNotAllowed(f"edge {index} relates node {edge.i} to itself")
-        if not edge.weight > 0.0:
-            raise PoseGraphNotAllowed(f"edge {index} has non-positive weight {edge.weight!r}")
+        if index in exclude:
+            continue
+        root_i, root_j = find(edge.i), find(edge.j)
+        if root_i != root_j:
+            parent[root_i] = root_j
+    anchor_root = find(anchor)
+    return frozenset(node for node in range(node_count) if find(node) == anchor_root)
 
-    adjacency: dict[int, list[tuple[PoseEdge, bool]]] = {}
-    for edge in edges:
-        adjacency.setdefault(edge.i, []).append((edge, False))
-        adjacency.setdefault(edge.j, []).append((edge, True))
 
-    poses = list(nodes)
-    history = [_total_error(poses, edges)]
+def _relax(
+    poses_in: Sequence[Rigid],
+    edges: Sequence[PoseEdge],
+    adjacency: dict[int, list[tuple[int, PoseEdge, bool]]],
+    *,
+    anchor: int,
+    iterations: int,
+    tolerance: float,
+    weights: Sequence[float],
+) -> tuple[list[Rigid], list[float], bool]:
+    """Gauss-Seidel relaxation, exactly as :func:`optimise_poses` always ran it.
+
+    ``weights`` is parallel to ``edges`` and is what every node update and
+    :func:`_total_error` call actually reads - never ``edge.weight``
+    directly - which is what lets a robust pass reuse this unchanged with
+    Cauchy-adjusted weights while plain relaxation reuses it with
+    ``[e.weight for e in edges]`` and gets bit-identical behaviour to before
+    this function existed.
+
+    Returns the resulting poses, the total-error value AFTER each sweep (the
+    caller supplies the starting value; this never repeats it), and whether
+    it converged inside the ``iterations`` budget.
+    """
+    poses = list(poses_in)
+    history: list[float] = []
+    previous = _total_error(poses, edges, weights)
     converged = False
     for _ in range(iterations):
         for node in range(len(poses)):
@@ -513,8 +627,8 @@ def optimise_poses(
                 continue
             rotations: list[Matrix3] = []
             translations: list[Point] = []
-            weights: list[float] = []
-            for edge, node_is_j in incident:
+            node_weights: list[float] = []
+            for edge_index, edge, node_is_j in incident:
                 other = poses[edge.i] if node_is_j else poses[edge.j]
                 predicted = (
                     other.compose(edge.transform.inverse())
@@ -523,14 +637,280 @@ def optimise_poses(
                 )
                 rotations.append(predicted.rotation)
                 translations.append(predicted.translation)
-                weights.append(edge.weight)
+                node_weights.append(weights[edge_index])
             poses[node] = Rigid.of(
-                average_rotations(rotations, weights), _weighted_translation(translations, weights)
+                average_rotations(rotations, node_weights),
+                _weighted_translation(translations, node_weights),
             )
-        history.append(_total_error(poses, edges))
-        if history[-2] - history[-1] < tolerance:
+        current = _total_error(poses, edges, weights)
+        history.append(current)
+        if previous - current < tolerance:
             converged = True
             break
+        previous = current
+    return poses, history, converged
+
+
+def _robust_weights(
+    edges: Sequence[PoseEdge], residuals: Sequence[EdgeResidual], *, threshold: float
+) -> tuple[list[float], frozenset[int]]:
+    """One IRLS reweighting pass: a Cauchy kernel on a median-scaled combined residual.
+
+    Recomputed from each edge's ORIGINAL ``weight`` every call, not the
+    previous pass's weight - standard IRLS, and what keeps this from
+    compounding an early bad guess across passes: a pass that looked wrong
+    early is given a full, fresh chance once the poses have moved.
+
+    The scale is ``1.4826 * median`` of every edge's
+    :attr:`EdgeResidual.combined` - NOT the textbook ``1.4826 * median
+    absolute deviation around the median``, and the difference is
+    deliberate and measured, not a simplification. MAD-around-the-median is
+    calibrated for a SYMMETRIC, two-sided population; ``combined`` is a
+    ``hypot`` of two quantities that are never negative, so its population is
+    already one-sided (a folded/half-normal shape) even when every edge is
+    honest measurement noise around a shared truth. Applying the two-sided
+    formula to a one-sided population systematically UNDERESTIMATES the
+    scale, and with fifteen to thirty edges - an ordinary revisit count -
+    that miscalibration was measured to falsely flag as many as 7 of 30
+    edges drawn from a single, honest noise distribution with no outlier in
+    it at all, across ten different random seeds. For a folded-normal
+    population the median itself is already ``0.6745 * sigma``, so
+    ``1.4826 * median`` is the correspondingly calibrated scale, and it
+    measured ZERO false rejections across the same seeds. This is what
+    keeps :func:`optimise_poses` from discarding good data merely because
+    "distance-shaped" residuals cannot be negative - see the honest-input
+    robust tests in ``tests/test_posegraph.py``.
+
+    A robust estimate of spread stays small as long as a MAJORITY of edges
+    agree, however small a minority disagrees - which is what makes this
+    earn rejection through disagreement rather than through being
+    outnumbered. Below :data:`MIN_ROBUST_EDGES` ELIGIBLE (unprotected)
+    edges there is no majority to speak of, and nothing is reweighted.
+
+    The scale is computed ONLY over unprotected edges' residuals - NOT over
+    every edge, which is a real bug this module shipped with and then fixed,
+    worth recording so it is not reintroduced. A protected edge is exempt
+    from rejection by definition, so folding it into the statistic that
+    decides what gets rejected is a category error, and in real usage it is
+    an actively misleading one: a caller typically protects the sequential
+    edges that were themselves COMPOSED to build the very poses being fit,
+    so those edges are satisfied to float64 precision by construction, not
+    by being especially trustworthy measurements. Measured on the user's
+    real 86-edge graph (69 protected sequential edges at ~0 residual, 17
+    closures including 3 falsely claiming 179-degree pairs were the same
+    viewpoint), including the protected edges pulled the median to ~0,
+    every closure - the honest 0.5-8 degree ones included - looked like an
+    astronomical outlier against that floor, and NOTHING was rejected: the
+    exact opposite of the intended behaviour, on exactly the data this
+    module exists for. The question the scale answers is "what does a
+    typical disagreement look like among the things I might reject", and a
+    population that cannot be rejected by definition cannot inform that
+    answer, however real its own residual is as evidence of something else.
+
+    Cauchy over Huber: measured on this module's own headline fixture with a
+    handful of edges wrong by half a revolution, Huber's ``threshold /
+    normalised`` falloff was not aggressive enough - a wrong edge kept
+    10-15% of its weight even far past the threshold, and Gauss-Seidel
+    relaxation propagates that residual influence to its neighbours each
+    sweep, which repeatedly re-contaminated the very residuals the next
+    pass reweights from. A grossly wrong edge on a Gauss-Seidel graph needs
+    to be suppressed towards zero, not merely discounted. Cauchy's
+    ``threshold^2 / (threshold^2 + normalised^2)`` falls off quadratically
+    instead of linearly - roughly 2% of original weight at 20 robust sigma
+    against Huber's 15% - and that difference was the one that let robust
+    fitting actually recover the clean result instead of merely improving
+    on the contaminated one; see the recovery numbers in
+    ``tests/test_posegraph.py``'s headline robust test.
+
+    A :attr:`PoseEdge.protected` edge is still returned at its original
+    weight, unconditionally, and still has its own residual computed and
+    reported by the caller - it is simply excluded from the population that
+    decides what everyone else's "normal" looks like, for the reason above.
+    """
+    eligible = [
+        residual.combined
+        for edge, residual in zip(edges, residuals, strict=True)
+        if not edge.protected
+    ]
+    if len(eligible) < MIN_ROBUST_EDGES:
+        # Either too few edges overall, or too few left once protected ones
+        # are excluded - up to and including every edge being protected, in
+        # which case there is no eligible population at all, not merely a
+        # small one. Either way "the majority disagrees with this edge" is
+        # not a meaningful sentence, so nothing is reweighted - the same
+        # honest floor as the too-few-edges-overall case always was.
+        return [edge.weight for edge in edges], frozenset()
+
+    median = statistics.median(eligible)
+    # A small absolute floor, not a claim about physical scale: it stops a
+    # graph that has already converged to float64 precision (every eligible
+    # residual within rounding noise of zero) from amplifying that noise
+    # into meaningless "normalised" ratios and rejecting edges arbitrarily -
+    # the same purpose scanner3d.geometry.ORTHONORMAL_TOLERANCE serves for a
+    # different near-zero degeneracy.
+    scale = max(1.4826 * median, 1e-9)
+
+    threshold_squared = threshold * threshold
+    new_weights: list[float] = []
+    rejected: set[int] = set()
+    for index, (edge, residual) in enumerate(zip(edges, residuals, strict=True)):
+        if edge.protected:
+            new_weights.append(edge.weight)
+            continue
+        normalised = residual.combined / scale
+        new_weights.append(edge.weight * (threshold_squared / (threshold_squared + normalised**2)))
+        if normalised > threshold:
+            rejected.add(index)
+    return new_weights, frozenset(rejected)
+
+
+def optimise_poses(
+    nodes: Sequence[Rigid],
+    edges: Sequence[PoseEdge],
+    *,
+    anchor: int = 0,
+    iterations: int = 50,
+    tolerance: float = 1e-9,
+    robust: bool = False,
+    robust_passes: int = DEFAULT_ROBUST_PASSES,
+    outlier_threshold: float = DEFAULT_OUTLIER_THRESHOLD,
+) -> PoseGraphResult:
+    """Relax ``nodes`` so they agree with ``edges`` better, holding ``anchor`` fixed.
+
+    Repeatedly sweeps every node but ``anchor`` in index order; at each one,
+    every incident edge predicts that node's pose from its neighbour's
+    CURRENT estimate (Gauss-Seidel: predictions within a sweep see updates
+    already made earlier in the same sweep), and the predictions are combined
+    - rotations by :func:`average_rotations`, translations by a plain
+    weighted mean - into the node's new pose. See the module docstring for
+    why this is the right tool given no numerical library and a few hundred
+    poses, and for what it cannot do. See :func:`_relax` for the sweep loop
+    itself, factored out so plain and robust fitting share one implementation.
+
+    ``anchor`` is never written to, at any point, by anything - not moved and
+    then corrected back, simply never touched - so it comes back bit-for-bit
+    identical to ``nodes[anchor]``. A node with no incident edge at all is
+    likewise left exactly where it started, because nothing predicts a pose
+    for it; that is correct behaviour, not a gap.
+
+    Stops after ``iterations`` sweeps, or earlier once one sweep improves the
+    total weighted squared residual (see :func:`optimise_poses`'s error
+    metric) by less than ``tolerance``, whichever comes first.
+
+    Robust mode
+    ------------
+    With ``robust=True``, up to ``robust_passes`` rounds of [relax to
+    convergence, reweight by Cauchy kernel at ``outlier_threshold`` robust
+    sigmas - see :func:`_robust_weights`] run, stopping early once the set of
+    rejected edges stops changing between rounds. See the module docstring's
+    section on robust mode for why this exists and what it guarantees:
+    ``robust=False`` (the default) is bit-identical to this module before
+    the feature existed; a run that rejects nothing behaves like plain
+    relaxation; every rejected edge is named in
+    :attr:`PoseGraphResult.rejected_edges`; and a rejection set that would
+    disconnect a node the full edge set could reach from ``anchor`` raises
+    :exc:`PoseGraphRobustDisconnected` instead of returning a partial answer.
+    """
+    if len(nodes) < 2:
+        raise PoseGraphNotAllowed(f"{len(nodes)} node(s) is not enough to have a relative pose")
+    if not 0 <= anchor < len(nodes):
+        raise PoseGraphNotAllowed(f"anchor {anchor} is not a node index in range(0, {len(nodes)})")
+    if iterations < 1:
+        raise PoseGraphNotAllowed(f"iterations must be at least 1, got {iterations}")
+    if tolerance < 0.0:
+        raise PoseGraphNotAllowed(f"tolerance must be non-negative, got {tolerance}")
+    if robust_passes < 1:
+        raise PoseGraphNotAllowed(f"robust_passes must be at least 1, got {robust_passes}")
+    if not math.isfinite(outlier_threshold) or outlier_threshold <= 0.0:
+        raise PoseGraphNotAllowed(
+            f"outlier_threshold must be finite and positive, got {outlier_threshold!r}"
+        )
+    for index, edge in enumerate(edges):
+        if not 0 <= edge.i < len(nodes) or not 0 <= edge.j < len(nodes):
+            raise PoseGraphNotAllowed(
+                f"edge {index} references node {edge.i} or {edge.j}, out of range(0, {len(nodes)})"
+            )
+        if edge.i == edge.j:
+            raise PoseGraphNotAllowed(f"edge {index} relates node {edge.i} to itself")
+        if not edge.weight > 0.0:
+            raise PoseGraphNotAllowed(f"edge {index} has non-positive weight {edge.weight!r}")
+
+    adjacency: dict[int, list[tuple[int, PoseEdge, bool]]] = {}
+    for index, edge in enumerate(edges):
+        adjacency.setdefault(edge.i, []).append((index, edge, False))
+        adjacency.setdefault(edge.j, []).append((index, edge, True))
+
+    base_weights = [edge.weight for edge in edges]
+    poses = list(nodes)
+    history = [_total_error(poses, edges, base_weights)]
+    weights = base_weights
+    passes_run = 0
+    rejected: frozenset[int] = frozenset()
+    # Eligible, not total: a protected edge can never be rejected, so it
+    # cannot help meet the floor that decides whether attempting robust
+    # fitting is worthwhile at all - see _robust_weights on why the same
+    # distinction matters for the scale itself, not only for this count.
+    eligible_edge_count = sum(1 for edge in edges if not edge.protected)
+    attempt_robust = robust and eligible_edge_count >= MIN_ROBUST_EDGES
+
+    if not attempt_robust:
+        poses, sweep_history, converged = _relax(
+            poses,
+            edges,
+            adjacency,
+            anchor=anchor,
+            iterations=iterations,
+            tolerance=tolerance,
+            weights=weights,
+        )
+        history.extend(sweep_history)
+    else:
+        previous_rejected: frozenset[int] | None = None
+        converged = False
+        for _ in range(robust_passes):
+            poses, sweep_history, converged = _relax(
+                poses,
+                edges,
+                adjacency,
+                anchor=anchor,
+                iterations=iterations,
+                tolerance=tolerance,
+                weights=weights,
+            )
+            history.extend(sweep_history)
+            passes_run += 1
+            weights, rejected = _robust_weights(
+                edges, edge_residuals(poses, edges), threshold=outlier_threshold
+            )
+            if rejected == previous_rejected:
+                break
+            previous_rejected = rejected
+        # One more relax with the settled weights, so the poses reported
+        # reflect exactly the rejection decision being reported, not the
+        # pass before it.
+        poses, sweep_history, converged = _relax(
+            poses,
+            edges,
+            adjacency,
+            anchor=anchor,
+            iterations=iterations,
+            tolerance=tolerance,
+            weights=weights,
+        )
+        history.extend(sweep_history)
+
+        if rejected:
+            full_reach = _reachable_from(anchor, len(nodes), edges, exclude=frozenset())
+            surviving_reach = _reachable_from(anchor, len(nodes), edges, exclude=rejected)
+            newly_isolated = full_reach - surviving_reach
+            if newly_isolated:
+                raise PoseGraphRobustDisconnected(
+                    f"rejecting edge(s) {sorted(rejected)} disconnects node(s) "
+                    f"{sorted(newly_isolated)} from anchor {anchor}, though the full edge set "
+                    "could reach them; refusing rather than returning a pose for a node "
+                    "nothing constrains any more. Raise outlier_threshold, protect more "
+                    "edges, or review the rejected edges before retrying"
+                )
 
     limitations = [
         "This is Gauss-Seidel relaxation on the chordal pose-graph objective, not a joint "
@@ -556,13 +936,32 @@ def optimise_poses(
             "order, by the chain that produced it, so this graph comes back essentially "
             "unchanged. That is expected, not a defect - see the module docstring."
         )
+    if robust and not attempt_robust:
+        limitations.append(
+            f"robust=True was requested but only {eligible_edge_count} edge(s) were eligible "
+            f"for rejection (not protected), below the {MIN_ROBUST_EDGES} this needs before "
+            "'the majority disagrees with this edge' is a meaningful sentence; no edge was "
+            "reweighted or rejected, and this ran exactly as robust=False would have."
+        )
+    elif robust:
+        limitations.append(
+            f"Robust mode ran {passes_run} reweighting pass(es) (IRLS, Cauchy kernel, "
+            f"{outlier_threshold} robust sigma(s) on the median-scaled combined residual, "
+            f"combined residual) and rejected {len(rejected)} of {len(edges)} edge(s) - see "
+            "rejected_edges for which and why. A protected edge is never reweighted or "
+            "rejected regardless of its residual."
+        )
 
+    final_residuals = edge_residuals(poses, edges)
     return PoseGraphResult(
         poses=tuple(poses),
         error_history=tuple(history),
         iterations_run=len(history) - 1,
         converged=converged,
         anchor=anchor,
-        edge_residuals=edge_residuals(poses, edges),
+        edge_residuals=final_residuals,
+        robust=robust,
+        robust_passes_run=passes_run,
+        rejected_edges=tuple(final_residuals[index] for index in sorted(rejected)),
         limitations=tuple(limitations),
     )

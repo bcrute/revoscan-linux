@@ -49,6 +49,32 @@ unit moves every frame in the same way and leaves all of these numbers small. A
 loop closure near zero says the poses are self-consistent around one revolution.
 It does not say the object was reconstructed correctly, and nothing in this
 repository has compared any of it against a physical measurement.
+
+Selectable compute backend
+----------------------------
+:func:`icp` takes an optional ``backend`` - see :mod:`scanner3d.compute` for
+the full protocol and the measured reason a KD-tree backend can be
+substantially faster. It routes exactly the one cost that dominates this
+module's runtime - the nearest-neighbour correspondence search
+(:func:`_correspond_via_backend`) - through the selected backend. It changes
+NOTHING else: the trim, the Horn solve, the gate arithmetic and the
+convergence test are the identical code, unconditionally, regardless of
+``backend``. The default, ``"python"``, does not merely produce equivalent
+output to the code that existed before this parameter did - it IS that code,
+unmodified, on the unmodified :class:`_VoxelIndex` path; the backend-driven
+path is only ever reached by an explicit request for a live
+:class:`~scanner3d.compute.ComputeBackend` or a non-``"python"`` backend
+name, never by a caller who did not ask for it. :func:`register_turntable`
+and everything it chains through :func:`_fit_pair` are untouched by this -
+they call the same :class:`_VoxelIndex` path exactly as before, with no
+``backend`` parameter of their own to thread through.
+
+:mod:`scanner3d.compute` is imported lazily, inside :func:`_resolve_backend`,
+rather than at this module's top level: that module imports
+:class:`_VoxelIndex` from THIS one at ITS OWN top level, so an eager import
+here in the other direction would be a genuine circular import, not merely an
+awkward one. Deferring it to call time - after both modules have finished
+loading - is what breaks the cycle.
 """
 
 from __future__ import annotations
@@ -57,7 +83,7 @@ import itertools
 import math
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from scanner3d.errors import DoctorStatus, ScannerError
 from scanner3d.geometry import (
@@ -75,6 +101,11 @@ from scanner3d.geometry import (
     scaled,
     subtract,
 )
+
+if TYPE_CHECKING:
+    # Only for static type-checking - see the module docstring's "Selectable
+    # compute backend" section on why this is never imported at runtime here.
+    from scanner3d.compute import ComputeBackend
 
 #: Serialised shape version for every record this module emits.
 SCHEMA_VERSION: Final = 1
@@ -730,6 +761,15 @@ class IcpResult:
     :attr:`trim_distance` is the distance of the furthest pair the final solve
     actually used, so a reader can say exactly how near a pair had to be to
     count towards :attr:`rmse`.
+
+    :attr:`resolved_backend` names which :mod:`scanner3d.compute` backend
+    actually ran the correspondence search - ``"python"``, ``"numpy"`` or
+    ``"scipy"``, never the bare request (``"auto"``), for the same reason
+    :attr:`scanner3d.compute.BackendSelection.resolved` never is: a result
+    that only reports what was ASKED for, not what RAN, cannot be used to
+    interpret its own timing. Always ``"python"`` for a fit produced by
+    :func:`register_turntable`, which has no ``backend`` parameter of its
+    own - see the module docstring's "Selectable compute backend" section.
     """
 
     transform: Rigid
@@ -746,6 +786,7 @@ class IcpResult:
     keep_fraction: float
     trim_distance: float
     convergence_threshold: float
+    resolved_backend: str
 
     @property
     def offered(self) -> int:
@@ -786,6 +827,7 @@ class IcpResult:
             "keep_fraction": self.keep_fraction,
             "trim_distance": self.trim_distance,
             "convergence_threshold": self.convergence_threshold,
+            "resolved_backend": self.resolved_backend,
         }
 
 
@@ -795,7 +837,7 @@ class _Prepared:
 
     source: tuple[Point, ...]
     target: tuple[Point, ...]
-    index: _VoxelIndex
+    index: _VoxelIndex | None
     voxel_size: float | None
     gate: float
     threshold: float
@@ -810,12 +852,22 @@ def _prepare(
     voxel_size: float | None,
     max_correspondence_distance: float | None,
     keep_fraction: float,
+    build_index: bool = True,
 ) -> _Prepared:
     """Resolve every relative bound against the target's extent, then sample and index.
 
     The target's extent and not the source's: the gate and the threshold are
     both statements about where a partner is expected to be found, and that is
     the target's geometry.
+
+    ``build_index`` is ``True`` by default - every existing caller
+    (:func:`_fit_pair`, and :func:`icp` on its unaccelerated path) gets the
+    exact :class:`_VoxelIndex` it always got. :func:`icp` passes ``False``
+    only when a live :mod:`scanner3d.compute` backend was selected, because a
+    backend "never grids at all" (see that module's docstring) and building
+    an unused :class:`_VoxelIndex` could refuse a gate the backend would have
+    handled fine - see :func:`_ensure_grid_affordable`. ``prepared.index`` is
+    then ``None``, and the caller must not read it.
     """
     extent = cloud_extent(target)
     gate = (
@@ -837,7 +889,7 @@ def _prepare(
     return _Prepared(
         source=tuple(sampled_source),
         target=tuple(sampled_target),
-        index=_VoxelIndex(sampled_target, gate=gate),
+        index=_VoxelIndex(sampled_target, gate=gate) if build_index else None,
         voxel_size=resolved_voxel,
         gate=gate,
         threshold=tolerance * extent,
@@ -866,6 +918,81 @@ def _correspond(
             continue
         pairs.append((math.dist(moved, nearest), original, nearest))
     return pairs, rejected
+
+
+#: What :func:`_correspond` (bound to a :class:`_VoxelIndex`) and
+#: :func:`_correspond_via_backend` (bound to a live
+#: :class:`~scanner3d.compute.ComputeBackend`) both are, once bound: given the
+#: current source cloud and transform estimate, the matched ``(distance,
+#: original_source_point, target_point)`` triples and the reject count.
+#: :func:`_iterate` calls one of the two through this shape without knowing or
+#: caring which - see :func:`icp` and :func:`_fit_pair`. Matches
+#: :mod:`scanner3d.icp_plane`'s identically-named, identically-shaped seam.
+_Correspond = Callable[[Sequence[Point], Rigid], tuple[list[tuple[float, Point, Point]], int]]
+
+
+def _correspond_via_backend(
+    source: Sequence[Point],
+    transform: Rigid,
+    backend: ComputeBackend,
+    target: Sequence[Point],
+    *,
+    gate: float,
+) -> tuple[list[tuple[float, Point, Point]], int]:
+    """The backend-driven equivalent of :func:`_correspond`: same inputs, same
+    outputs, same gate semantics -
+    :meth:`~scanner3d.compute.ComputeBackend.nearest_neighbors` uses the
+    identical strict "closer than the gate" rule as
+    :meth:`_VoxelIndex.nearest`, verified in :mod:`scanner3d.compute`'s own
+    test suite. Matches :func:`scanner3d.icp_plane._correspond_via_backend`.
+    """
+    pairs: list[tuple[float, Point, Point]] = []
+    rejected = 0
+    moved = backend.apply_transform(transform, source)
+    hits = backend.nearest_neighbors(moved, target, gate=gate)
+    for original, hit in zip(source, hits, strict=True):
+        if hit is None:
+            rejected += 1
+            continue
+        distance, nearest = hit
+        pairs.append((distance, original, nearest))
+    return pairs, rejected
+
+
+def _resolve_backend(backend: str | ComputeBackend) -> tuple[str, ComputeBackend | None]:
+    """``(resolved name, live backend or None)``. ``None`` means "run the
+    original, unaccelerated code path exactly as written before ``backend``
+    existed as a parameter" - see the module docstring's "Selectable compute
+    backend" section.
+
+    ``None`` is returned for the string ``"python"`` (the default) and for
+    ``"auto"`` when it resolves to python, so "python" means the SAME thing -
+    the untouched reference implementation - regardless of how it was
+    reached, rather than a second, merely-equivalent code path through
+    :mod:`scanner3d.compute`. A caller who hands a live
+    :class:`~scanner3d.compute.ComputeBackend` INSTANCE is opting into the
+    backend-driven path deliberately, even if that instance's own name is
+    ``"python"``; only the bare string is treated as "use the legacy path".
+    Matches :func:`scanner3d.icp_plane._resolve_backend` exactly, duplicated
+    rather than imported for the same reason every other private helper in
+    this codebase is duplicated across sibling modules - see that function's
+    own docstring.
+
+    :mod:`scanner3d.compute` is imported here, not at module scope - see this
+    module's own docstring for why that particular direction is a genuine
+    circular import and not merely an avoidable one.
+    """
+    from scanner3d.compute import PYTHON_BACKEND
+    from scanner3d.compute import select_backend as _select_compute_backend
+
+    if isinstance(backend, str):
+        if backend == PYTHON_BACKEND:
+            return PYTHON_BACKEND, None
+        selection = _select_compute_backend(backend)
+        if selection.resolved == PYTHON_BACKEND:
+            return PYTHON_BACKEND, None
+        return selection.resolved, selection.backend
+    return backend.name, backend
 
 
 def kept_count(matched: int, keep_fraction: float) -> int:
@@ -904,15 +1031,27 @@ class _Fit:
 
 def _iterate(
     source: Sequence[Point],
-    index: _VoxelIndex,
+    correspond: _Correspond,
     *,
     initial: Rigid,
     solve: _Solver,
     max_iterations: int,
     threshold: float,
     keep_fraction: float,
+    gate: float,
 ) -> _Fit:
     """Match, trim, solve, repeat - and record whether it actually settled.
+
+    ``correspond`` is either :func:`_correspond` (bound to a
+    :class:`_VoxelIndex`) or :func:`_correspond_via_backend` (bound to a
+    :class:`~scanner3d.compute.ComputeBackend`) - chosen once by the caller
+    (:func:`icp` or :func:`_fit_pair`) before this function ever runs.
+    Nothing below this line changed to add that seam: the trim, the solve
+    and the convergence test are the same code that ran before ``backend``
+    existed anywhere in this module. ``gate`` is carried alongside purely
+    for the refusal message and the pre-first-iteration default of
+    ``trim_distance`` - :func:`_correspond_via_backend` has no ``.gate``
+    attribute to read it back from the way :class:`_VoxelIndex` does.
 
     Convergence is the residual ceasing to *improve*. The first iteration has
     nothing to compare against, so a single-iteration budget always reports
@@ -933,15 +1072,15 @@ def _iterate(
     correspondences = 0
     trimmed = 0
     rejected = 0
-    trim_distance = index.gate
+    trim_distance = gate
     converged = False
     iterations = 0
     for iterations in range(1, max_iterations + 1):
-        pairs, rejected = _correspond(source, transform, index)
+        pairs, rejected = correspond(source, transform)
         if len(pairs) < MIN_CORRESPONDENCES:
             raise CorrespondencesInsufficient(
                 f"only {len(pairs)} of {len(pairs) + rejected} source points found a partner "
-                f"inside a correspondence gate of {index.gate!r} at iteration {iterations}; "
+                f"inside a correspondence gate of {gate!r} at iteration {iterations}; "
                 "the clouds do not overlap where this estimate puts them"
             )
         pairs.sort(key=lambda pair: pair[0])
@@ -985,7 +1124,7 @@ def _angle_solver(direction: Point, through: Point) -> _Solver:
     return solve
 
 
-def _as_result(fit: _Fit, prepared: _Prepared) -> IcpResult:
+def _as_result(fit: _Fit, prepared: _Prepared, *, resolved_backend: str = "python") -> IcpResult:
     return IcpResult(
         transform=fit.transform,
         rmse=fit.rmse,
@@ -1001,6 +1140,7 @@ def _as_result(fit: _Fit, prepared: _Prepared) -> IcpResult:
         keep_fraction=prepared.keep_fraction,
         trim_distance=fit.trim_distance,
         convergence_threshold=prepared.threshold,
+        resolved_backend=resolved_backend,
     )
 
 
@@ -1014,6 +1154,7 @@ def icp(
     voxel_size: float | None = None,
     max_correspondence_distance: float | None = None,
     keep_fraction: float = DEFAULT_KEEP_FRACTION,
+    backend: str | ComputeBackend = "python",
 ) -> IcpResult:
     """Point-to-point ICP: the transform carrying ``source`` onto ``target``.
 
@@ -1048,6 +1189,12 @@ def icp(
     game: a rotation of the nominal step about an estimated spindle puts the
     source within a fraction of a step of the truth, where the fit has one
     obvious minimum instead of several plausible ones.
+
+    ``backend`` selects what runs the correspondence search - see
+    :mod:`scanner3d.compute` and the module docstring's "Selectable compute
+    backend" section. The default, ``"python"``, is the unmodified code path
+    this function has always run; :attr:`IcpResult.resolved_backend` names
+    what actually ran, which matters most for ``"auto"``.
     """
     source_points = _ensure_cloud(source, what="ICP source")
     target_points = _ensure_cloud(target, what="ICP target")
@@ -1058,6 +1205,7 @@ def icp(
         max_correspondence_distance=max_correspondence_distance,
         keep_fraction=keep_fraction,
     )
+    resolved_backend_name, compute_backend = _resolve_backend(backend)
     prepared = _prepare(
         source_points,
         target_points,
@@ -1065,17 +1213,41 @@ def icp(
         voxel_size=voxel_size,
         max_correspondence_distance=max_correspondence_distance,
         keep_fraction=keep_fraction,
+        build_index=compute_backend is None,
     )
+
+    correspond: _Correspond
+    if compute_backend is None:
+        prepared_index = prepared.index
+        assert prepared_index is not None  # build_index=True above guarantees this
+
+        def correspond(
+            src: Sequence[Point], tr: Rigid
+        ) -> tuple[list[tuple[float, Point, Point]], int]:
+            return _correspond(src, tr, prepared_index)
+    else:
+        prepared_target = prepared.target
+        prepared_gate = prepared.gate
+        backend_object = compute_backend
+
+        def correspond(
+            src: Sequence[Point], tr: Rigid
+        ) -> tuple[list[tuple[float, Point, Point]], int]:
+            return _correspond_via_backend(
+                src, tr, backend_object, prepared_target, gate=prepared_gate
+            )
+
     fit = _iterate(
         prepared.source,
-        prepared.index,
+        correspond,
         initial=initial,
         solve=_rigid_solver,
         max_iterations=max_iterations,
         threshold=prepared.threshold,
         keep_fraction=keep_fraction,
+        gate=prepared.gate,
     )
-    return _as_result(fit, prepared)
+    return _as_result(fit, prepared, resolved_backend=resolved_backend_name)
 
 
 # --- the spindle --------------------------------------------------------------
@@ -1700,7 +1872,13 @@ def _fit_pair(
     max_correspondence_distance: float | None,
     keep_fraction: float,
 ) -> tuple[IcpResult, float | None]:
-    """One frame-to-frame fit, constrained to the spindle or free, as asked."""
+    """One frame-to-frame fit, constrained to the spindle or free, as asked.
+
+    Always the unaccelerated :class:`_VoxelIndex` path - this has no
+    ``backend`` parameter of its own, and :func:`register_turntable`, which
+    calls this, is untouched by the "Selectable compute backend" section of
+    this module's docstring.
+    """
     prepared = _prepare(
         source,
         target,
@@ -1709,14 +1887,21 @@ def _fit_pair(
         max_correspondence_distance=max_correspondence_distance,
         keep_fraction=keep_fraction,
     )
+    index = prepared.index
+    assert index is not None  # build_index defaults to True; this path never sets it False
+
+    def correspond(src: Sequence[Point], tr: Rigid) -> tuple[list[tuple[float, Point, Point]], int]:
+        return _correspond(src, tr, index)
+
     fit = _iterate(
         prepared.source,
-        prepared.index,
+        correspond,
         initial=initial,
         solve=_rigid_solver if solver is None else solver,
         max_iterations=max_iterations,
         threshold=prepared.threshold,
         keep_fraction=keep_fraction,
+        gate=prepared.gate,
     )
     return _as_result(fit, prepared), fit.angle
 
