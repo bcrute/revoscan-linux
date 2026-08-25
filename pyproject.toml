@@ -1,0 +1,98 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "scanner3d"
+version = "0.1.0"
+description = "Linux-native toolchain for the Revopoint MINI structured-light scanner"
+readme = "README.md"
+# Matches the interval measured for the sibling ../mapper repository. Upper
+# bound is deliberate: 3.15 is unverified here, not merely unreleased.
+requires-python = ">=3.14,<3.15"
+# License is an open owner decision (see .coordination/PROJECT.md) and is left
+# undeclared rather than guessed. Author contact is likewise not inferred.
+authors = [{ name = "Ben Crute" }]
+dependencies = []
+
+[project.optional-dependencies]
+# numpy accelerates scanner3d.compute's "numpy" backend. Optional by design:
+# the hardware and protocol layers, and the "python" backend, stay
+# dependency-free and this package installs and runs with it entirely
+# absent - see scanner3d.compute's module docstring.
+numpy = ["numpy>=2.0"]
+# scipy accelerates scanner3d.compute's "scipy" backend (KD-tree nearest-
+# neighbour search). Same optionality rule as numpy - scipy already depends
+# on numpy, so this extra does not need to repeat it.
+scipy = ["scipy>=1.11"]
+# PySide6 backs the desktop window in scanner3d.gui. Optional like the others:
+# the CLI, the library and every test run without it.
+gui = ["PySide6>=6.7"]
+dev = [
+  "pytest>=8.3",
+  "pytest-cov>=5.0",
+  "ruff>=0.7",
+  "mypy>=1.13",
+  "numpy>=2.0",
+  "scipy>=1.11",
+  "scipy-stubs>=1.11",
+  "PySide6>=6.7",
+]
+
+[project.scripts]
+scanner3d = "scanner3d.cli:main"
+scanner3d-gui = "scanner3d.gui:main"
+
+[tool.hatch.build.targets.wheel]
+# Everything under the package directory ships, including
+# scanner3d/data/sdk-manifest.json, so an installed CLI can verify the oracle.
+packages = ["src/scanner3d"]
+
+[tool.hatch.build.targets.sdist]
+# Explicit allowlist. The default (everything not gitignored) swept in live
+# coordination state and agent-instruction files that are not part of the
+# distribution.
+include = [
+  "/src/scanner3d",
+  "/tests",
+  "/docs",
+  "/reference",
+  "/README.md",
+  "/pyproject.toml",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "ANN", "PTH"]
+ignore = ["ANN401"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["scanner3d", "tests"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ANN", "S101"]
+
+[tool.mypy]
+python_version = "3.14"
+files = ["src", "tests"]
+strict = true
+warn_unreachable = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_untyped_calls = false
+disallow_any_generics = false
+warn_return_any = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers --strict-config"
+markers = [
+  "hardware: requires the physical scanner to be attached (deselected by default)",
+]

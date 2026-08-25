@@ -1,0 +1,213 @@
+{
+  "mode": "v4l2-mmap-rgb-frame",
+  "status": "format_mismatch",
+  "succeeded": false,
+  "exit_code": 17,
+  "detail": "sizeimage 8192000 is past the 2097152 B per-buffer ceiling this command will map",
+  "plan": {
+    "profile": "rgb-frame",
+    "role": "rgb",
+    "node_kind": "capture",
+    "expected_interface_driver": "uvcvideo",
+    "driver_detached": false,
+    "fourcc": "MJPG",
+    "width": 1280,
+    "height": 800,
+    "descriptor_frame_rate_hz": 30.0,
+    "frame_rate_measured": false,
+    "compressed": true,
+    "descriptor_max_video_frame_buffer_bytes": 2048000,
+    "artifact_name": "rgb-frame.jpg",
+    "jpeg_inspection": "structural markers only; no pixel decode",
+    "jpeg_inspect_ceiling_bytes": 2097152,
+    "pixels_decoded": false,
+    "colour_corrected": false,
+    "calibration_applied": false,
+    "requested_buffers": 4,
+    "min_accepted_buffers": 2,
+    "max_buffer_bytes": 2097152,
+    "max_total_mapped_bytes": 8388608,
+    "capture_deadline_s": 8.0,
+    "max_raw_artifact_bytes": 2097152,
+    "max_dequeues": 1,
+    "retries": 0,
+    "ioctls": {
+      "VIDIOC_QUERYCAP": "0x80685600",
+      "VIDIOC_G_FMT": "0xc0d05604",
+      "VIDIOC_S_FMT": "0xc0d05605",
+      "VIDIOC_REQBUFS": "0xc0145608",
+      "VIDIOC_QUERYBUF": "0xc0585609",
+      "VIDIOC_QBUF": "0xc058560f",
+      "VIDIOC_DQBUF": "0xc0585611",
+      "VIDIOC_STREAMON": "0x40045612",
+      "VIDIOC_STREAMOFF": "0x40045613"
+    }
+  },
+  "target": {
+    "serial": "EXAMPLESERIAL0001",
+    "sysfs_path": "/sys/bus/usb/devices/1-1.1",
+    "usb_path": "1-1.1",
+    "bus_number": 1,
+    "device_number": 42,
+    "role": "rgb",
+    "interface_number": 2,
+    "interface_string": "RGBCamEXAMPLESERIAL0001",
+    "interface_driver": "uvcvideo",
+    "v4l_index": 0,
+    "v4l_kind": "capture",
+    "v4l_name": "ZXProduct: RGBCamA22704522A6F00",
+    "node_name": "video2",
+    "node_path": "/dev/video2",
+    "rdev": 20738,
+    "rdev_major_minor": "81:2",
+    "inode": 3119,
+    "mode": "0o660",
+    "resolved_by": "USB interface string descriptor prefix for role 'rgb' plus V4L2 index 0 (capture); the node number was never assumed"
+  },
+  "capability": {
+    "driver": "uvcvideo",
+    "card": "ZXProduct: RGBCamA22704522A6F00",
+    "bus_info": "usb-0000:00:14.0-1.1",
+    "version": 396811,
+    "version_text": "6.14.11",
+    "capabilities": "0x84a00001",
+    "device_caps": "0x04200001",
+    "effective_capabilities": "0x04200001",
+    "capability_names": [
+      "V4L2_CAP_VIDEO_CAPTURE",
+      "V4L2_CAP_META_CAPTURE",
+      "V4L2_CAP_STREAMING",
+      "V4L2_CAP_DEVICE_CAPS"
+    ],
+    "device_capability_names": [
+      "V4L2_CAP_VIDEO_CAPTURE",
+      "V4L2_CAP_STREAMING"
+    ],
+    "required_capabilities": [
+      "V4L2_CAP_VIDEO_CAPTURE",
+      "V4L2_CAP_STREAMING"
+    ],
+    "missing_required": []
+  },
+  "initial_format": {
+    "width": 1280,
+    "height": 800,
+    "pixelformat": "0x47504a4d",
+    "fourcc": "MJPG",
+    "field": 1,
+    "field_name": "V4L2_FIELD_NONE",
+    "bytesperline": 0,
+    "sizeimage": 8192000,
+    "colorspace": 8,
+    "priv": 4276996862,
+    "flags": 0,
+    "ycbcr_enc": 1,
+    "quantization": 0,
+    "xfer_func": 1,
+    "row_padded": false,
+    "tight_frame_bytes": 2048000
+  },
+  "negotiated_format": {
+    "width": 1280,
+    "height": 800,
+    "pixelformat": "0x47504a4d",
+    "fourcc": "MJPG",
+    "field": 1,
+    "field_name": "V4L2_FIELD_NONE",
+    "bytesperline": 0,
+    "sizeimage": 8192000,
+    "colorspace": 8,
+    "priv": 4276996862,
+    "flags": 0,
+    "ycbcr_enc": 1,
+    "quantization": 0,
+    "xfer_func": 1,
+    "row_padded": false,
+    "tight_frame_bytes": 2048000
+  },
+  "buffers": null,
+  "queried_buffers": [],
+  "mappings": [],
+  "poll": null,
+  "dequeued_buffer": null,
+  "frame_bytes": null,
+  "frame_evidence": null,
+  "artifacts": {
+    "attempted": false,
+    "ok": true,
+    "note": "no bytes were dequeued (format_mismatch), so no frame file was written",
+    "directory": "/tmp/scanner-010-evidence/artifact",
+    "files": [],
+    "raw_ceiling_bytes": 2097152
+  },
+  "steps": [
+    {
+      "step": "resolve_node",
+      "ok": true,
+      "detail": "/dev/video2 is the V4L2 index-0 capture node of the rgb function on interface 2 ('RGBCamEXAMPLESERIAL0001'), bound to uvcvideo",
+      "duration_s": null,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "open",
+      "ok": true,
+      "detail": "opened /dev/video2 O_RDWR|O_NONBLOCK|O_CLOEXEC as fd 4",
+      "duration_s": null,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "querycap",
+      "ok": true,
+      "detail": "driver 'uvcvideo' card 'ZXProduct: RGBCamA22704522A6F00' bus 'usb-0000:00:14.0-1.1' version 6.14.11; video-capture and streaming both present",
+      "duration_s": null,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "get_fmt",
+      "ok": true,
+      "detail": "this handle started at 'MJPG' 1280x800 bytesperline=0 sizeimage=8192000",
+      "duration_s": null,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "set_fmt",
+      "ok": false,
+      "detail": "sizeimage 8192000 is past the 2097152 B per-buffer ceiling this command will map",
+      "duration_s": null,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "close",
+      "ok": true,
+      "detail": "fd 4 closed",
+      "duration_s": 0.00014804396778345108,
+      "errno": null,
+      "errno_name": null
+    }
+  ],
+  "cleanup": {
+    "attempted": true,
+    "ok": true,
+    "note": "the stream, the buffers, every mapping and /dev/video2 were released",
+    "steps": [
+      {
+        "step": "close",
+        "ok": true,
+        "detail": "fd 4 closed",
+        "duration_s": 0.00014804396778345108,
+        "errno": null,
+        "errno_name": null
+      }
+    ],
+    "recovery_guidance": null
+  },
+  "stream_duration_s": null,
+  "total_duration_s": 0.013546294008847326,
+  "errno": null,
+  "errno_name": null
+}

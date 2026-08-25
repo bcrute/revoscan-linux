@@ -1,0 +1,11 @@
+{
+  "comment": "Pinned identity of the EXTERNAL Revopoint 3DCamera SDK used as a temporary reference oracle. The SDK is deliberately NOT vendored here and is never downloaded at runtime; supply it via REVOPOINT_SDK_ROOT.",
+  "source_repository": "https://github.com/Revopoint/3DViewer",
+  "source_commit": "516ee9b64ed9a36f7db2b1303d4c9364e39ac8d7",
+  "sdk_version": "3.2.23",
+  "relative_root": "thirdparty/3DCamera",
+  "files": {
+    "include/3DCamera.hpp": "160c609a1ac1f4f3513ec79f7ef6ae890bad058ef620b93833dfa3888fed2cdb",
+    "linux/x64/lib3DCamera.so": "49e0865c7f9e130ddfde5948e658190143ffb8b21e9583877d14e3e17cdae3c4"
+  }
+}

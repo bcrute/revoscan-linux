@@ -1,0 +1,589 @@
+{
+  "mode": "v4l2-mmap-rgb-frame",
+  "status": "poll_timeout",
+  "succeeded": false,
+  "exit_code": 4,
+  "detail": "no buffer became ready within 8.0s of STREAMON (8.000s of it left for the one poll, waited 8.007s); not retrying",
+  "plan": {
+    "profile": "rgb-frame",
+    "role": "rgb",
+    "node_kind": "capture",
+    "expected_interface_driver": "uvcvideo",
+    "driver_detached": false,
+    "fourcc": "MJPG",
+    "width": 1280,
+    "height": 800,
+    "descriptor_frame_rate_hz": 30.0,
+    "frame_rate_measured": false,
+    "compressed": true,
+    "descriptor_max_video_frame_buffer_bytes": 2048000,
+    "artifact_name": "rgb-frame.jpg",
+    "measured_driver_sizeimage_bytes": 8192000,
+    "jpeg_inspection": "structural markers only; no pixel decode",
+    "jpeg_inspect_ceiling_bytes": 8192000,
+    "jpeg_inspect_module_default_ceiling_bytes": 2097152,
+    "pixels_decoded": false,
+    "colour_corrected": false,
+    "calibration_applied": false,
+    "requested_buffers": 4,
+    "min_accepted_buffers": 2,
+    "max_buffer_bytes": 8192000,
+    "max_total_mapped_bytes": 32768000,
+    "capture_deadline_s": 8.0,
+    "max_raw_artifact_bytes": 8192000,
+    "max_dequeues": 1,
+    "retries": 0,
+    "ioctls": {
+      "VIDIOC_QUERYCAP": "0x80685600",
+      "VIDIOC_G_FMT": "0xc0d05604",
+      "VIDIOC_S_FMT": "0xc0d05605",
+      "VIDIOC_REQBUFS": "0xc0145608",
+      "VIDIOC_QUERYBUF": "0xc0585609",
+      "VIDIOC_QBUF": "0xc058560f",
+      "VIDIOC_DQBUF": "0xc0585611",
+      "VIDIOC_STREAMON": "0x40045612",
+      "VIDIOC_STREAMOFF": "0x40045613"
+    }
+  },
+  "target": {
+    "serial": "EXAMPLESERIAL0001",
+    "sysfs_path": "/sys/bus/usb/devices/1-1.1",
+    "usb_path": "1-1.1",
+    "bus_number": 1,
+    "device_number": 42,
+    "role": "rgb",
+    "interface_number": 2,
+    "interface_string": "RGBCamEXAMPLESERIAL0001",
+    "interface_driver": "uvcvideo",
+    "v4l_index": 0,
+    "v4l_kind": "capture",
+    "v4l_name": "ZXProduct: RGBCamA22704522A6F00",
+    "node_name": "video2",
+    "node_path": "/dev/video2",
+    "rdev": 20738,
+    "rdev_major_minor": "81:2",
+    "inode": 3119,
+    "mode": "0o660",
+    "resolved_by": "USB interface string descriptor prefix for role 'rgb' plus V4L2 index 0 (capture); the node number was never assumed"
+  },
+  "capability": {
+    "driver": "uvcvideo",
+    "card": "ZXProduct: RGBCamA22704522A6F00",
+    "bus_info": "usb-0000:00:14.0-1.1",
+    "version": 396811,
+    "version_text": "6.14.11",
+    "capabilities": "0x84a00001",
+    "device_caps": "0x04200001",
+    "effective_capabilities": "0x04200001",
+    "capability_names": [
+      "V4L2_CAP_VIDEO_CAPTURE",
+      "V4L2_CAP_META_CAPTURE",
+      "V4L2_CAP_STREAMING",
+      "V4L2_CAP_DEVICE_CAPS"
+    ],
+    "device_capability_names": [
+      "V4L2_CAP_VIDEO_CAPTURE",
+      "V4L2_CAP_STREAMING"
+    ],
+    "required_capabilities": [
+      "V4L2_CAP_VIDEO_CAPTURE",
+      "V4L2_CAP_STREAMING"
+    ],
+    "missing_required": []
+  },
+  "initial_format": {
+    "width": 1280,
+    "height": 800,
+    "pixelformat": "0x47504a4d",
+    "fourcc": "MJPG",
+    "field": 1,
+    "field_name": "V4L2_FIELD_NONE",
+    "bytesperline": 0,
+    "sizeimage": 8192000,
+    "colorspace": 8,
+    "priv": 4276996862,
+    "flags": 0,
+    "ycbcr_enc": 1,
+    "quantization": 0,
+    "xfer_func": 1,
+    "row_padded": false,
+    "tight_frame_bytes": 2048000
+  },
+  "negotiated_format": {
+    "width": 1280,
+    "height": 800,
+    "pixelformat": "0x47504a4d",
+    "fourcc": "MJPG",
+    "field": 1,
+    "field_name": "V4L2_FIELD_NONE",
+    "bytesperline": 0,
+    "sizeimage": 8192000,
+    "colorspace": 8,
+    "priv": 4276996862,
+    "flags": 0,
+    "ycbcr_enc": 1,
+    "quantization": 0,
+    "xfer_func": 1,
+    "row_padded": false,
+    "tight_frame_bytes": 2048000
+  },
+  "buffers": {
+    "count": 4,
+    "buf_type": 1,
+    "memory": 1,
+    "capabilities": "0x00000017",
+    "requested": 4,
+    "accepted_range": [
+      2,
+      4
+    ]
+  },
+  "queried_buffers": [
+    {
+      "index": 0,
+      "buf_type": 1,
+      "bytesused": 0,
+      "flags": "0x00012000",
+      "flag_names": [],
+      "error_flag": false,
+      "field": 0,
+      "field_name": "V4L2_FIELD_ANY",
+      "timestamp_sec": 0,
+      "timestamp_usec": 0,
+      "timestamp_ns": 0,
+      "timestamp_type": "V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC",
+      "timestamp_source": "V4L2_BUF_FLAG_TSTAMP_SRC_SOE",
+      "timecode": {
+        "type": 0,
+        "flags": 0,
+        "frames": 0,
+        "seconds": 0,
+        "minutes": 0,
+        "hours": 0,
+        "userbits": "00000000"
+      },
+      "sequence": 0,
+      "memory": 1,
+      "offset": 0,
+      "length": 8192000
+    },
+    {
+      "index": 1,
+      "buf_type": 1,
+      "bytesused": 0,
+      "flags": "0x00012000",
+      "flag_names": [],
+      "error_flag": false,
+      "field": 0,
+      "field_name": "V4L2_FIELD_ANY",
+      "timestamp_sec": 0,
+      "timestamp_usec": 0,
+      "timestamp_ns": 0,
+      "timestamp_type": "V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC",
+      "timestamp_source": "V4L2_BUF_FLAG_TSTAMP_SRC_SOE",
+      "timecode": {
+        "type": 0,
+        "flags": 0,
+        "frames": 0,
+        "seconds": 0,
+        "minutes": 0,
+        "hours": 0,
+        "userbits": "00000000"
+      },
+      "sequence": 0,
+      "memory": 1,
+      "offset": 32768,
+      "length": 8192000
+    },
+    {
+      "index": 2,
+      "buf_type": 1,
+      "bytesused": 0,
+      "flags": "0x00012000",
+      "flag_names": [],
+      "error_flag": false,
+      "field": 0,
+      "field_name": "V4L2_FIELD_ANY",
+      "timestamp_sec": 0,
+      "timestamp_usec": 0,
+      "timestamp_ns": 0,
+      "timestamp_type": "V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC",
+      "timestamp_source": "V4L2_BUF_FLAG_TSTAMP_SRC_SOE",
+      "timecode": {
+        "type": 0,
+        "flags": 0,
+        "frames": 0,
+        "seconds": 0,
+        "minutes": 0,
+        "hours": 0,
+        "userbits": "00000000"
+      },
+      "sequence": 0,
+      "memory": 1,
+      "offset": 65536,
+      "length": 8192000
+    },
+    {
+      "index": 3,
+      "buf_type": 1,
+      "bytesused": 0,
+      "flags": "0x00012000",
+      "flag_names": [],
+      "error_flag": false,
+      "field": 0,
+      "field_name": "V4L2_FIELD_ANY",
+      "timestamp_sec": 0,
+      "timestamp_usec": 0,
+      "timestamp_ns": 0,
+      "timestamp_type": "V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC",
+      "timestamp_source": "V4L2_BUF_FLAG_TSTAMP_SRC_SOE",
+      "timecode": {
+        "type": 0,
+        "flags": 0,
+        "frames": 0,
+        "seconds": 0,
+        "minutes": 0,
+        "hours": 0,
+        "userbits": "00000000"
+      },
+      "sequence": 0,
+      "memory": 1,
+      "offset": 98304,
+      "length": 8192000
+    }
+  ],
+  "mappings": [
+    {
+      "index": 0,
+      "offset": 0,
+      "requested_length": 8192000,
+      "mapped_length": 8192000
+    },
+    {
+      "index": 1,
+      "offset": 32768,
+      "requested_length": 8192000,
+      "mapped_length": 8192000
+    },
+    {
+      "index": 2,
+      "offset": 65536,
+      "requested_length": 8192000,
+      "mapped_length": 8192000
+    },
+    {
+      "index": 3,
+      "offset": 98304,
+      "requested_length": 8192000,
+      "mapped_length": 8192000
+    }
+  ],
+  "poll": {
+    "deadline_s": 8.0,
+    "timeout_s": 7.999990573036484,
+    "waited_s": 8.007111140992492,
+    "revents": "0x0000",
+    "event_names": [],
+    "timed_out": true,
+    "failed": false,
+    "calls": 1,
+    "restarts": 0
+  },
+  "dequeued_buffer": null,
+  "frame_bytes": null,
+  "frame_evidence": null,
+  "artifacts": {
+    "attempted": false,
+    "ok": true,
+    "note": "no bytes were dequeued (poll_timeout), so no frame file was written",
+    "directory": "/tmp/scanner-011-evidence/artifact",
+    "files": [],
+    "raw_ceiling_bytes": 8192000
+  },
+  "steps": [
+    {
+      "step": "resolve_node",
+      "ok": true,
+      "detail": "/dev/video2 is the V4L2 index-0 capture node of the rgb function on interface 2 ('RGBCamEXAMPLESERIAL0001'), bound to uvcvideo",
+      "duration_s": null,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "open",
+      "ok": true,
+      "detail": "opened /dev/video2 O_RDWR|O_NONBLOCK|O_CLOEXEC as fd 4",
+      "duration_s": null,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "querycap",
+      "ok": true,
+      "detail": "driver 'uvcvideo' card 'ZXProduct: RGBCamA22704522A6F00' bus 'usb-0000:00:14.0-1.1' version 6.14.11; video-capture and streaming both present",
+      "duration_s": null,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "get_fmt",
+      "ok": true,
+      "detail": "this handle started at 'MJPG' 1280x800 bytesperline=0 sizeimage=8192000",
+      "duration_s": null,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "set_fmt",
+      "ok": true,
+      "detail": "negotiated 'MJPG' 1280x800 bytesperline=0 sizeimage=8192000 (a compressed bitstream; bytesperline 0 carries no row stride and no packing claim is made about it)",
+      "duration_s": null,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "reqbufs",
+      "ok": true,
+      "detail": "4 MMAP buffers allocated (requested 4)",
+      "duration_s": null,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "querybuf",
+      "ok": true,
+      "detail": "buffer 0: offset 0 length 8192000 flags 0x00012000",
+      "duration_s": null,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "mmap",
+      "ok": true,
+      "detail": "buffer 0 mapped read/write shared: 8192000 B at offset 0",
+      "duration_s": 0.00032128096790984273,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "querybuf",
+      "ok": true,
+      "detail": "buffer 1: offset 32768 length 8192000 flags 0x00012000",
+      "duration_s": null,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "mmap",
+      "ok": true,
+      "detail": "buffer 1 mapped read/write shared: 8192000 B at offset 32768",
+      "duration_s": 0.00030258402694016695,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "querybuf",
+      "ok": true,
+      "detail": "buffer 2: offset 65536 length 8192000 flags 0x00012000",
+      "duration_s": null,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "mmap",
+      "ok": true,
+      "detail": "buffer 2 mapped read/write shared: 8192000 B at offset 65536",
+      "duration_s": 0.000280987995211035,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "querybuf",
+      "ok": true,
+      "detail": "buffer 3: offset 98304 length 8192000 flags 0x00012000",
+      "duration_s": null,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "mmap",
+      "ok": true,
+      "detail": "buffer 3 mapped read/write shared: 8192000 B at offset 98304",
+      "duration_s": 0.0002834870247170329,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "qbuf",
+      "ok": true,
+      "detail": "buffer 0 queued",
+      "duration_s": null,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "qbuf",
+      "ok": true,
+      "detail": "buffer 1 queued",
+      "duration_s": null,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "qbuf",
+      "ok": true,
+      "detail": "buffer 2 queued",
+      "duration_s": null,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "qbuf",
+      "ok": true,
+      "detail": "buffer 3 queued",
+      "duration_s": null,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "streamon",
+      "ok": true,
+      "detail": "streaming started; the 8.0s deadline starts now",
+      "duration_s": 0.0016629710444249213,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "poll",
+      "ok": false,
+      "detail": "no buffer became ready within 8.0s of STREAMON (8.000s of it left for the one poll, waited 8.007s); not retrying",
+      "duration_s": 8.007111140992492,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "streamoff",
+      "ok": true,
+      "detail": "VIDIOC_STREAMOFF succeeded; the queue is stopped",
+      "duration_s": 0.0006685740081593394,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "munmap",
+      "ok": true,
+      "detail": "buffer 0 unmapped (8192000 B at 0)",
+      "duration_s": 0.0002994239912368357,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "munmap",
+      "ok": true,
+      "detail": "buffer 1 unmapped (8192000 B at 32768)",
+      "duration_s": 0.0002570749493315816,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "munmap",
+      "ok": true,
+      "detail": "buffer 2 unmapped (8192000 B at 65536)",
+      "duration_s": 0.00026132201310247183,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "munmap",
+      "ok": true,
+      "detail": "buffer 3 unmapped (8192000 B at 98304)",
+      "duration_s": 0.0002696980373002589,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "release_buffers",
+      "ok": true,
+      "detail": "VIDIOC_REQBUFS(count=0) succeeded; the buffer queue is freed",
+      "duration_s": 0.0009281449601985514,
+      "errno": null,
+      "errno_name": null
+    },
+    {
+      "step": "close",
+      "ok": true,
+      "detail": "fd 4 closed",
+      "duration_s": 7.840001489967108e-05,
+      "errno": null,
+      "errno_name": null
+    }
+  ],
+  "cleanup": {
+    "attempted": true,
+    "ok": true,
+    "note": "the stream, the buffers, every mapping and /dev/video2 were released",
+    "steps": [
+      {
+        "step": "streamoff",
+        "ok": true,
+        "detail": "VIDIOC_STREAMOFF succeeded; the queue is stopped",
+        "duration_s": 0.0006685740081593394,
+        "errno": null,
+        "errno_name": null
+      },
+      {
+        "step": "munmap",
+        "ok": true,
+        "detail": "buffer 0 unmapped (8192000 B at 0)",
+        "duration_s": 0.0002994239912368357,
+        "errno": null,
+        "errno_name": null
+      },
+      {
+        "step": "munmap",
+        "ok": true,
+        "detail": "buffer 1 unmapped (8192000 B at 32768)",
+        "duration_s": 0.0002570749493315816,
+        "errno": null,
+        "errno_name": null
+      },
+      {
+        "step": "munmap",
+        "ok": true,
+        "detail": "buffer 2 unmapped (8192000 B at 65536)",
+        "duration_s": 0.00026132201310247183,
+        "errno": null,
+        "errno_name": null
+      },
+      {
+        "step": "munmap",
+        "ok": true,
+        "detail": "buffer 3 unmapped (8192000 B at 98304)",
+        "duration_s": 0.0002696980373002589,
+        "errno": null,
+        "errno_name": null
+      },
+      {
+        "step": "release_buffers",
+        "ok": true,
+        "detail": "VIDIOC_REQBUFS(count=0) succeeded; the buffer queue is freed",
+        "duration_s": 0.0009281449601985514,
+        "errno": null,
+        "errno_name": null
+      },
+      {
+        "step": "close",
+        "ok": true,
+        "detail": "fd 4 closed",
+        "duration_s": 7.840001489967108e-05,
+        "errno": null,
+        "errno_name": null
+      }
+    ],
+    "recovery_guidance": null
+  },
+  "stream_duration_s": 8.011765478993766,
+  "total_duration_s": 8.026991243998054,
+  "errno": null,
+  "errno_name": null
+}

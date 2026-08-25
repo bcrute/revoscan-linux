@@ -1,0 +1,17 @@
+%YAML:1.0
+---
+deviceID: "EXAMPLESERIAL0002"
+width: "640"
+height: "400"
+cameraMatrixL: !!opencv-matrix
+   rows: 3
+   cols: 3
+   dt: d
+   data: [ 8.9489492830331039e+02, 0., 3.1287254381200142e+02, 0.,
+       8.9704874806821408e+02, 1.9028625736976775e+02, 0., 0., 1. ]
+distCoeffL: !!opencv-matrix
+   rows: 5
+   cols: 1
+   dt: d
+   data: [ 2.6065767471498635e-01, -4.2479258815792187e-01,
+       -2.0848730323790488e-03, -7.1869279230

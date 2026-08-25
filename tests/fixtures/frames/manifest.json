@@ -1,0 +1,104 @@
+{
+  "aggregate": {
+    "frames": 9,
+    "non_zero_samples": 472809,
+    "samples": 2304000,
+    "zero_fraction": 0.794788
+  },
+  "frames": [
+    {
+      "bytes": 512000,
+      "max_code": 58154,
+      "min_non_zero_code": 81,
+      "name": "ab_",
+      "non_zero_samples": 6231,
+      "samples": 256000,
+      "sha256": "9fcf14e78a2d7bc72ce6efb5926f97ec2551132dacab725a370ce3a304ad2cca",
+      "zero_fraction": 0.97566
+    },
+    {
+      "bytes": 512000,
+      "max_code": 50913,
+      "min_non_zero_code": 84,
+      "name": "base_4",
+      "non_zero_samples": 89070,
+      "samples": 256000,
+      "sha256": "ad0aea913318848b5bf82911ff28c7d4b7c8386934f6b3e771b3ef9edfc5642f",
+      "zero_fraction": 0.65207
+    },
+    {
+      "bytes": 512000,
+      "max_code": 60695,
+      "min_non_zero_code": 80,
+      "name": "depth_after_off",
+      "non_zero_samples": 6244,
+      "samples": 256000,
+      "sha256": "793ab4fff21c5e1ce98e4cac4fcdf43bfca553aaecb793006036b0e3b2b494af",
+      "zero_fraction": 0.975609
+    },
+    {
+      "bytes": 512000,
+      "max_code": 62150,
+      "min_non_zero_code": 17,
+      "name": "depthframe",
+      "non_zero_samples": 11042,
+      "samples": 256000,
+      "sha256": "6b135e5193a785074f4445e299474fbfb792fc46f111e7dead559b4cbdca12a0",
+      "zero_fraction": 0.956867
+    },
+    {
+      "bytes": 512000,
+      "max_code": 62213,
+      "min_non_zero_code": 21,
+      "name": "depthframe2",
+      "non_zero_samples": 12249,
+      "samples": 256000,
+      "sha256": "24aec75c13732739f00794abe95fcf24bed8bb6818c6a232bd217341859d52ce",
+      "zero_fraction": 0.952152
+    },
+    {
+      "bytes": 512000,
+      "max_code": 32531,
+      "min_non_zero_code": 25,
+      "name": "final_test",
+      "non_zero_samples": 93701,
+      "samples": 256000,
+      "sha256": "de2897d87cd9773d63626df2b8df05e9d2703d547ec44a11fc04f4ad34f7f24b",
+      "zero_fraction": 0.63398
+    },
+    {
+      "bytes": 512000,
+      "max_code": 58856,
+      "min_non_zero_code": 328,
+      "name": "post_replug",
+      "non_zero_samples": 82426,
+      "samples": 256000,
+      "sha256": "97ade34e86c88b4893f119f5ec2e8eef2b6c286be85bd696f4638a2b0c0fe631",
+      "zero_fraction": 0.678023
+    },
+    {
+      "bytes": 512000,
+      "max_code": 54819,
+      "min_non_zero_code": 85,
+      "name": "x_a4",
+      "non_zero_samples": 85956,
+      "samples": 256000,
+      "sha256": "c890d38b33c32a61070679dea406d3a9ecb6be8a1d165bc630f9ee2135ab387e",
+      "zero_fraction": 0.664234
+    },
+    {
+      "bytes": 512000,
+      "max_code": 47123,
+      "min_non_zero_code": 85,
+      "name": "x_c4",
+      "non_zero_samples": 85890,
+      "samples": 256000,
+      "sha256": "05b8065ef085c34bc03a76410f351a6ede861892970639f22a222f99219da825",
+      "zero_fraction": 0.664492
+    }
+  ],
+  "not_claimed": "No distance in these frames has been metrically validated. A sample of 0 means no return, not zero distance. The depth scale's physical unit is unknown.",
+  "schema_version": 1,
+  "what": "Nine raw depth frames captured from the Revopoint MINI over V4L2 by this project's own transport. Each is one complete 'Y16 ' 640x400 frame of exactly 512000 bytes, little-endian uint16, as dequeued from the kernel.",
+  "why_committed": "These are irreplaceable without the physical device, and every quantitative claim in docs/depth-to-pointcloud.md is computed from them. They previously lived only in an ephemeral scratchpad, so the real-frame tests skipped on any fresh checkout and those claims could not be reproduced."
+}

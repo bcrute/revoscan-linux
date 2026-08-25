@@ -1,0 +1,332 @@
+{
+  "THE_RESULT": {
+    "ground_truth": {
+      "instrument": "calipers",
+      "object": "bare aluminium can",
+      "uncertainty": 0.05,
+      "value": 58.0
+    },
+    "headline": "The depth scale is millimetres, and the accuracy is distance-dependent with a sweet spot near 120mm.",
+    "measurements": [
+      {
+        "diameter": 56.689,
+        "error": -1.311,
+        "n": 7,
+        "relative": -0.0226,
+        "standoff": 98.1
+      },
+      {
+        "diameter": 57.705,
+        "error": -0.295,
+        "n": 3,
+        "relative": -0.0051,
+        "standoff": 122.7
+      },
+      {
+        "diameter": 57.445,
+        "error": -0.555,
+        "n": 3,
+        "relative": -0.0096,
+        "standoff": 244.1
+      }
+    ],
+    "not_monotonic": "The error has a MINIMUM near 122mm and worsens on both sides. That rules out the two hypotheses tested: a constant depth-scale error would be a fixed fraction at every distance, and a lens-distortion or principal-point term would vary monotonically with field angle. A minimum near the middle of the vendor's stated 100-200mm working range is what a factory calibration optimised for a nominal distance would produce.",
+    "pipeline_control": "A synthetic cylinder of the same geometry and tilt recovers 58.000 +-0.0006 at ALL THREE standoffs, so none of the above is an artifact of fitting at different ranges.",
+    "still_open": [
+      "The surface was bare specular aluminium throughout. The spray A/B has not been run, so how much of this is optical rather than geometric is unknown.",
+      "A structured residual persists at every distance (shear correlation -0.14 to -0.25). Its cause is unidentified; the indicator names no cause by design.",
+      "Only one object, one tilt, one position in the frame."
+    ]
+  },
+  "capture_reliability": {
+    "finding": "Back-to-back captures fail. The device needs recovery time between them, and without it the kernel flags the buffer V4L2_BUF_FLAG_ERROR.",
+    "measured": {
+      "fifteen_second_gap": "3/3",
+      "five_second_gap": "3/3",
+      "no_gap": "1/3 complete"
+    },
+    "not_the_usb_link": "Distinct from the hub problem. On the direct connection there were ZERO disconnects and the short frames continued at the same rate until a gap was introduced, so the two faults are independent.",
+    "recommendation": "Leave at least 5 seconds between captures.",
+    "truncation": "Failures are never partial-random: every short frame is exactly 358402 bytes, which is 280 of 400 rows at 1280 bytes per line. The same truncation point every time."
+  },
+  "cause_analysis": {
+    "conclusion": "A cx error produces a nearly constant relative bias at every distance, because the shear scales x with z and the diameter is measured in x while z scales too. The real can's error changes by a factor of 4.5 between the two distances. The near reading (-1.311) happens to match a ~20px cx error (-1.366) almost exactly, but the far reading (-0.295) is nowhere near what that same error would give (-1.346). So a constant cx error is NOT the dominant cause, and the earlier reading of the shear coefficient as evidence about cx was too quick.",
+    "controls_first": {
+      "clean_cylinder_any_tilt": "shear correlation -0.028 to +0.0005 at 0, 6.4 and 12 degrees of tilt, at both standoffs - well under the 0.12 threshold. Tilt does NOT fake a shear signal.",
+      "pipeline_has_no_distance_bias": "the synthetic cylinder recovers 58.000-58.003 at BOTH standoffs, so the distance dependence in the real data is a property of the sensor and not of this code."
+    },
+    "method": "Rendered a clean cylinder matching the real can's geometry and tilt at both real standoffs, deprojected with a deliberately wrong cx, and compared how the diameter bias varies with distance against what the real can does.",
+    "question": "Is the distance-dependent diameter error a principal-point (cx) error?",
+    "signature": {
+      "a_cx_error_is_nearly_distance_INDEPENDENT": {
+        "dcx_20px": {
+          "at_122.6": -1.346,
+          "at_98.1": -1.366
+        },
+        "dcx_277px": {
+          "at_122.6": -16.104,
+          "at_98.1": -16.371
+        },
+        "dcx_60px": {
+          "at_122.6": -3.946,
+          "at_98.1": -4.006
+        }
+      },
+      "the_real_can_is_strongly_distance_DEPENDENT": {
+        "at_122.6": -0.295,
+        "at_98.1": -1.311
+      }
+    },
+    "what_remains": "The structured residual is real - it is not tilt, not the pipeline, and not link quality. The shear indicator identifies no cause by design. Unmodelled lens distortion remains the leading hypothesis because the deprojection is an ideal pinhole and the can subtends a wider field angle when nearer. A third distance is needed to test it."
+  },
+  "conditions": {
+    "approximate_distance": 120,
+    "capture_path": "scanner3d depth-frame --execute-depth-frame-capture",
+    "derived_from_data": {
+      "axis_centre_depth": 151.6,
+      "axis_tilt_from_frame_vertical_degrees": 6.4,
+      "nearest_surface": 122.7,
+      "tilt_note": "Consistent across all three frames. Most likely the raised scanner head looking down rather than the can leaning. Harmless here: it tips the axis within the y-z plane, which stays perpendicular to x, so shear visibility stayed at 0.994."
+    },
+    "distance_note": "The owner's 120 is a rough desk measurement against a raised scanner head and was NOT used in any calculation. The fit reads the radius off the point cloud and the scanner supplies every z, so an inaccurate standoff estimate cannot bias the diameter.",
+    "scanner_serial": "EXAMPLESERIAL0001",
+    "surface": "BARE, untreated, specular aluminium - deliberately unsprayed"
+  },
+  "frames": [
+    {
+      "bytes": 512000,
+      "name": "can-shiny-120-1",
+      "non_zero_samples": 102343,
+      "sha256": "17de783927db16daf2951b2a6c511c597f323d170130ac92ec83898bf3f47e49",
+      "yield": 0.399777
+    },
+    {
+      "bytes": 512000,
+      "name": "can-shiny-120-2",
+      "non_zero_samples": 102871,
+      "sha256": "94bcba73c1fd17eb5df817350e48461eaefce947c11a25907a09d0a05270f834",
+      "yield": 0.40184
+    },
+    {
+      "bytes": 512000,
+      "name": "can-shiny-120-3",
+      "non_zero_samples": 102900,
+      "sha256": "378f5e2540451b59d2099e29fc01019d982d8eca05caddf833c8f85df55e311c",
+      "yield": 0.401953
+    },
+    {
+      "bytes": 512000,
+      "name": "can-shiny-098-1",
+      "non_zero_samples": 66891,
+      "sha256": "7ee3565acd51d696a91d48b8088348a2b6bf8d8885d5d3d5e03dfe1c3280ca93",
+      "yield": 0.261293
+    },
+    {
+      "bytes": 512000,
+      "name": "can-shiny-098-2",
+      "non_zero_samples": 66872,
+      "sha256": "c38341b0397f5178bca225ff95b8db9c548eaac4b3ddd3c7f2dcc036fa349566",
+      "yield": 0.261219
+    },
+    {
+      "bytes": 512000,
+      "name": "can-shiny-098-3",
+      "non_zero_samples": 67125,
+      "sha256": "8f0ebf4b12fd8dd56b5dcb635ac560635a6c20059611310c036a8c3db56b1481",
+      "yield": 0.262207
+    },
+    {
+      "bytes": 512000,
+      "name": "can-shiny-098-4",
+      "non_zero_samples": 66973,
+      "sha256": "5439d5a08a15a2f078cab20873ed80658f51b7da7f2499535c71a125ec9c2f3c",
+      "yield": 0.261613
+    },
+    {
+      "bytes": 512000,
+      "name": "can-shiny-098-5",
+      "non_zero_samples": 66967,
+      "sha256": "6aca1950d65334e622a7190af226bfcced2ca700f7d7c2be839994b81848bbab",
+      "yield": 0.26159
+    },
+    {
+      "bytes": 512000,
+      "name": "can-shiny-244-1",
+      "non_zero_samples": 59008,
+      "sha256": "0228abc4c3fb9e41e99ed05b752f5dab4c5061c3c841d0a1fd74790837872328",
+      "yield": 0.2305
+    },
+    {
+      "bytes": 512000,
+      "name": "can-shiny-244-2",
+      "non_zero_samples": 59030,
+      "sha256": "81127dfc10b0df8978a25fb754a40eb6e1bf38ca6fb48ca5dbe1cc63460477bb",
+      "yield": 0.230586
+    },
+    {
+      "bytes": 512000,
+      "name": "can-shiny-244-3",
+      "non_zero_samples": 58994,
+      "sha256": "76e46d97f50460b140aa579393555e9ee07093647cbe48e99e9d866668a7b5ee",
+      "yield": 0.230445
+    },
+    {
+      "bytes": 512000,
+      "name": "can-sprayed-095-1",
+      "non_zero_samples": 2157,
+      "sha256": "67ac0dbc8ec4dc6d1c53acf8607fa8e81deb38f011acf2841bd50bd92805c98e",
+      "yield": 0.008426
+    },
+    {
+      "bytes": 512000,
+      "name": "can-sprayed-242-1",
+      "non_zero_samples": 72021,
+      "sha256": "d3ffee6d2c98fc2431e4ca81dae09a94385fa48117f8192ba3bf23cd0cea0549",
+      "yield": 0.281332
+    },
+    {
+      "bytes": 512000,
+      "name": "can-sprayed-242-2",
+      "non_zero_samples": 72037,
+      "sha256": "45256a68b0b01650ea27c0fe591b80a05a7804a178703ba12fcd274391187f30",
+      "yield": 0.281395
+    },
+    {
+      "bytes": 512000,
+      "name": "can-sprayed-242-3",
+      "non_zero_samples": 72017,
+      "sha256": "43f1246d55a5024249e3913c29a4f7090f74c2d79a23c6e07beb967c08fdfc08",
+      "yield": 0.281316
+    }
+  ],
+  "measured_result": {
+    "error_vs_calipers": -0.295,
+    "fitted_diameters": [
+      57.68,
+      57.724,
+      57.711
+    ],
+    "mean": 57.705,
+    "relative_error": -0.0051,
+    "shear_coefficient_mean": -0.026,
+    "shear_correlation": [
+      -0.1941,
+      -0.1689,
+      -0.1401
+    ],
+    "spread": 0.044,
+    "verdict": "inconclusive",
+    "verdict_reason": "A shear was detected, so the harness declines to attribute the -0.295 to scale rather than to the shear. That is the correct outcome, not an evasion."
+  },
+  "schema_version": 1,
+  "second_distance": {
+    "clipping": "none - zero returns on either frame edge, so the silhouette is intact",
+    "derived_nearest_surface": 98.0,
+    "direct_connection_control": {
+      "conclusion": "A 0.048 difference, well inside the 0.155 frame-to-frame spread. Link quality did NOT bias the measurement, so the hub-era frames are trustworthy.",
+      "direct_mean": 56.689,
+      "direct_n": 7,
+      "direct_spread": 0.155,
+      "hub_mean": 56.641,
+      "hub_n": 2,
+      "what": "The first two frames at this distance were captured through a USB hub that was dropping the link; the rest after plugging straight into the root port. Same can, unmoved."
+    },
+    "error_vs_calipers": -1.368,
+    "finding": "The error is FOUR AND A HALF TIMES worse at 98 than at 122.7 (-1.368 against -0.295), while remaining highly repeatable within each distance (spreads 0.017 and 0.044). A distance-dependent error of that shape is not a depth-scale error, which would be a constant fraction, and it is not the detected shear, which grows with z rather than shrinking. Unmodelled lens distortion is the leading explanation: the deprojection is an ideal pinhole, cx sits 6.6% across the frame so a centred object is already ~17 degrees off-axis, and at 98 the can subtends +-16.5 degrees about that, putting its silhouette deep in the periphery.",
+    "fitted_diameters": [
+      56.632,
+      56.649
+    ],
+    "frames_attempted": 9,
+    "frames_kept": 5,
+    "owner_estimate": 95,
+    "relative_error": -0.0236,
+    "spread": 0.017,
+    "surface": "BARE, untreated aluminium - same can, unmoved except in depth",
+    "yield": 0.261,
+    "yield_note": "Yield FELL from 40% at 122.7 to 26% at 98. Closer is not better on this sensor."
+  },
+  "spray_ab_at_242": {
+    "bare": {
+      "diameter": 57.445,
+      "error": -0.555,
+      "residual_rms": 0.216,
+      "shear_correlation": -0.21,
+      "standoff": 244.1,
+      "yield": 0.231
+    },
+    "saturation_confirmed": "The sprayed can returned 0.8% at 95mm and 28.1% at 241.5mm. Illumination falls off with distance squared, so restoring the returns by backing off is exactly what saturation predicts. The coating is fine; the close range was overexposing.",
+    "sprayed": {
+      "diameter": 57.716,
+      "error": -0.284,
+      "residual_rms": 0.098,
+      "shear_correlation": 0.13,
+      "spread": 0.018,
+      "standoff": 241.5,
+      "yield": 0.281
+    },
+    "spraying_improved_everything_at_this_range": {
+      "error": "-0.96% -> -0.49%, halved",
+      "residual_rms": "0.216 -> 0.098, halved",
+      "yield": "23.1% -> 28.1%"
+    },
+    "the_shear_sign_FLIPPED": "-0.21 bare against +0.13 sprayed, on the same object at the same distance and pose. A geometric shear from a wrong principal point cannot change sign when you paint the target - cx is a property of the lens. So the structured residual measured on bare aluminium was substantially an OPTICAL artifact of the specular surface, not geometry. Earlier readings of that indicator as evidence about cx are weakened further.",
+    "why_bare_specular_biases_a_fit": "On a curved specular surface the returns that survive are not uniformly distributed around the arc: the specular lobe throws light away from the camera over part of the surface, so the surviving points are biased toward particular incidence angles. That is a systematic, surface-dependent sampling bias - exactly the sort of thing that produces a structured residual with no geometric cause."
+  },
+  "spray_ab_at_95": {
+    "alternative_not_excluded": "A very thick or subsurface-scattering coat would also degrade returns.",
+    "bare": {
+      "diameter": 56.689,
+      "spread": 0.155,
+      "yield": 0.262
+    },
+    "leading_explanation": "Overexposure. A bright matte white coating at close range returns far more light than bare specular metal did, the sensor saturates, and the structured-light fringe decode fails. What survives is scattered speckle rather than surface.",
+    "prediction_to_test": "If it is saturation, moving the sprayed can further away should restore the returns, because illumination falls off with distance squared. If the yield stays collapsed at 240mm the cause is something else - the coating itself.",
+    "result": "THE SPRAY MADE IT DRAMATICALLY WORSE AT THIS DISTANCE, not better.",
+    "sprayed": {
+      "diameter": 26.874,
+      "spread": 5.251,
+      "yield": 0.008
+    },
+    "the_can_is_still_there": "The surviving returns sit at z 97.8-111.7, exactly the can's distance, and occupy the same columns as the bare capture. This is not a framing or positioning error - the surface simply stopped returning coherent data.",
+    "why_the_scanner_cannot_adapt": "id_msg_cam_get_auto_expo_mode reads 0 on this unit - AUTOMATIC EXPOSURE IS OFF - and id_msg_cam_get_exposure_time is fixed at 20000. So the scanner cannot compensate for a much brighter target. This is the first concrete cost of that firmware finding, which until now was only a curiosity.",
+    "yield_collapse": "26.2% -> 0.84%, a 33-fold drop. Four frames, all complete captures."
+  },
+  "target": {
+    "instrument": "digital calipers",
+    "measured_by": "owner",
+    "measured_diameter": 58.0,
+    "measurement_uncertainty": 0.05,
+    "note": "The can body measures a consistent 58 around the middle. The top and bottom are flanged and stand proud of the body, but at this distance they fall outside the vertical field of view and return nothing, so no cropping was applied.",
+    "object": "aluminium drink can, standing upright"
+  },
+  "third_distance": {
+    "capture_note": "4 of 4 complete once a 5-second gap was left between captures.",
+    "derived_standoff": 244.1,
+    "error_vs_calipers": -0.555,
+    "fitted_diameters_cropped": [
+      57.438,
+      57.438,
+      57.449
+    ],
+    "flanges": "At this range the whole can is in view. The axial residual profile shows a smooth SYMMETRIC bow - about +0.12 at both ends against -0.07 in the middle - rather than the sharp step a flange alone would give. cy sits near mid-frame, so the can's top and bottom are equally off-axis, which is the signature of radial distortion about the principal point. Cropping to |axial| < 35 changes the diameter by only 0.01-0.03, so the flanges are not the dominant term.",
+    "frames_attempted": 4,
+    "frames_kept": 3,
+    "mean": 57.445,
+    "owner_estimate": 240,
+    "relative_error": -0.0096,
+    "spread": 0.017,
+    "yield": 0.231
+  },
+  "what": "Depth frames of a drink can captured for METRIC VALIDATION. Unlike the frames in tests/fixtures/frames/, these have an independently measured ground truth.",
+  "what_this_does_NOT_establish": [
+    "Whether the residual -0.295 is a scale error or the detected shear. One view cannot separate them, which is why the verdict is inconclusive.",
+    "Anything about distances other than ~120.",
+    "Any distortion model. The deprojection is an ideal pinhole."
+  ],
+  "what_this_establishes": [
+    "The depth scale is MILLIMETRES. 57.7 against 58.0 rules out any other unit by orders of magnitude. That scalar was unknown for the entire prior life of this project.",
+    "The factory cx near 42 is approximately right. A shear was detected but its coefficient is about -0.026, where cx belonging at the frame centre would give -0.309 - twelve times larger. The off-centre principal point is a real property of the sensor.",
+    "A bare specular surface is not a blocker: 40% yield, the highest of any frame in this repository, and a frame-to-frame spread of 0.044."
+  ]
+}

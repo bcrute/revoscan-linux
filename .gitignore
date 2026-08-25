@@ -1,0 +1,25 @@
+__pycache__/
+*.py[cod]
+.venv/
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# The vendor SDK writes a tracksData directory into its CWD at runtime. On
+# Linux it also produces the literal name 'tracksData\' - a Windows path
+# separator taken as part of the filename - so the pattern has to cover both
+# spellings. A trailing '*' does that; an escaped backslash would not, because
+# ruff reads this file with a glob engine that rejects the escape git requires.
+tracksData*/
+
+# Stray compiler output from building reference helpers.
+a.out
+
+# Multi-agent coordination scaffolding: internal process state, not part of the
+# software, and it names a specific development unit throughout.
+.coordination/
