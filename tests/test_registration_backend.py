@@ -175,6 +175,11 @@ class _CorrespondenceStub:
     def k_nearest_neighbors(self, points: Sequence[Point], k: int) -> list[tuple[int, ...]]:
         return self._real.k_nearest_neighbors(points, k)
 
+    def k_nearest_between(
+        self, queries: Sequence[Point], targets: Sequence[Point], *, k: int
+    ) -> list[tuple[int, ...]]:
+        return self._real.k_nearest_between(queries, targets, k=k)
+
     def nearest_neighbors(self, queries, target, *, gate):
         if not target:
             return [None for _ in queries]

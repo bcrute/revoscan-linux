@@ -602,6 +602,204 @@ def test_k_nearest_neighbors_bad_k_raises_identically(backend_name: str, k: int)
         backend.k_nearest_neighbors(points, k)
 
 
+# --- k_nearest_between agreement (cross-set: queries against a DIFFERENT cloud) -----------
+
+
+@pytest.mark.parametrize("backend_name", ACCELERATED_PARAMS)
+@pytest.mark.parametrize("n_queries,n_targets", [(5, 8), (13, 50), (60, 500)])
+def test_k_nearest_between_agrees_with_python_exactly(
+    backend_name: str, n_queries: int, n_targets: int
+) -> None:
+    """The cross-set analogue of ``test_k_nearest_neighbors_agrees_with_python_exactly``:
+    two DIFFERENT clouds (different seeds, so no query coincides with a
+    target), never one cloud searched against itself.
+    """
+    backend = ACCELERATED_BACKENDS[backend_name]()
+    queries = make_cloud(n_queries, seed=1001)
+    targets = make_cloud(n_targets, seed=2002)
+    k = 6
+
+    reference = PYTHON.k_nearest_between(queries, targets, k=k)
+    accelerated = backend.k_nearest_between(queries, targets, k=k)
+
+    assert len(reference) == len(accelerated) == n_queries
+    for i, (ref_neighbours, acc_neighbours) in enumerate(zip(reference, accelerated, strict=True)):
+        # Order is not part of the contract - see ComputeBackend.k_nearest_between -
+        # but on this non-coincident test data the SET is unique, and a discrete
+        # selection has no rounding to disagree about: this is exact equality.
+        assert set(ref_neighbours) == set(acc_neighbours), f"query {i} disagrees"
+        assert len(ref_neighbours) == min(k, n_targets)
+
+
+@pytest.mark.parametrize("backend_name", ACCELERATED_PARAMS)
+def test_k_nearest_between_never_excludes_a_target_that_equals_a_query(backend_name: str) -> None:
+    """Unlike :meth:`k_nearest_neighbors`, there is no "exclude myself" rule here -
+    a query and a target are two different clouds, so a target that happens to
+    sit exactly where a query sits is still a legitimate nearest neighbour.
+    """
+    backend = ACCELERATED_BACKENDS[backend_name]()
+    shared_point: Point = (1.0, 2.0, 3.0)
+    queries = [shared_point]
+    targets = [shared_point, (100.0, 100.0, 100.0), (200.0, 200.0, 200.0)]
+
+    reference = PYTHON.k_nearest_between(queries, targets, k=1)
+    accelerated = backend.k_nearest_between(queries, targets, k=1)
+    assert reference == [(0,)]
+    assert accelerated == [(0,)]
+
+
+@pytest.mark.parametrize("backend_name", ACCELERATED_PARAMS)
+def test_k_nearest_between_k_equal_to_one_is_the_valid_boundary(backend_name: str) -> None:
+    backend = ACCELERATED_BACKENDS[backend_name]()
+    queries = make_cloud(5, seed=1019)
+    targets = make_cloud(9, seed=2029)
+    reference = PYTHON.k_nearest_between(queries, targets, k=1)
+    accelerated = backend.k_nearest_between(queries, targets, k=1)
+    assert all(len(neighbours) == 1 for neighbours in reference)
+    assert reference == accelerated or all(
+        set(r) == set(a) for r, a in zip(reference, accelerated, strict=True)
+    )
+
+
+@pytest.mark.parametrize("backend_name", ACCELERATED_PARAMS)
+def test_k_nearest_between_caps_at_available_targets_on_both_backends(backend_name: str) -> None:
+    """``cKDTree.query`` pads a request for more neighbours than exist with an
+    out-of-range index (equal to the tree's own point count) and an infinite
+    distance - a real trap specific to the scipy path, since neither the
+    python nor the numpy backend has any such padding behaviour to
+    accidentally let through. The length check below would already fail if
+    a pad leaked in (it would make the row longer than 4), but the explicit
+    bounds check names exactly what a leaked pad looks like rather than
+    leaving it to be inferred from a length mismatch.
+    """
+    backend = ACCELERATED_BACKENDS[backend_name]()
+    queries = make_cloud(3, seed=1013)
+    targets = make_cloud(4, seed=2013)
+    k = 10  # far more than the 4 targets available
+
+    reference = PYTHON.k_nearest_between(queries, targets, k=k)
+    accelerated = backend.k_nearest_between(queries, targets, k=k)
+
+    for ref_neighbours, acc_neighbours in zip(reference, accelerated, strict=True):
+        assert len(ref_neighbours) == 4
+        assert set(ref_neighbours) == set(acc_neighbours)
+        assert all(0 <= index < len(targets) for index in acc_neighbours), (
+            f"{acc_neighbours} contains an index outside [0, {len(targets)}) - looks like "
+            "cKDTree's own out-of-range padding for 'fewer neighbours than requested' leaked "
+            "through uncapped"
+        )
+
+
+@pytest.mark.parametrize("backend_name", ACCELERATED_PARAMS)
+def test_k_nearest_between_returns_indices_into_targets_not_a_combined_list(
+    backend_name: str,
+) -> None:
+    """Indices must resolve against ``targets`` alone - never against some
+    ``queries + targets`` (or ``targets + queries``) concatenation a
+    same-set-flavoured implementation might have been tempted to build.
+
+    Every query sits 0.1 away from exactly one target and far from every
+    other target and every other query, so which target is "the answer" for
+    each query is known by construction, not by search - a transposition or
+    an index shifted by ``len(queries)`` either lands out of range (caught
+    directly) or resolves, via ``targets[index]``, to a point that is not the
+    one this test built for that query (caught by the equality check).
+    Deliberately ``len(queries) != len(targets)`` so a combined-list shift
+    cannot coincidentally still land in range.
+    """
+    backend = ACCELERATED_BACKENDS[backend_name]()
+    targets: list[Point] = [
+        (0.0, 0.0, 0.0),
+        (10.0, 0.0, 0.0),
+        (20.0, 0.0, 0.0),
+        (30.0, 0.0, 0.0),
+        (40.0, 0.0, 0.0),
+        (50.0, 0.0, 0.0),
+    ]
+    queries: list[Point] = [(0.1, 0.0, 0.0), (10.1, 0.0, 0.0), (30.1, 0.0, 0.0), (50.1, 0.0, 0.0)]
+    expected_target_index = [0, 1, 3, 5]
+
+    for source in (PYTHON, backend):
+        result = source.k_nearest_between(queries, targets, k=1)
+        assert len(result) == len(queries)
+        for query_index, row in enumerate(result):
+            assert len(row) == 1
+            (index,) = row
+            assert 0 <= index < len(targets), (
+                f"index {index} does not name any of the {len(targets)} targets - looks like "
+                "an index into something other than `targets` alone"
+            )
+            expected = targets[expected_target_index[query_index]]
+            assert targets[index] == expected, (
+                f"query {query_index} resolved to {targets[index]}, not its known nearest "
+                f"target {expected} - looks like an index meant for a different list"
+            )
+
+
+@pytest.mark.parametrize("backend_name", ACCELERATED_PARAMS)
+def test_k_nearest_between_empty_targets_agrees(backend_name: str) -> None:
+    backend = ACCELERATED_BACKENDS[backend_name]()
+    queries = make_cloud(3, seed=1014)
+    assert PYTHON.k_nearest_between(queries, [], k=5) == [(), (), ()]
+    assert backend.k_nearest_between(queries, [], k=5) == [(), (), ()]
+
+
+@pytest.mark.parametrize("backend_name", ACCELERATED_PARAMS)
+def test_k_nearest_between_empty_queries_agrees(backend_name: str) -> None:
+    backend = ACCELERATED_BACKENDS[backend_name]()
+    targets = make_cloud(3, seed=1015)
+    assert PYTHON.k_nearest_between([], targets, k=5) == []
+    assert backend.k_nearest_between([], targets, k=5) == []
+
+
+@pytest.mark.parametrize("backend_name", ACCELERATED_PARAMS)
+@pytest.mark.parametrize("k", [0, -1])
+def test_k_nearest_between_bad_k_raises_identically(backend_name: str, k: int) -> None:
+    backend = ACCELERATED_BACKENDS[backend_name]()
+    queries = make_cloud(3, seed=1016)
+    targets = make_cloud(5, seed=2016)
+    with pytest.raises(ComputeParametersUnusable):
+        PYTHON.k_nearest_between(queries, targets, k=k)
+    with pytest.raises(ComputeParametersUnusable):
+        backend.k_nearest_between(queries, targets, k=k)
+
+
+def test_k_nearest_between_k_is_keyword_only() -> None:
+    """Matches the signature the caller (scanner3d.texture) actually depends
+    on: ``k`` must be impossible to pass positionally, unlike the plain
+    ``int`` third parameter :meth:`k_nearest_neighbors` uses - the gate-like
+    parameters in this module (see ``nearest_neighbors``'s ``gate``) are
+    keyword-only, and this is one of them.
+    """
+    with pytest.raises(TypeError):
+        PYTHON.k_nearest_between([(0.0, 0.0, 0.0)], [(1.0, 1.0, 1.0)], 1)  # type: ignore[call-arg]
+
+
+@pytest.mark.parametrize("backend_name", ACCELERATED_PARAMS)
+def test_k_nearest_between_numpy_chunking_agrees_past_one_chunk(backend_name: str) -> None:
+    """The numpy backend chunks over queries when the (queries x targets)
+    matrix would be large - see :meth:`_NumpyBackend.k_nearest_between`. This
+    picks target and query counts large enough to force more than one chunk
+    and checks the chunk boundary does not drop or duplicate a neighbour.
+    """
+    from scanner3d.compute import _PAIRWISE_CHUNK_ELEMENTS
+
+    backend = ACCELERATED_BACKENDS[backend_name]()
+    n_targets = 200
+    # Comfortably past one chunk boundary for the numpy backend; scipy has no
+    # such boundary but is checked identically for the equivalence claim.
+    n_queries = (_PAIRWISE_CHUNK_ELEMENTS // n_targets) * 3 + 7
+    queries = make_cloud(n_queries, seed=3001)
+    targets = make_cloud(n_targets, seed=3002)
+    k = 4
+
+    reference = PYTHON.k_nearest_between(queries, targets, k=k)
+    accelerated = backend.k_nearest_between(queries, targets, k=k)
+    assert len(accelerated) == n_queries
+    for ref_neighbours, acc_neighbours in zip(reference, accelerated, strict=True):
+        assert set(ref_neighbours) == set(acc_neighbours)
+
+
 # --- the strong claim: the python backend IS registration.icp's own search --------------
 
 

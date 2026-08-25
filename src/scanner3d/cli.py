@@ -2159,15 +2159,58 @@ DEPTH_SCALE_METRES: Final = 0.004999999888241291
 
 def _cmd_sweep(args: argparse.Namespace) -> int:
     """Stream frames to disk, writing each as it arrives rather than buffering."""
+    import tempfile
+    import threading
+
+    from scanner3d.config import resolve_serial
     from scanner3d.v4l2_stream import stream_frames
 
     args.output.mkdir(parents=True, exist_ok=True)
     written = 0
+    colour_written = 0
+    colour_index: list[dict[str, object]] = []
+    stop_colour = threading.Event()
+
+    def grab_colour(serial: str) -> None:
+        """Save colour frames beside the depth ones, noting which they follow.
+
+        The RGB camera returns nothing unless a depth stream is already running
+        - a lone capture times out - so this runs only while the sweep is live,
+        and is started after the first depth frame rather than before it.
+
+        Colour arrives at roughly 2 frames a second against depth's 4.6, so
+        there is NOT one per depth frame. Each is recorded against the depth
+        index current when it was taken, which is what lets a later step pair
+        them without guessing.
+        """
+        nonlocal colour_written
+        from scanner3d.rgb_frame import V4l2RgbFrameBackend
+
+        with tempfile.TemporaryDirectory() as directory:
+            scratch = Path(directory)
+            backend = V4l2RgbFrameBackend()
+            while not stop_colour.is_set():
+                try:
+                    backend.run(serial, scratch)
+                except Exception:
+                    return
+                produced = scratch / "rgb-frame.jpg"
+                if not produced.exists():
+                    continue
+                name = f"colour_{colour_written:04d}.jpg"
+                (args.output / name).write_bytes(produced.read_bytes())
+                colour_index.append({"file": name, "after_depth_frame": written - 1})
+                colour_written += 1
+                produced.unlink(missing_ok=True)
 
     def on_frame(buf: bytes, _record: object) -> None:
         nonlocal written
         (args.output / f"frame_{written:04d}.raw").write_bytes(buf)
         written += 1
+        if args.rgb and written == 1:
+            threading.Thread(
+                target=grab_colour, args=(resolve_serial(args.serial),), daemon=True
+            ).start()
         if written % 25 == 0 and not args.json:
             print(f"  {written} frames kept", file=sys.stderr, flush=True)
 
@@ -2188,9 +2231,16 @@ def _cmd_sweep(args: argparse.Namespace) -> int:
         print(f"capture failed: {exc}", file=sys.stderr)
         return EXIT_CODES[DoctorStatus.INTERNAL_ERROR]
 
+    stop_colour.set()
+    if args.rgb:
+        (args.output / "colour-index.json").write_text(
+            json.dumps({"frames": colour_index}, indent=2) + "\n", encoding="utf-8"
+        )
+
     payload: dict[str, object] = {
         "command": {"name": SWEEP_COMMAND, "output": str(args.output)},
         "kept": written,
+        "colour_frames": colour_written,
         "delivered": result.delivered,
         "dropped_by_sequence": result.dropped_by_sequence,
         "short_frames": result.short_frames,
@@ -3055,6 +3105,13 @@ def build_parser() -> argparse.ArgumentParser:
         "on a turntable running one revolution in two minutes)",
     )
     sweep.add_argument("--serial", help="scanner serial to target")
+    sweep.add_argument(
+        "--rgb",
+        action="store_true",
+        help="also save colour frames, for texturing. They arrive at about half "
+        "the depth rate, so there is not one per depth frame; colour-index.json "
+        "records which depth frame each followed",
+    )
     sweep.add_argument(
         "--duration", type=float, default=400.0, help="hard stop after this many seconds"
     )

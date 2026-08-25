@@ -182,6 +182,14 @@ PLY_VERSION: Final = "1.0"
 VERTEX_STRUCT: Final = struct.Struct("<fff")
 FACE_STRUCT: Final = struct.Struct("<Biii")
 
+#: One vertex in the binary PLY encoding when :attr:`Mesh.vertex_colours` is
+#: present: the same three little-endian floats, followed by three
+#: unsigned bytes - what ``property uchar red`` / ``green`` / ``blue`` declare.
+#: A second struct rather than packing position and colour separately, so a
+#: coloured vertex is one call, one contiguous write, matching how
+#: :data:`VERTEX_STRUCT` is used for an uncoloured one.
+VERTEX_COLOUR_STRUCT: Final = struct.Struct("<fffBBB")
+
 #: One binary32, used to round a coordinate to the width the PLY carries.
 _BINARY32: Final = struct.Struct("<f")
 
@@ -298,6 +306,28 @@ class DegenerateFace(MeshNotAllowed):
     reaching the writer means the mesh was assembled somewhere else, and passing
     it through would put a triangle no renderer can shade into a file that
     claims to be a surface.
+    """
+
+
+class VertexColourCountMismatch(MeshNotAllowed):
+    """``Mesh.vertex_colours`` is present but does not carry one entry per vertex.
+
+    The field is all-or-nothing by design - see :class:`Mesh` - so a caller
+    who attaches colour is attaching it for every vertex; a shorter or longer
+    tuple means the caller's own indexing has already drifted from the mesh
+    it is describing, and writing it out regardless would silently pair some
+    vertex with the wrong colour, or with none the file format has room to
+    represent.
+    """
+
+
+class VertexColourChannelOutOfRange(MeshNotAllowed):
+    """A vertex colour channel is outside ``[0, 255]``, what a PLY ``uchar``
+    vertex property can hold.
+
+    Checked before the header is built, so the failure names the actual bad
+    channel rather than surfacing later as a ``struct.error`` from packing a
+    binary body.
     """
 
 
@@ -628,11 +658,22 @@ class Mesh:
     :attr:`limitations` travels with the geometry so that a consumer holding
     only this object still holds the caveats. It is not optional in practice:
     :func:`reconstruct` always fills it, and the exporters put it in the file.
+
+    :attr:`vertex_colours` is ``None`` by default - what :func:`reconstruct`
+    always produces, since marching cubes has no colour to give a vertex it
+    invents on a grid edge; see :mod:`scanner3d.texture` for how a colour is
+    actually transferred onto these vertices from a separately coloured
+    point cloud. When present it is all-or-nothing: one ``(red, green,
+    blue)`` triple per vertex, in vertex order, never a mix of a triple and
+    a missing entry - :func:`encode_ply_mesh` refuses
+    (:class:`VertexColourCountMismatch`) anything else rather than guess
+    which vertices the caller meant to leave out.
     """
 
     vertices: tuple[Point, ...]
     faces: tuple[tuple[int, int, int], ...]
     limitations: tuple[str, ...] = ()
+    vertex_colours: tuple[tuple[int, int, int], ...] | None = None
 
     @property
     def vertex_count(self) -> int:
@@ -1442,6 +1483,31 @@ def encode_obj(
     return _finish(mesh, provenance, MeshFileFormat.OBJ, header, payload, max_output_bytes)
 
 
+def _ensure_vertex_colours(mesh: Mesh) -> tuple[tuple[int, int, int], ...] | None:
+    """``mesh.vertex_colours``, checked against the mesh it is attached to, or refused.
+
+    Returns ``None`` unchanged when the mesh carries no colour at all, which
+    is what keeps every caller of this function - just :func:`encode_ply_mesh`
+    - byte-identical to a mesh built before this field existed: nothing else
+    about the header or body construction below is reached for that case.
+    """
+    colours = mesh.vertex_colours
+    if colours is None:
+        return None
+    if len(colours) != mesh.vertex_count:
+        raise VertexColourCountMismatch(
+            f"this mesh has {mesh.vertex_count} vertices but vertex_colours carries "
+            f"{len(colours)} entries; colour is all-or-nothing, one triple per vertex"
+        )
+    for index, (red, green, blue) in enumerate(colours):
+        for channel, value in (("red", red), ("green", green), ("blue", blue)):
+            if not 0 <= value <= 255:
+                raise VertexColourChannelOutOfRange(
+                    f"vertex {index}'s {channel} channel is {value!r}, outside [0, 255]"
+                )
+    return colours
+
+
 def encode_ply_mesh(
     mesh: Mesh,
     *,
@@ -1455,16 +1521,49 @@ def encode_ply_mesh(
     a few hundred thousand triangles at worst where a raw cloud is a quarter of
     a million points per frame, and a surface a reader can open in an editor is
     worth more here than the bytes it costs. Binary is one argument away.
+
+    When :attr:`Mesh.vertex_colours` is ``None`` - what every mesh built
+    before this field existed has, and what :func:`reconstruct` still
+    produces on its own - this function's header and body are constructed
+    exactly as before this field existed, byte for byte: the three
+    ``property uchar`` lines below and the packed colour bytes are only ever
+    added, never substituted for anything that was already there. When it is
+    present, PLY's own standard per-vertex ``red``/``green``/``blue`` uchar
+    properties carry it; that is what the format already has room for, so
+    nothing here is invented.
     """
+    colours = _ensure_vertex_colours(mesh)
     rounded = _validated(mesh, max_output_bytes=max_output_bytes)
     ascii_body = ply_format is PlyFormat.ASCII
     lines = [PLY_MAGIC, f"format {ply_format} {PLY_VERSION}"]
     lines += [f"comment {line}" for line in provenance_comments(mesh, provenance)]
+    if colours is not None:
+        # INHERENT_LIMITATIONS above already states, unconditionally, that no
+        # mesh from this module carries colour - true of what reconstruct()
+        # produces on its own, and left untouched so a colourless export's
+        # comment block stays byte-identical to what it was before this
+        # field existed. For THIS export that blanket statement is wrong, so
+        # it is corrected here rather than left to stand contradicted by the
+        # property lines a few lines below it.
+        lines += [
+            f"comment {line}"
+            for line in _comment(
+                "vertex colour",
+                "this file's vertices carry a red/green/blue colour transferred from a "
+                "separately coloured point cloud (see scanner3d.texture); the 'no normals, "
+                "colours, texture coordinates or materials are exported' limitation above "
+                "does not apply to this particular export",
+            )
+        ]
     lines += [
         f"element vertex {mesh.vertex_count}",
         "property float x",
         "property float y",
         "property float z",
+    ]
+    if colours is not None:
+        lines += ["property uchar red", "property uchar green", "property uchar blue"]
+    lines += [
         f"element face {mesh.face_count}",
         "property list uchar int vertex_indices",
         "end_header",
@@ -1479,11 +1578,24 @@ def encode_ply_mesh(
             f"the header is {len(encoded_header)} bytes, past the {MAX_HEADER_BYTES}-byte "
             "ceiling; it is refused rather than truncated"
         )
+    if colours is None:
+        if ascii_body:
+            body = "".join(f"{x!r} {y!r} {z!r}\n" for x, y, z in rounded).encode("ascii")
+        else:
+            body = b"".join(VERTEX_STRUCT.pack(x, y, z) for x, y, z in rounded)
+    elif ascii_body:
+        body = "".join(
+            f"{x!r} {y!r} {z!r} {r} {g} {b}\n"
+            for (x, y, z), (r, g, b) in zip(rounded, colours, strict=True)
+        ).encode("ascii")
+    else:
+        body = b"".join(
+            VERTEX_COLOUR_STRUCT.pack(x, y, z, r, g, b)
+            for (x, y, z), (r, g, b) in zip(rounded, colours, strict=True)
+        )
     if ascii_body:
-        body = "".join(f"{x!r} {y!r} {z!r}\n" for x, y, z in rounded).encode("ascii")
         body += "".join(f"3 {a} {b} {c}\n" for a, b, c in mesh.faces).encode("ascii")
     else:
-        body = b"".join(VERTEX_STRUCT.pack(x, y, z) for x, y, z in rounded)
         body += b"".join(FACE_STRUCT.pack(3, a, b, c) for a, b, c in mesh.faces)
     file_format = (
         MeshFileFormat.PLY_ASCII if ascii_body else MeshFileFormat.PLY_BINARY_LITTLE_ENDIAN

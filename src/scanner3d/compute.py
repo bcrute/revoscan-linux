@@ -41,13 +41,24 @@ ICP iteration, on every frame pair, so they were measured rather than assumed
 free, and vectorising them costs little once the array conversion machinery
 already exists for the two operations that matter.
 
-That gives four operations, and they are exactly the four this module
+That gives five operations, and they are exactly the five this module
 backs: nearest-neighbour correspondence search
 (:meth:`ComputeBackend.nearest_neighbors`), applying a rigid transform to a
 whole cloud (:meth:`ComputeBackend.apply_transform`), the centroid/cross-
 covariance accumulation inside a closed-form rigid solve
-(:meth:`ComputeBackend.rigid_from_correspondences`), and k-nearest-neighbour
-search for local surface normals (:meth:`ComputeBackend.k_nearest_neighbors`).
+(:meth:`ComputeBackend.rigid_from_correspondences`), k-nearest-neighbour
+search for local surface normals (:meth:`ComputeBackend.k_nearest_neighbors`),
+and CROSS-set k-nearest-neighbour search - the k nearest points of one cloud
+to each point of a DIFFERENT cloud (:meth:`ComputeBackend.k_nearest_between`).
+The last of these was added for :func:`scanner3d.texture.colour_vertices`,
+which needs the k nearest COLOURED points to each mesh VERTEX: two different
+clouds, never a point's neighbours within its own. Building that from
+:meth:`k_nearest_neighbors` alone (which only ever searches a cloud against
+itself) meant querying one vertex at a time against a list rebuilt from
+scratch each time - measured at 20 ms/vertex against 4000 target points,
+which extrapolates past six minutes at the roughly 16000-vertex, 109000-point
+scale a real capture produces - because the whole point set was re-indexed
+once per QUERY instead of once, total.
 
 The backend contract
 ---------------------
@@ -56,8 +67,10 @@ same input, to a stated tolerance - see each method's docstring for the
 number and why. "python" is the REFERENCE: it wraps what already exists in
 :mod:`scanner3d.registration` and :mod:`scanner3d.geometry`, which carry
 their own mutation-tested suites, rather than reimplementing their algorithms
-a second time where that can be avoided. Only :meth:`ComputeBackend.k_nearest_neighbors`
-has no existing standalone function to wrap - the closest analogue lives
+a second time where that can be avoided. Only
+:meth:`ComputeBackend.k_nearest_neighbors` and
+:meth:`ComputeBackend.k_nearest_between` have no existing standalone function
+to wrap - the closest analogue lives
 inline inside :func:`scanner3d.icp_plane.estimate_normals`, mixed with normal-
 fitting concerns that make it inseparable - so its "python" backend is a
 freshly authored reference implementation of the same asymptotic algorithm
@@ -340,6 +353,25 @@ class ComputeBackend(Protocol):
         """
         ...
 
+    def k_nearest_between(
+        self, queries: Sequence[Point], targets: Sequence[Point], *, k: int
+    ) -> list[tuple[int, ...]]:
+        """For each query, the indices of its ``k`` nearest TARGETS.
+
+        Distinct from :meth:`k_nearest_neighbors`, which searches one cloud
+        against itself. This searches one cloud against ANOTHER, and the
+        difference is not cosmetic: colouring a mesh means finding, for every
+        mesh vertex, the nearest points of a SEPARATE coloured cloud. Expressed
+        as a same-set search that forces one spatial index per vertex, measured
+        at about 20 ms each - over six minutes for a real mesh, essentially all
+        of it rebuilding the same structure.
+
+        Returned indices index ``targets``, capped at ``len(targets)``. As with
+        the same-set search, equivalence between backends is a claim about the
+        SET returned per query, not its order.
+        """
+        ...
+
     def k_nearest_neighbors(self, points: Sequence[Point], k: int) -> list[tuple[int, ...]]:
         """For each point, the indices of its ``k`` nearest OTHER points.
 
@@ -390,6 +422,26 @@ class _PythonBackend:
 
     def rigid_from_correspondences(self, source: Sequence[Point], target: Sequence[Point]) -> Rigid:
         return _geometry_rigid_from_correspondences(source, target)
+
+    def k_nearest_between(
+        self, queries: Sequence[Point], targets: Sequence[Point], *, k: int
+    ) -> list[tuple[int, ...]]:
+        """See :meth:`ComputeBackend.k_nearest_between`. The reference: exhaustive."""
+        _ensure_k(k)
+        target_list = list(targets)
+        if not target_list:
+            return [() for _ in queries]
+        cap = min(k, len(target_list))
+        result: list[tuple[int, ...]] = []
+        for query in queries:
+
+            def _distance_to(index: int, q: Point = query) -> float:
+                t = target_list[index]
+                dx, dy, dz = q[0] - t[0], q[1] - t[1], q[2] - t[2]
+                return dx * dx + dy * dy + dz * dz
+
+            result.append(tuple(heapq.nsmallest(cap, range(len(target_list)), key=_distance_to)))
+        return result
 
     def k_nearest_neighbors(self, points: Sequence[Point], k: int) -> list[tuple[int, ...]]:
         _ensure_k(k)
@@ -567,6 +619,53 @@ class _NumpyBackend:
         )
         return Rigid.of(rotation, translation)
 
+    def k_nearest_between(
+        self, queries: Sequence[Point], targets: Sequence[Point], *, k: int
+    ) -> list[tuple[int, ...]]:
+        """See :meth:`ComputeBackend.k_nearest_between`.
+
+        The same GEMM-reformulated distance as :meth:`nearest_neighbors`, for
+        the same measured reason: a materialised difference array is
+        bandwidth-bound and was slower than pure Python at ten thousand points.
+
+        Chunked over ``queries`` exactly as :meth:`k_nearest_neighbors` chunks
+        over its own points, and for the identical reason: a single
+        ``(len(queries), len(targets))`` squared-distance matrix, unchunked,
+        is 8 bytes per pair - at the roughly 16000x109000 scale one real mesh
+        produces that is about 14 GB, which no machine this runs on has spare.
+        Chunking bounds peak memory to one block regardless of how large
+        either cloud is.
+        """
+        _ensure_k(k)
+        target_list = list(targets)
+        query_list = list(queries)
+        if not target_list or not query_list:
+            return [() for _ in query_list]
+        cap = min(k, len(target_list))
+        import numpy as np
+
+        b = np.asarray(target_list, dtype=np.float64)
+        centre = b.mean(axis=0)
+        a = np.asarray(query_list, dtype=np.float64) - centre
+        b = b - centre
+        target_squared = np.sum(b * b, axis=1)
+        chunk_rows = max(1, _PAIRWISE_CHUNK_ELEMENTS // len(target_list))
+        result: list[tuple[int, ...]] = []
+        for start in range(0, len(query_list), chunk_rows):
+            block = a[start : start + chunk_rows]
+            block_squared = np.sum(block * block, axis=1)
+            cross = block @ b.T
+            squared = block_squared[:, None] - 2.0 * cross + target_squared[None, :]
+            if cap >= b.shape[0]:
+                order = np.argsort(squared, axis=1)[:, :cap]
+            else:
+                partitioned = np.argpartition(squared, cap - 1, axis=1)[:, :cap]
+                rows = np.arange(block.shape[0])[:, None]
+                order = partitioned[rows, np.argsort(squared[rows, partitioned], axis=1)]
+            for row in order:
+                result.append(tuple(int(j) for j in row))
+        return result
+
     def k_nearest_neighbors(self, points: Sequence[Point], k: int) -> list[tuple[int, ...]]:
         """See :meth:`ComputeBackend.k_nearest_neighbors`.
 
@@ -713,6 +812,29 @@ class _ScipyBackend:
             else:
                 hits.append((float(distance), target_points[int(index)]))
         return hits
+
+    def k_nearest_between(
+        self, queries: Sequence[Point], targets: Sequence[Point], *, k: int
+    ) -> list[tuple[int, ...]]:
+        """See :meth:`ComputeBackend.k_nearest_between`.
+
+        ONE tree over the targets, queried by every point at once. That is the
+        whole reason this method exists: the same work expressed as a same-set
+        search rebuilds an equivalent tree once per query.
+        """
+        _ensure_k(k)
+        target_list = list(targets)
+        query_list = list(queries)
+        if not target_list or not query_list:
+            return [() for _ in query_list]
+        cap = min(k, len(target_list))
+        from scipy.spatial import cKDTree
+
+        tree = cKDTree(target_list)
+        _, indices = tree.query(query_list, k=cap, workers=-1)
+        if cap == 1:
+            return [(int(row),) for row in indices]
+        return [tuple(int(j) for j in row) for row in indices]
 
     def k_nearest_neighbors(self, points: Sequence[Point], k: int) -> list[tuple[int, ...]]:
         """See :meth:`ComputeBackend.k_nearest_neighbors`.
