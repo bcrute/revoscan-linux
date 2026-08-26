@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from scanner3d.config import EXAMPLE_SERIAL, configured_serial
+from scanner3d.config import stated_serial
 from scanner3d.errors import TraceFormatError
 
 TARGET_BUS: Final = 1
@@ -28,7 +28,7 @@ TARGET_DEVNUM: Final = 43
 #: plugged in. Empty when nothing is configured - call
 #: scanner3d.config.resolve_serial() for a usable value, which falls back to
 #: the single attached scanner and refuses when that is ambiguous.
-TARGET_SERIAL: Final = configured_serial() or EXAMPLE_SERIAL
+TARGET_SERIAL: Final = stated_serial()
 RAW_SHA256: Final = "15b43371f426c3efb617ce58d805b9f9c04519562fb641042dfd5259b9e2d664"
 FIXTURE_PATH: Final = (
     Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "scanner-014-usbmon-target.txt"

@@ -76,7 +76,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Final
 
-from scanner3d.config import EXAMPLE_SERIAL, configured_serial
+from scanner3d.config import configured_serial, stated_serial
 from scanner3d.control import (
     MAX_TIMEOUT_MS,
     USBDEVFS_CONTROL,
@@ -116,7 +116,7 @@ DEPTH_SCALE_PROPERTY_ID: Final = 0x918
 #: plugged in. Empty when nothing is configured - call
 #: scanner3d.config.resolve_serial() for a usable value, which falls back to
 #: the single attached scanner and refuses when that is ambiguous.
-AUTHORIZED_SERIAL: Final = configured_serial() or EXAMPLE_SERIAL
+AUTHORIZED_SERIAL: Final = stated_serial()
 
 #: The property write is four bytes: the id, little-endian.
 PROPERTY_PAYLOAD_LENGTH: Final = 4

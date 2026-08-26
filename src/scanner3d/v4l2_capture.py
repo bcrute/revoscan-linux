@@ -86,7 +86,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Final, Protocol, cast
 
-from scanner3d.config import EXAMPLE_SERIAL, configured_serial
+from scanner3d.config import configured_serial, stated_serial
 from scanner3d.control import Clock, Closer, IoctlFn, Opener, identity_drift
 from scanner3d.discovery import (
     DEFAULT_DEV_ROOT,
@@ -127,7 +127,7 @@ from scanner3d.ownership import (
 #: plugged in. Empty when nothing is configured - call
 #: scanner3d.config.resolve_serial() for a usable value, which falls back to
 #: the single attached scanner and refuses when that is ambiguous.
-AUTHORIZED_SERIAL: Final = configured_serial() or EXAMPLE_SERIAL
+AUTHORIZED_SERIAL: Final = stated_serial()
 
 #: The logical camera this module can reach. :mod:`scanner3d.discovery` derives
 #: it from the interface string descriptor, never from a ``videoN`` number.

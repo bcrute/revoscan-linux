@@ -76,6 +76,14 @@ from PySide6.QtWidgets import (
 )
 
 from scanner3d.cloud_view import CloudView
+from scanner3d.config import (
+    ConfigFileUnreadable,
+    ConfigWriteRefused,
+    captures_dir_for,
+    configured_captures_dir,
+    dated_capture_name,
+    set_captures_dir,
+)
 from scanner3d.coverage import coverage_map
 from scanner3d.discovery import find_scanners
 from scanner3d.geometry import Rigid
@@ -108,6 +116,11 @@ COVERAGE_EVERY: Final = 12
 #: Points kept per cloud for the live preview. Low on purpose: this estimate is
 #: thrown away and recomputed properly by Reconstruct.
 PREVIEW_POINTS: Final = 900
+
+#: What a capture directory is called under the captures folder. Dated, and one
+#: per capture: this window writes frame_0000.raw upward, so a second capture
+#: sharing a directory would overwrite the first frame by frame.
+CAPTURE_PREFIX: Final = "scan"
 
 LOG = get_logger("gui")
 
@@ -322,6 +335,12 @@ class ScannerWindow(QMainWindow):
         self._recon_action = QAction("Reconstruct...", self)
         self._recon_action.triggered.connect(self._start_reconstruct)
         bar.addAction(self._recon_action)
+        bar.addSeparator()
+
+        self._captures_action = QAction("Captures folder...", self)
+        self._captures_action.triggered.connect(self._choose_captures_dir)
+        bar.addAction(self._captures_action)
+        self._refresh_captures_action()
         bar.addSeparator()
 
         bar.addWidget(QLabel(" frames "))
@@ -741,10 +760,65 @@ class ScannerWindow(QMainWindow):
         worker.failed.connect(self._fail)
         worker.start()
 
+    # -- where captures go -------------------------------------------------
+    def _refresh_captures_action(self) -> None:
+        """Keep the toolbar honest about where the next capture will land."""
+        try:
+            configured = configured_captures_dir()
+        except ConfigFileUnreadable as exc:
+            self._captures_action.setToolTip(f"Captures folder unreadable:\n{exc}")
+            return
+        self._captures_action.setToolTip(
+            "Where captures go. Set it once and every capture lands in a dated\n"
+            "folder of its own underneath, without being asked.\n\n"
+            + (
+                f"Currently: {configured}"
+                if configured is not None
+                else "Not set - you are asked for a folder every time."
+            )
+        )
+
+    def _choose_captures_dir(self) -> None:
+        """Record a captures folder, so captures stop asking where to go."""
+        try:
+            start = configured_captures_dir()
+        except ConfigFileUnreadable:
+            start = None
+        directory = QFileDialog.getExistingDirectory(
+            self, "Where should captures go?", str(start or Path.home())
+        )
+        if not directory:
+            return
+        try:
+            target = set_captures_dir(Path(directory))
+        except (ConfigFileUnreadable, ConfigWriteRefused) as exc:
+            LOG.error("captures folder not recorded: %s", exc)
+            QMessageBox.warning(self, "3D Scanner", str(exc))
+            return
+        self._refresh_captures_action()
+        self._log(f"Captures will go under {target}, in a dated folder each time.")
+        self.statusBar().showMessage(f"captures folder: {target}", 6000)
+
+    def _capture_target(self) -> Path | None:
+        """The directory for the capture about to start, or None if cancelled.
+
+        A recorded captures folder is the whole point of having one: it answers
+        this without a dialog. Without one, the question still has to be asked.
+        """
+        try:
+            configured = captures_dir_for(dated_capture_name(CAPTURE_PREFIX))
+        except ConfigFileUnreadable as exc:
+            LOG.warning("captures folder unreadable, asking instead: %s", exc)
+            configured = None
+        if configured is not None:
+            return configured
+        directory = QFileDialog.getExistingDirectory(self, "Where should the frames go?")
+        return Path(directory) if directory else None
+
     # -- capture -----------------------------------------------------------
     def _start_capture(self) -> None:
-        directory = QFileDialog.getExistingDirectory(self, "Where should the frames go?")
-        if not directory:
+        target = self._capture_target()
+        if target is None:
             return
         # Preview holds the same V4L2 node a capture needs. Released here, and
         # waited for, before anything tries to open it again.
@@ -752,7 +826,6 @@ class ScannerWindow(QMainWindow):
         self._preview_action.setChecked(False)
         self._stop_preview()
         self._resume_preview_after = was_previewing
-        target = Path(directory)
         self._capture_dir = target
         frames = self._frames_spin.value()
         decimate = self._decimate_spin.value()
@@ -840,7 +913,13 @@ class ScannerWindow(QMainWindow):
 
     # -- reconstruct -------------------------------------------------------
     def _start_reconstruct(self) -> None:
-        start = str(self._capture_dir) if self._capture_dir else ""
+        # This capture first, then the folder they all live in: both beat
+        # opening the file dialog wherever the process happens to have started.
+        try:
+            configured = configured_captures_dir()
+        except ConfigFileUnreadable:
+            configured = None
+        start = str(self._capture_dir or configured or "")
         directory = QFileDialog.getExistingDirectory(self, "Which capture?", start)
         if not directory:
             return

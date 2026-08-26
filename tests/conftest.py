@@ -163,6 +163,21 @@ class SysfsBuilder:
         return base
 
 
+@pytest.fixture(autouse=True)
+def isolated_config(monkeypatch, tmp_path_factory):
+    """Point every test at an empty configuration, and no environment overrides.
+
+    Without this the suite reads whichever ``~/.config/scanner3d/config.toml``
+    the machine running it happens to have, so a developer who records a
+    captures directory or a serial for their own scanner starts failing tests
+    that have nothing to do with their change - and, worse, a test asserting a
+    default would pass or fail depending on someone's home directory.
+    """
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path_factory.mktemp("config-home")))
+    monkeypatch.delenv("SCANNER3D_SERIAL", raising=False)
+    monkeypatch.delenv("SCANNER3D_CAPTURES_DIR", raising=False)
+
+
 @pytest.fixture
 def builder(tmp_path: Path) -> SysfsBuilder:
     return SysfsBuilder(tmp_path)

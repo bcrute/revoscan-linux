@@ -32,7 +32,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Final
 
-from scanner3d.config import EXAMPLE_SERIAL, configured_serial
+from scanner3d.config import stated_serial
 from scanner3d.control import identity_drift
 from scanner3d.discovery import DEFAULT_DEV_ROOT, DEFAULT_SYSFS_ROOT, ScannerDevice
 from scanner3d.errors import DeviceAbsentError, V4l2CaptureNotAllowed
@@ -170,7 +170,7 @@ RGB_CONTROLS_EXECUTE_OPT_IN: Final = "--read-rgb-controls"
 #: plugged in. Empty when nothing is configured - call
 #: scanner3d.config.resolve_serial() for a usable value, which falls back to
 #: the single attached scanner and refuses when that is ambiguous.
-AUTHORIZED_SERIAL: Final = configured_serial() or EXAMPLE_SERIAL
+AUTHORIZED_SERIAL: Final = stated_serial()
 
 
 def ensure_layout_intact() -> None:

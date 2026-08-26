@@ -9,7 +9,8 @@ up, with no vendor SDK at runtime.
 
 ```
 scanner3d-gui                                    # desktop application
-scanner3d sweep OUTPUT_DIR                       # capture a sweep
+scanner3d config --set-captures-dir ~/scans      # where captures go, once
+scanner3d sweep                                  # capture a sweep into ~/scans/sweep-<date>-<time>
 scanner3d reconstruct FRAMES_DIR --backend scipy # register and score it
 ```
 
@@ -66,9 +67,31 @@ vendor and were established here:
 
 ## Configuration
 
-The scanner serial is read from `SCANNER3D_SERIAL`, then `~/.config/scanner3d/config.toml`
-(`serial` under `[scanner]`), then the single attached device. It refuses to guess when several
-are attached, because several operations here detach kernel drivers.
+`~/.config/scanner3d/config.toml` (or `$XDG_CONFIG_HOME/scanner3d/config.toml`) holds both
+settings. `scanner3d config` prints what is set, where each value came from, and where each
+capture command would write right now.
+
+The scanner serial is read from `SCANNER3D_SERIAL`, then the config file (`serial` under
+`[scanner]`), then the single attached device. It refuses to guess when several are attached,
+because several operations here detach kernel drivers.
+
+The captures directory is read from `SCANNER3D_CAPTURES_DIR`, then the config file (`directory`
+under `[captures]`):
+
+```bash
+scanner3d config --set-captures-dir ~/scans   # recorded; every capture goes under it afterwards
+scanner3d config                              # show it, and what each command would write to
+scanner3d config --unset-captures-dir         # back to each command's own default
+```
+
+It is a *root*, not a capture directory: `depth-frame` and `rgb-frame` write into subdirectories
+named after themselves, and `sweep` and the desktop application each get a dated directory of
+their own (`sweep-20260825-174501`), because one sweep's `frame_0000.raw` would otherwise
+overwrite the last one's. An explicit `--output-dir`, or `sweep`'s output argument, still wins;
+with nothing recorded, every command keeps the default it always had. The directory is neither
+created nor checked when it is recorded — the command that writes there reports on it in its own
+terms. In the desktop application, **Captures folder…** records the same setting, and once it is
+set, Start capture stops asking where to put the frames.
 
 ## Requirements
 
@@ -120,6 +143,9 @@ scanner, so it passes with no device attached and never touches hardware.
 
 ```bash
 scanner3d list                 # attached matching devices, one line each
+scanner3d config               # settings, their sources, and where captures land
+scanner3d config --set-captures-dir ~/scans      # record the default captures directory
+scanner3d config --unset-captures-dir            # remove it again
 scanner3d doctor               # human-readable diagnostic
 scanner3d doctor --json        # machine-readable report on stdout
 scanner3d doctor --json-out report.json

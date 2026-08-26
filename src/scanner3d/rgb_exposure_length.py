@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Final
 
-from scanner3d.config import EXAMPLE_SERIAL, configured_serial
+from scanner3d.config import stated_serial
 from scanner3d.control import (
     USBDEVFS_CONTROL,
     Clock,
@@ -50,7 +50,7 @@ from scanner3d.ownership import (
 #: plugged in. Empty when nothing is configured - call
 #: scanner3d.config.resolve_serial() for a usable value, which falls back to
 #: the single attached scanner and refuses when that is ambiguous.
-AUTHORIZED_SERIAL: Final = configured_serial() or EXAMPLE_SERIAL
+AUTHORIZED_SERIAL: Final = stated_serial()
 ENTITY_ID: Final = 4
 PROPERTY_SELECTOR: Final = 0x12
 REQUESTED_LENGTH: Final = 2

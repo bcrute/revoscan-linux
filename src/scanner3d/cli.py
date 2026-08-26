@@ -15,6 +15,22 @@ from typing import Any, Final, TextIO, cast
 
 from scanner3d import __version__, paired_capture
 from scanner3d.cloud_export import CloudExport, export_depth_frame
+from scanner3d.config import (
+    CAPTURES_DIR_ENV_VAR,
+    CAPTURES_KEY,
+    CAPTURES_TABLE,
+    ConfigFileUnreadable,
+    ConfigWriteRefused,
+    captures_dir_for,
+    captures_dir_source,
+    clear_captures_dir,
+    config_path,
+    configured_captures_dir,
+    configured_serial,
+    dated_capture_name,
+    serial_source,
+    set_captures_dir,
+)
 from scanner3d.control import (
     FIRMWARE_ALGORITHM_VERSION_READ,
     ControlOutcome,
@@ -282,6 +298,131 @@ def _maybe_run_probe(
     except ReferenceProbeError as exc:
         print(f"reference probe unavailable: {exc}", file=stream)
         return None, str(exc)
+
+
+#: The subdirectory each capture command claims under a configured captures
+#: directory. Named once, here, because these strings are both what a command
+#: writes to and what ``scanner3d config`` promises it will write to, and a
+#: report that disagrees with the behaviour it describes is worse than none.
+PAIRED_CAPTURE_SUBDIR: Final = "paired-capture"
+PAIRED_SERIES_SUBDIR: Final = "paired-rgb-series"
+
+#: Sweeps get a dated directory of their own rather than the root: one sweep's
+#: ``frame_0000.raw`` would otherwise overwrite the last one's.
+SWEEP_SUBDIR_PREFIX: Final = "sweep"
+
+#: What the paired commands report as their default when no captures directory
+#: is recorded: they have never had one, and still refuse rather than choose.
+NO_DEFAULT_OUTPUT_DIR: Final = "none - required for execution"
+
+
+def _captures_root_for_help() -> Path | None:
+    """The configured captures root, or None if the config file cannot be read.
+
+    Help text is cosmetic, and a file too broken to parse must still leave
+    every command runnable - above all ``config`` itself, which is how the file
+    gets fixed. The commands that would actually WRITE there do not use this:
+    they read the setting properly and refuse with the parse error.
+    """
+    try:
+        return configured_captures_dir()
+    except ConfigFileUnreadable:
+        return None
+
+
+def _captures_plan(root: Path | None) -> list[tuple[str, str]]:
+    """What each capture command would use as its output directory, right now."""
+    if root is None:
+        return [
+            (DEPTH_PROFILE.name, str(DEPTH_PROFILE.default_output_dir)),
+            (RGB_PROFILE.name, str(RGB_PROFILE.default_output_dir)),
+            (PAIRED_CAPTURE_SUBDIR, "no default - --output-dir is required"),
+            (PAIRED_SERIES_SUBDIR, "no default - --output-dir is required"),
+            (SWEEP_COMMAND, "no default - the output argument is required"),
+        ]
+    return [
+        (DEPTH_PROFILE.name, str(root / DEPTH_PROFILE.name)),
+        (RGB_PROFILE.name, str(root / RGB_PROFILE.name)),
+        (PAIRED_CAPTURE_SUBDIR, str(root / PAIRED_CAPTURE_SUBDIR)),
+        (PAIRED_SERIES_SUBDIR, str(root / PAIRED_SERIES_SUBDIR)),
+        (SWEEP_COMMAND, str(root / f"{SWEEP_SUBDIR_PREFIX}-<date>-<time>")),
+    ]
+
+
+def _cmd_config(args: argparse.Namespace) -> int:
+    """Show the persistent settings, and set or clear the captures directory.
+
+    Entirely local: it opens no device and runs no discovery. Setting a value
+    is the only thing in this program that writes to the user's home directory,
+    and it happens only because this command was typed.
+    """
+    changed: str | None = None
+    try:
+        if args.set_captures_dir is not None:
+            target = set_captures_dir(args.set_captures_dir)
+            changed = f"captures directory set to {target}"
+        elif args.unset_captures_dir:
+            removed = clear_captures_dir()
+            changed = (
+                "captures directory cleared; commands are back to their own defaults"
+                if removed
+                else "no captures directory was recorded, so nothing changed"
+            )
+    except (ConfigFileUnreadable, ConfigWriteRefused) as exc:
+        print(f"configuration not changed: {exc}", file=sys.stderr)
+        return EXIT_CODES[exc.status]
+
+    try:
+        serial = configured_serial()
+        serial_from = serial_source()
+        captures = configured_captures_dir()
+        source = captures_dir_source()
+        plan = _captures_plan(captures)
+    except ConfigFileUnreadable as exc:
+        print(f"cannot read configuration: {exc}", file=sys.stderr)
+        return EXIT_CODES[exc.status]
+
+    path = config_path()
+    payload: dict[str, object] = {
+        "config_file": str(path),
+        "config_file_exists": path.is_file(),
+        "serial": {"value": serial, "source": serial_from},
+        "captures_directory": {
+            "value": None if captures is None else str(captures),
+            "source": source,
+            "exists": captures is not None and captures.is_dir(),
+        },
+        "capture_output_directories": dict(plan),
+    }
+    if changed is not None:
+        payload["changed"] = changed
+
+    if not args.json:
+        if changed is not None:
+            print(changed)
+        print("scanner3d configuration")
+        print(f"  file: {path}{'' if path.is_file() else ' (not written yet)'}")
+        if serial is None:
+            print("  serial: not set - a single attached scanner is used, two are refused")
+        else:
+            print(f"  serial: {serial} (from {serial_from})")
+        if captures is None:
+            print("  captures directory: not set - each command keeps its own default")
+        else:
+            missing = "" if captures.is_dir() else "  (does not exist yet)"
+            print(f"  captures directory: {captures} (from {source}){missing}")
+        print("  capture output directories:")
+        width = max(len(name) for name, _ in plan)
+        for name, where in plan:
+            print(f"    {name:<{width}}  {where}")
+        if changed is not None and source == CAPTURES_DIR_ENV_VAR:
+            print(
+                f"  note: {CAPTURES_DIR_ENV_VAR} is set in this shell and still wins over "
+                "the file that was just written. Unset it there to see the change.",
+                file=sys.stderr,
+            )
+    _emit(payload, args)
+    return 0
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
@@ -1663,7 +1804,14 @@ def _run_frame_capture(
         )
         return OWNERSHIP_EXIT_CODES[OwnershipStatus.REFUSED]
 
-    output_dir = args.output_dir if args.output_dir is not None else profile.default_output_dir
+    # A configured captures directory replaces the profile's own fallback, and
+    # is itself replaced by an explicit --output-dir: the more specific answer
+    # always wins, and neither ever reaches the hardware.
+    output_dir = (
+        args.output_dir
+        if args.output_dir is not None
+        else captures_dir_for(profile.name, profile.default_output_dir)
+    )
     backend = backend_factory(sysfs_root=args.sysfs_root, dev_root=args.dev_root)
     try:
         outcome = (
@@ -1923,20 +2071,27 @@ paired_termination_shield = defer_termination
 
 def _cmd_paired_capture(args: argparse.Namespace) -> int:
     """Run the fixed paired backend only after the exact opt-in."""
+    # A configured captures directory stands in for --output-dir here, and
+    # nowhere else does it soften a refusal: an output directory that was
+    # deliberately recorded is as explicit as one typed, and this command still
+    # refuses to run with nowhere to put what it captures.
+    output_dir = (
+        args.output_dir if args.output_dir is not None else captures_dir_for(PAIRED_CAPTURE_SUBDIR)
+    )
     if args.start_depth_first_rgb_second:
         if args.serial != paired_capture.AUTHORIZED_SERIAL:
             runner = paired_capture.PairedCapture(
                 None, termination_shield=paired_termination_shield
             )
             outcome = runner.run(args.serial or "", opt_in=paired_capture.EXECUTE_OPT_IN)
-        elif args.output_dir is None:
+        elif output_dir is None:
             outcome = paired_capture.PairedOutcome(
                 paired_capture.PairedStatus.REFUSED,
                 "required local --output-dir is missing",
                 plan=paired_capture.PairedPlan(),
             )
         else:
-            backend = paired_backend_factory(args.output_dir)
+            backend = paired_backend_factory(output_dir)
             runner = paired_capture.PairedCapture(
                 backend, termination_shield=paired_termination_shield
             )
@@ -2016,6 +2171,9 @@ def _cmd_paired_capture(args: argparse.Namespace) -> int:
 def _cmd_paired_rgb_series(args: argparse.Namespace) -> int:
     """Run the fixed depth-first paired RGB-series diagnostic."""
     telemetry_requested = bool(args.read_rgb_controls_during_series)
+    output_dir = (
+        args.output_dir if args.output_dir is not None else captures_dir_for(PAIRED_SERIES_SUBDIR)
+    )
     if args.start_depth_first_rgb_series:
         if args.serial != paired_capture.AUTHORIZED_SERIAL:
             runner = paired_capture.RgbSeriesCapture(
@@ -2026,7 +2184,7 @@ def _cmd_paired_rgb_series(args: argparse.Namespace) -> int:
                 opt_in=paired_capture.RGB_SERIES_EXECUTE_OPT_IN,
                 read_rgb_controls_during_series=telemetry_requested,
             )
-        elif args.output_dir is None:
+        elif output_dir is None:
             outcome = paired_capture.PairedOutcome(
                 paired_capture.PairedStatus.REFUSED,
                 "required local --output-dir is missing",
@@ -2035,7 +2193,7 @@ def _cmd_paired_rgb_series(args: argparse.Namespace) -> int:
                 rgb_control_telemetry_requested=telemetry_requested,
             )
         else:
-            backend = paired_backend_factory(args.output_dir)
+            backend = paired_backend_factory(output_dir)
             runner = paired_capture.RgbSeriesCapture(
                 backend, termination_shield=paired_termination_shield
             )
@@ -2164,6 +2322,27 @@ def _cmd_sweep(args: argparse.Namespace) -> int:
 
     from scanner3d.config import resolve_serial
     from scanner3d.v4l2_stream import stream_frames
+
+    output = args.output
+    if output is None:
+        # A dated directory of its own, never the captures root itself: this
+        # command writes frame_0000.raw upward, so a second sweep sharing a
+        # directory would overwrite the first frame by frame.
+        output = captures_dir_for(dated_capture_name(SWEEP_SUBDIR_PREFIX))
+        if output is None:
+            print(
+                "nowhere to write this sweep: name a directory, or record a default with "
+                "'scanner3d config --set-captures-dir DIR' and sweeps land in a dated "
+                "directory under it",
+                file=sys.stderr,
+            )
+            return EXIT_CODES[DoctorStatus.UNSUPPORTED_MODE]
+        # Said out loud only when nobody typed it: a capture whose frames went
+        # somewhere the caller never named must not be findable only by
+        # guessing at the naming scheme.
+        if not args.json:
+            print(f"writing frames to {output}", file=sys.stderr, flush=True)
+        args.output = output
 
     args.output.mkdir(parents=True, exist_ok=True)
     written = 0
@@ -2393,6 +2572,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"scanner3d {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    # Read once, for help text only: every default below states where a capture
+    # would actually land, so a recorded captures directory is visible in
+    # --help rather than only in the behaviour.
+    captures_root = _captures_root_for_help()
+
     def add_roots(p: argparse.ArgumentParser) -> None:
         p.add_argument(
             "--sysfs-root",
@@ -2407,6 +2591,45 @@ def build_parser() -> argparse.ArgumentParser:
             help="device-node root to inspect (override for fixture replay)",
         )
         p.add_argument("--json", action="store_true", help="emit JSON instead of text")
+
+    configure = sub.add_parser(
+        "config",
+        allow_abbrev=False,
+        help="show the persistent settings, or set the default captures directory",
+        description=(
+            "Report what this installation has been told - which scanner it may touch, and "
+            "where captures go - and where each answer comes from. With "
+            "--set-captures-dir, record a captures directory so every capture command "
+            f"writes under it from then on: {DEPTH_PROFILE.name} and {RGB_PROFILE.name} "
+            f"into subdirectories named after themselves, {SWEEP_COMMAND} into a dated one "
+            "of its own. Nothing here opens a device, and the directory is not created or "
+            "checked: the command that writes there reports on it in its own terms. "
+            f"{CAPTURES_DIR_ENV_VAR} overrides the recorded value for one shell without "
+            "changing the file."
+        ),
+    )
+    # Exclusive because "set it to this, and also unset it" has no answer worth
+    # guessing at, and picking one silently would write the opposite of what
+    # half the command asked for.
+    captures_setting = configure.add_mutually_exclusive_group()
+    captures_setting.add_argument(
+        "--set-captures-dir",
+        type=Path,
+        metavar="DIR",
+        help=(
+            f"record DIR as the default captures directory, written as {CAPTURES_KEY} under "
+            f"[{CAPTURES_TABLE}] in {config_path()}. Stored expanded and absolute; every "
+            "other line of the file, comments included, is preserved"
+        ),
+    )
+    captures_setting.add_argument(
+        "--unset-captures-dir",
+        action="store_true",
+        help="remove the recorded captures directory; commands return to their own defaults",
+    )
+    configure.add_argument("--json", action="store_true", help="emit JSON instead of text")
+    configure.add_argument("--json-out", type=Path, help="also write the JSON result to this path")
+    configure.set_defaults(func=_cmd_config)
 
     doctor = sub.add_parser("doctor", help="diagnose the attached scanner")
     add_roots(doctor)
@@ -2764,7 +2987,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help=(
             "where to write the raw frame and its tightly packed copy. Shapes only local "
-            f"evidence, never the hardware. Default: {DEFAULT_OUTPUT_DIR}"
+            "evidence, never the hardware. Default: "
+            f"{captures_root / DEPTH_PROFILE.name if captures_root else DEFAULT_OUTPUT_DIR}"
         ),
     )
     frame.add_argument("--json-out", type=Path, help="also write the JSON result to this path")
@@ -2836,7 +3060,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help=(
             f"where to write {RGB_ARTIFACT_NAME}. Shapes only local evidence, never the "
-            f"hardware. Default: {RGB_DEFAULT_OUTPUT_DIR}"
+            f"hardware. Default: "
+            f"{captures_root / RGB_PROFILE.name if captures_root else RGB_DEFAULT_OUTPUT_DIR}"
         ),
     )
     rgb.add_argument("--json-out", type=Path, help="also write the JSON result to this path")
@@ -2901,7 +3126,10 @@ def build_parser() -> argparse.ArgumentParser:
     paired.add_argument(
         "--output-dir",
         type=Path,
-        help="local evidence directory for an opted-in paired run",
+        help=(
+            "local evidence directory for an opted-in paired run. Default: "
+            f"{captures_root / PAIRED_CAPTURE_SUBDIR if captures_root else NO_DEFAULT_OUTPUT_DIR}"
+        ),
     )
     paired.add_argument("--serial", help="required exact scanner serial for execution")
     paired.add_argument(
@@ -2922,12 +3150,20 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Run the fixed depth-first paired RGB-series diagnostic. The default is offline "
             "and opens nothing; execution requires the exact opt-in, authorized serial and "
-            "an explicit output directory."
+            "an output directory - either --output-dir or a recorded captures directory "
+            "(scanner3d config --set-captures-dir DIR), never a guess."
         ),
     )
     series.add_argument("--json", action="store_true", help="emit JSON instead of text")
     series.add_argument("--json-out", type=Path, help="also write the result to this path")
-    series.add_argument("--output-dir", type=Path, help="local evidence directory for execution")
+    series.add_argument(
+        "--output-dir",
+        type=Path,
+        help=(
+            "local evidence directory for execution. Default: "
+            f"{captures_root / PAIRED_SERIES_SUBDIR if captures_root else NO_DEFAULT_OUTPUT_DIR}"
+        ),
+    )
     series.add_argument("--serial", help="required exact scanner serial for execution")
     series.add_argument(
         "--read-rgb-controls-during-series",
@@ -3093,7 +3329,20 @@ def build_parser() -> argparse.ArgumentParser:
             "only thing that lets drift be detected and corrected afterwards."
         ),
     )
-    sweep.add_argument("output", type=Path, help="directory to write raw frames into")
+    sweep.add_argument(
+        "output",
+        type=Path,
+        nargs="?",
+        help=(
+            "directory to write raw frames into. Default: "
+            f"{captures_root / f'{SWEEP_SUBDIR_PREFIX}-<date>-<time>'}, a dated directory "
+            "of its own so one sweep cannot overwrite another"
+            if captures_root is not None
+            else "directory to write raw frames into. Required until a captures directory "
+            "is recorded with 'scanner3d config --set-captures-dir DIR', after which "
+            "each sweep gets a dated directory under it"
+        ),
+    )
     sweep.add_argument(
         "--frames", type=int, default=1250, help="frames to DELIVER before stopping (default 1250)"
     )
@@ -3530,7 +3779,15 @@ def _cmd_depth_frame_to_ply(args: argparse.Namespace) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    result: int = args.func(args)
+    try:
+        result: int = args.func(args)
+    except ConfigFileUnreadable as exc:
+        # Every command can now consult the config file for where its output
+        # goes, so every command can meet a broken one. A traceback would be a
+        # worse answer than the sentence the exception already carries, and
+        # 'config' can still be run to fix it.
+        print(f"cannot read configuration: {exc}", file=sys.stderr)
+        return EXIT_CODES[exc.status]
     return result
 
 
