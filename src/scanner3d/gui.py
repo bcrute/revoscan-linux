@@ -62,6 +62,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QFileDialog,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMessageBox,
@@ -77,12 +78,16 @@ from PySide6.QtWidgets import (
 
 from scanner3d.cloud_view import CloudView
 from scanner3d.config import (
+    CAPTURES_DIR_ENV_VAR,
+    GUI_CAPTURE_COMMAND,
+    CaptureDirUnavailable,
     ConfigFileUnreadable,
     ConfigWriteRefused,
-    captures_dir_for,
+    allocate_capture_dir,
+    captures_dir_source,
     configured_captures_dir,
-    dated_capture_name,
     set_captures_dir,
+    validate_capture_name,
 )
 from scanner3d.coverage import coverage_map
 from scanner3d.discovery import find_scanners
@@ -117,10 +122,13 @@ COVERAGE_EVERY: Final = 12
 #: thrown away and recomputed properly by Reconstruct.
 PREVIEW_POINTS: Final = 900
 
-#: What a capture directory is called under the captures folder. Dated, and one
-#: per capture: this window writes frame_0000.raw upward, so a second capture
-#: sharing a directory would overwrite the first frame by frame.
-CAPTURE_PREFIX: Final = "scan"
+#: The namespace this window claims under the captures folder. Inside it, each
+#: capture gets a freshly created directory - named by whoever started the scan,
+#: or dated when they left the name blank: this window writes frame_0000.raw
+#: upward, so a second capture sharing a directory would overwrite the first
+#: frame by frame. Defined in :mod:`scanner3d.config` so that ``scanner3d
+#: config`` reports the same name this uses.
+CAPTURE_PREFIX: Final = GUI_CAPTURE_COMMAND
 
 LOG = get_logger("gui")
 
@@ -324,6 +332,13 @@ class ScannerWindow(QMainWindow):
         bar.addAction(self._preview_action)
 
         self._capture_action = QAction("Start capture", self)
+        self._capture_action.setToolTip(
+            "Record a scan. You are asked for a name first - give it one you will\n"
+            "recognise, or leave it blank and today's date and time are used.\n\n"
+            "Every scan gets a brand-new folder of its own under the captures\n"
+            "folder, so a scan can never be written on top of an earlier one. If\n"
+            "the name is already taken, -2, -3 and so on are added."
+        )
         self._capture_action.triggered.connect(self._start_capture)
         bar.addAction(self._capture_action)
 
@@ -761,21 +776,36 @@ class ScannerWindow(QMainWindow):
         worker.start()
 
     # -- where captures go -------------------------------------------------
+    def _effective_captures_dir(self) -> tuple[Path | None, str | None]:
+        """The captures root that will actually be used, and what states it.
+
+        Both, always together. The file is not the only thing that answers this
+        question, and reporting a value without its source is how someone ends
+        up looking for their frames under the folder they just chose while an
+        environment variable quietly sends them somewhere else.
+        """
+        try:
+            return configured_captures_dir(), captures_dir_source()
+        except ConfigFileUnreadable:
+            return None, None
+
     def _refresh_captures_action(self) -> None:
         """Keep the toolbar honest about where the next capture will land."""
         try:
             configured = configured_captures_dir()
+            source = captures_dir_source()
         except ConfigFileUnreadable as exc:
             self._captures_action.setToolTip(f"Captures folder unreadable:\n{exc}")
             return
+        if configured is None:
+            current = "Not set - you are asked for a folder every time."
+        else:
+            current = f"Currently: {configured}\nStated by: {source}"
         self._captures_action.setToolTip(
-            "Where captures go. Set it once and every capture lands in a dated\n"
-            "folder of its own underneath, without being asked.\n\n"
-            + (
-                f"Currently: {configured}"
-                if configured is not None
-                else "Not set - you are asked for a folder every time."
-            )
+            "Where captures go. Set it once and every capture lands in a fresh\n"
+            f"folder of its own under {CAPTURE_PREFIX}/, without being asked where.\n"
+            "Each scan is named when you start it, or dated if you leave the\n"
+            "name blank.\n\n" + current
         )
 
     def _choose_captures_dir(self) -> None:
@@ -790,30 +820,103 @@ class ScannerWindow(QMainWindow):
         if not directory:
             return
         try:
-            target = set_captures_dir(Path(directory))
+            target = set_captures_dir(Path(directory)).path
         except (ConfigFileUnreadable, ConfigWriteRefused) as exc:
             LOG.error("captures folder not recorded: %s", exc)
             QMessageBox.warning(self, "3D Scanner", str(exc))
             return
         self._refresh_captures_action()
-        self._log(f"Captures will go under {target}, in a dated folder each time.")
-        self.statusBar().showMessage(f"captures folder: {target}", 6000)
+        # Reported from the setting read back, never from the folder that was
+        # chosen: an environment variable outranks the file, and saying
+        # "captures will go under <what you picked>" when they will not is
+        # exactly the surprise this whole setting exists to remove.
+        effective, source = self._effective_captures_dir()
+        if source == CAPTURES_DIR_ENV_VAR:
+            message = (
+                f"Recorded {target}, but {CAPTURES_DIR_ENV_VAR} is set in this session and "
+                f"wins: captures go under {effective}/{CAPTURE_PREFIX}, in a new folder each "
+                "time, named when you start the scan."
+            )
+        else:
+            message = (
+                f"Captures will go under {effective}/{CAPTURE_PREFIX}, in a new folder each "
+                "time, named when you start the scan."
+            )
+        self._log(message)
+        self.statusBar().showMessage(f"captures folder: {effective}", 6000)
+
+    def _capture_name(self) -> str | None:
+        """What to call this scan: a validated leaf name, "" for dated, or None.
+
+        None means "do not capture" and covers both ways of saying it - the
+        dialog was cancelled, or the name it returned cannot be a folder name.
+        Both are the same instruction to the caller, and both happen before
+        anything is created, so there is nothing for the caller to undo.
+
+        Asked before the preview is released and long before a device is
+        opened, because a cancelled prompt must cost nothing: no directory, no
+        interrupted preview, no scanner touched.
+        """
+        typed, accepted = QInputDialog.getText(
+            self,
+            "Start capture",
+            "Name this scan (optional).\n"
+            "Leave it blank and the folder is named with today's date and time.\n"
+            "One folder name, please: no '/' or '\\', and no tabs or line breaks.",
+        )
+        if not accepted:
+            return None
+        try:
+            return validate_capture_name(typed)
+        except CaptureDirUnavailable as exc:
+            # CaptureNameInvalid, in practice. Caught by the base class so that
+            # a name refused for a reason added later still stops the capture
+            # here rather than escaping into a traceback.
+            LOG.warning("scan name refused: %s", exc)
+            QMessageBox.warning(self, "3D Scanner", str(exc))
+            return None
 
     def _capture_target(self) -> Path | None:
-        """The directory for the capture about to start, or None if cancelled.
+        """The directory for the capture about to start, or None if there is none.
+
+        Always a directory created here and now, one level down inside the
+        captures root's ``scan`` namespace, that no earlier capture can already
+        have written into. Never the captures root itself and never a folder
+        somebody merely pointed at: this window writes ``frame_0000.raw``
+        upward, so a second capture sharing a directory would overwrite the
+        first frame by frame.
 
         A recorded captures folder is the whole point of having one: it answers
-        this without a dialog. Without one, the question still has to be asked.
+        where without a dialog. Without one, the question still has to be
+        asked - and what the answer names is the captures ROOT, with the fresh
+        per-scan folder allocated underneath it exactly as if it had been
+        recorded.
+
+        A folder that is recorded but cannot be allocated is refused rather
+        than quietly demoted to the dialog: the answer to "I cannot write where
+        you told me to" is to say so, not to put the frames somewhere else.
         """
+        name = self._capture_name()
+        if name is None:
+            return None
         try:
-            configured = captures_dir_for(dated_capture_name(CAPTURE_PREFIX))
+            root = configured_captures_dir()
         except ConfigFileUnreadable as exc:
             LOG.warning("captures folder unreadable, asking instead: %s", exc)
-            configured = None
-        if configured is not None:
-            return configured
-        directory = QFileDialog.getExistingDirectory(self, "Where should the frames go?")
-        return Path(directory) if directory else None
+            root = None
+        if root is None:
+            directory = QFileDialog.getExistingDirectory(
+                self, "Which folder should captures go under?"
+            )
+            if not directory:
+                return None
+            root = Path(directory)
+        try:
+            return allocate_capture_dir(CAPTURE_PREFIX, root=root, name=name)
+        except CaptureDirUnavailable as exc:
+            LOG.error("no capture folder could be created: %s", exc)
+            QMessageBox.warning(self, "3D Scanner", str(exc))
+            return None
 
     # -- capture -----------------------------------------------------------
     def _start_capture(self) -> None:
@@ -903,12 +1006,24 @@ class ScannerWindow(QMainWindow):
 
         self._run(job, self._capture_done)
 
-    def _capture_done(self, _result: object) -> None:
+    def _capture_done(self, result: object) -> None:
         self._busy(False)
         if self._resume_preview_after:
             self._preview_action.setChecked(True)
         kept = len(list(self._capture_dir.glob("frame_*.raw"))) if self._capture_dir else 0
         self._log(f"\nCaptured {kept} frames to {self._capture_dir}")
+        # Said out loud only when it happened. The stream drops a buffer the
+        # device delivered short of a whole frame, which is the right thing to
+        # do with it and is also invisible from here: the folder simply holds
+        # fewer files than were asked for. Without this line that gap has no
+        # explanation, and the obvious guess - that the scan failed - is wrong.
+        short = getattr(result, "short_frames", 0)
+        if short:
+            self._log(
+                f"{short} incomplete frame(s) arrived from the scanner and were skipped, "
+                "so there are fewer here than you asked for. Every file above is a whole "
+                "frame; a partial one is not usable and is never written."
+            )
         self._log("Press Reconstruct to register them and get a score you can trust.")
 
     # -- reconstruct -------------------------------------------------------

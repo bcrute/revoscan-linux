@@ -40,6 +40,11 @@ It writes no artifact and makes no claim about any frame's content. It hands
 raw bytes to a callback and records what happened. Whether the bytes are a good
 frame is :mod:`~scanner3d.depth_metric`'s question, not this module's.
 
+It does judge one thing, and only one: LENGTH. A buffer the driver hands back
+short of a whole frame is recorded, counted and dropped rather than passed on,
+because a partial frame is not a frame with bad content - it is not a frame.
+That check lives here because every consumer shares this boundary.
+
 It makes no claim about frame rate either. The numbers above were measured on
 one unit, on one day, with one scene, and are recorded as motivation rather
 than as a specification. Every run reports its own observed intervals.
@@ -173,7 +178,27 @@ class FrameRecord:
 
 @dataclass(frozen=True, slots=True)
 class StreamResult:
-    """What a run actually did. Every field is recorded, none inferred."""
+    """What a run actually did. Every field is recorded, none inferred.
+
+    The three counts answer three different questions and are not
+    interchangeable:
+
+    ``delivered``
+        Buffers dequeued from the driver, short ones included. It is the length
+        of ``records``, and it is what ``requested`` bounds - asking for *n*
+        frames bounds how many deliveries are taken, and promises nothing about
+        how many of them turn out to be full length.
+    ``short_frames``
+        How many of those deliveries were not exactly
+        :data:`~scanner3d.v4l2_capture.EXPECTED_FRAME_BYTES`. Each one still has
+        its own :class:`FrameRecord`, with ``complete`` false and ``bytes_used``
+        set to what actually arrived.
+    ``kept``
+        Complete deliveries selected by decimation - the ones handed to the
+        callback. A run that saw short frames keeps fewer than its decimation
+        alone would suggest, and that shortfall is exactly what
+        ``short_frames`` explains.
+    """
 
     node_path: str
     serial: str
@@ -247,8 +272,12 @@ class StreamResult:
                 "elsewhere.",
                 "The observed frame rate is a property of this run, not a specification. "
                 "It varies with the scene and the device's own projector sequence.",
-                "A frame counted as delivered was dequeued at full length. A short frame "
-                "is counted separately and never silently included.",
+                "'delivered' counts every buffer dequeued, short ones included; a "
+                "delivery is NOT a claim of full length. 'short_frames' says how many "
+                "of them fell short, and each is recorded individually.",
+                "'kept' counts only complete deliveries selected by decimation. A short "
+                "delivery is never padded, truncated or handed to a consumer, so a run "
+                "with short frames keeps fewer than its decimation alone implies.",
             ],
         }
 
@@ -355,11 +384,23 @@ def stream_frames(
 ) -> StreamResult:
     """Open the depth stream once and consume ``frames`` frames from it.
 
+    ``frames`` bounds DELIVERIES, not keeps: it is how many buffers this run
+    will dequeue, and a run that asks for 200 may hand the callback fewer.
+
     ``on_frame`` receives ``(raw_bytes, record)`` for every KEPT frame, which is
-    every ``decimate``-th delivered frame. Decimation exists because a full
-    turntable revolution at the measured cadence is several hundred frames and
-    over a quarter of a gigabyte; a caller that wants a 3-degree angular step
-    should not have to buffer everything to get it.
+    every ``decimate``-th delivered frame THAT ARRIVED AT FULL LENGTH.
+    Decimation exists because a full turntable revolution at the measured
+    cadence is several hundred frames and over a quarter of a gigabyte; a caller
+    that wants a 3-degree angular step should not have to buffer everything to
+    get it.
+
+    A buffer whose ``bytesused`` is not exactly
+    :data:`~scanner3d.v4l2_capture.EXPECTED_FRAME_BYTES` is recorded, counted in
+    ``short_frames``, re-queued and then dropped. It never reaches the callback,
+    even when decimation selects its delivered index, because every consumer
+    downstream of here - preview, deprojection, ``frame_*.raw`` on disk - would
+    otherwise be handed something that is not a depth frame. Filtering it in one
+    place is what keeps them all from having to.
 
     The bytes handed to the callback are a copy taken from the mmap before the
     buffer is re-queued. That copy is not optional: the kernel may refill the
@@ -487,15 +528,34 @@ def stream_frames(
             )
             records.append(record)
 
-            if on_frame is not None and index % decimate == 0:
-                # Copy before re-queueing: the kernel may refill this mapping the
-                # instant it is queued, so a view handed out here would mutate.
-                payload = bytes(maps[buffer_index][:used])
+            # ``complete`` gates the callback, and it gates it HERE rather than
+            # in each consumer. MEASURED on 2026-08-26: the first buffer of a
+            # GUI scan arrived with bytesused 358402 of the expected 512000, and
+            # the frame was written to disk and deprojected anyway, which failed
+            # with DepthFrameSizeMismatch and took the whole scan down at
+            # startup. A short delivery is a transport event, not a frame: it is
+            # recorded above and counted in ``short_frames``, and then it is
+            # dropped. It is deliberately NOT padded, truncated or re-read - the
+            # missing bytes were never delivered, and any frame manufactured
+            # from what did arrive would be a fabrication with a plausible size.
+            #
+            # ``kept`` therefore counts only complete deliveries. Decimation
+            # still selects on the DELIVERED index, so a short frame consumes
+            # its slot rather than shifting the next one into it: the selection
+            # stays a property of arrival order, not of which frames happened to
+            # be usable.
+            if complete and index % decimate == 0:
                 kept += 1
-                on_frame(payload, record)
-            elif index % decimate == 0:
-                kept += 1
+                if on_frame is not None:
+                    # Copy before re-queueing: the kernel may refill this mapping
+                    # the instant it is queued, so a view handed out here would
+                    # mutate.
+                    on_frame(bytes(maps[buffer_index][:used]), record)
 
+            # Unconditional, and reached by a short delivery on exactly the same
+            # path as a complete one: the buffer is the driver's either way, and
+            # a run that kept one back would leave userspace owning it at
+            # teardown - which this hardware answers by re-enumerating.
             fcntl.ioctl(fd, VIDIOC_QBUF, buf, True)
 
             # Polled here, AFTER re-queueing, so the driver owns every buffer

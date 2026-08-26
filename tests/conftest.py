@@ -8,12 +8,45 @@ configuration descriptor of the physical Revopoint MINI used for this task.
 
 from __future__ import annotations
 
+import atexit
+import os
+import shutil
+import tempfile
 from pathlib import Path
 
 import pytest
 
 FIXTURES = Path(__file__).parent / "fixtures"
 REAL_SERIAL = "EXAMPLESERIAL0001"
+
+
+def _isolate_config_before_collection() -> Path:
+    """Point the whole process at an empty configuration, at import time.
+
+    This runs when pytest imports this conftest, which is BEFORE it imports a
+    single test module - and that ordering is the entire point. Several modules
+    evaluate ``AUTHORIZED_SERIAL = stated_serial()`` while they are being
+    imported, so a fixture, however early, is already too late: by the time it
+    runs, the constant has captured whatever the machine's own
+    ``~/.config/scanner3d/config.toml`` said. On a developer who has recorded
+    their own scanner's serial, tests unrelated to their change start failing,
+    and a test asserting a default passes or fails depending on somebody's home
+    directory.
+
+    Only the process environment is touched, and only here. Tests that
+    deliberately set these variables still override this with ``monkeypatch``,
+    which is what makes the environment-precedence tests possible at all.
+    """
+    home = Path(tempfile.mkdtemp(prefix="scanner3d-config-isolation-"))
+    os.environ["XDG_CONFIG_HOME"] = str(home)
+    os.environ.pop("SCANNER3D_SERIAL", None)
+    os.environ.pop("SCANNER3D_CAPTURES_DIR", None)
+    atexit.register(shutil.rmtree, home, ignore_errors=True)
+    return home
+
+
+#: The empty config home every import-time constant is read against.
+ISOLATED_CONFIG_HOME = _isolate_config_before_collection()
 
 
 def descriptor_blob() -> bytes:
@@ -165,13 +198,13 @@ class SysfsBuilder:
 
 @pytest.fixture(autouse=True)
 def isolated_config(monkeypatch, tmp_path_factory):
-    """Point every test at an empty configuration, and no environment overrides.
+    """Give every test its own empty configuration, and no environment overrides.
 
-    Without this the suite reads whichever ``~/.config/scanner3d/config.toml``
-    the machine running it happens to have, so a developer who records a
-    captures directory or a serial for their own scanner starts failing tests
-    that have nothing to do with their change - and, worse, a test asserting a
-    default would pass or fail depending on someone's home directory.
+    :func:`_isolate_config_before_collection` has already detached this process
+    from the host's configuration; this gives each test a fresh directory on top
+    of that, so a test that writes a config file cannot change what the next one
+    reads. Both are needed: that one runs early enough for import-time
+    constants, this one runs often enough for isolation between tests.
     """
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path_factory.mktemp("config-home")))
     monkeypatch.delenv("SCANNER3D_SERIAL", raising=False)

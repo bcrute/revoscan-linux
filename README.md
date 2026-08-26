@@ -10,7 +10,7 @@ up, with no vendor SDK at runtime.
 ```
 scanner3d-gui                                    # desktop application
 scanner3d config --set-captures-dir ~/scans      # where captures go, once
-scanner3d sweep                                  # capture a sweep into ~/scans/sweep-<date>-<time>
+scanner3d sweep                                  # capture into ~/scans/sweep/<date>-<time>
 scanner3d reconstruct FRAMES_DIR --backend scipy # register and score it
 ```
 
@@ -84,14 +84,54 @@ scanner3d config                              # show it, and what each command w
 scanner3d config --unset-captures-dir         # back to each command's own default
 ```
 
-It is a *root*, not a capture directory: `depth-frame` and `rgb-frame` write into subdirectories
-named after themselves, and `sweep` and the desktop application each get a dated directory of
-their own (`sweep-20260825-174501`), because one sweep's `frame_0000.raw` would otherwise
-overwrite the last one's. An explicit `--output-dir`, or `sweep`'s output argument, still wins;
-with nothing recorded, every command keeps the default it always had. The directory is neither
-created nor checked when it is recorded — the command that writes there reports on it in its own
-terms. In the desktop application, **Captures folder…** records the same setting, and once it is
-set, Start capture stops asking where to put the frames.
+It is a *root*, not a capture directory. Each command claims a subdirectory named after itself,
+and every execution gets a freshly created directory inside that one — dated, or named by you
+when the desktop application asks:
+
+```
+~/scans/sweep/20260825-174501        # one sweep
+~/scans/sweep/20260825-174501-2      # a second sweep started in the same second
+~/scans/depth-frame/20260825-174630  # one depth-frame capture
+~/scans/scan/20260825-175012         # a desktop-application scan you did not name
+~/scans/scan/chassis left side       # one you did
+~/scans/scan/chassis left side-2     # the same name, used again a week later
+```
+
+No *automatically allocated* directory is ever one that already exists, because these commands
+write fixed filenames — one sweep's `frame_0000.raw` would otherwise overwrite the last one's,
+and `depth-frame` would spend a capture only to fail preserving it. Each one is created with a
+plain `mkdir`, which the kernel makes atomic, so two processes starting in the same second, a
+restart, a clock dragged backwards and the repeated hour of a DST change all get different
+directories — or a refusal, issued before the scanner is opened. This is a guarantee about the
+directories the tool picks for itself; a directory you name yourself is yours (see below).
+
+An explicit `--output-dir`, or `sweep`'s output argument, still wins and keeps its old meaning:
+that directory is used exactly as given, existing or not, alongside whatever is already in it.
+Nothing above applies to it — a path you typed is a path you own, and quietly capturing into a
+dated subdirectory of it, or refusing because it exists, would both be the tool overruling you.
+With nothing recorded, every command keeps the default it always had. The root itself is
+neither created nor checked when it is recorded — the command that writes there reports on it
+in its own terms. A relative path hand-written into the config file is resolved against the
+directory holding `config.toml`, while `SCANNER3D_CAPTURES_DIR` is resolved against the working
+directory, because a one-shell override can mean nothing else.
+
+In the desktop application, **Captures folder…** records the same setting, and once it is set,
+Start capture stops asking where to put the frames. It always asks one thing, though: a name for
+the scan. Leave the box blank and the folder is dated for you, exactly like the commands above;
+type something and that is the folder name, spaces and all. Either way the frames go into a
+folder created there and then under `scan/`, never into the captures folder itself, and never
+into a folder that already exists — a name you have used before gets `-2`, `-3` and so on.
+
+A scan name is one folder name, not a path: `.`, `..`, and anything containing `/` or `\` are
+refused with a message, and nothing is created. Both separators are refused on every system,
+because a captures tree gets copied to one where the other one splits paths. So is any Unicode
+control character — a tab, a line break, a NUL, or one of the invisible C1 controls a paste can
+carry — and that check runs *before* surrounding spaces are trimmed, so a name made only of
+control characters is a refusal rather than a silently dated folder. Ordinary surrounding
+spaces are still just trimmed off, and internal spaces are kept. Cancelling the
+name prompt cancels the scan before the preview stops or the scanner is touched. With no
+captures folder recorded, Start capture asks for one — and what you pick is the *root*, with the
+per-scan folder allocated under `scan/` inside it just as if it had been recorded.
 
 ## Requirements
 

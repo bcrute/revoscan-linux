@@ -19,15 +19,17 @@ from scanner3d.config import (
     CAPTURES_DIR_ENV_VAR,
     CAPTURES_KEY,
     CAPTURES_TABLE,
+    GUI_CAPTURE_COMMAND,
+    CaptureDirUnavailable,
     ConfigFileUnreadable,
     ConfigWriteRefused,
+    allocate_capture_dir,
     captures_dir_for,
     captures_dir_source,
     clear_captures_dir,
     config_path,
     configured_captures_dir,
     configured_serial,
-    dated_capture_name,
     serial_source,
     set_captures_dir,
 )
@@ -307,9 +309,20 @@ def _maybe_run_probe(
 PAIRED_CAPTURE_SUBDIR: Final = "paired-capture"
 PAIRED_SERIES_SUBDIR: Final = "paired-rgb-series"
 
-#: Sweeps get a dated directory of their own rather than the root: one sweep's
+#: Sweeps get a namespace of their own rather than the root: one sweep's
 #: ``frame_0000.raw`` would otherwise overwrite the last one's.
 SWEEP_SUBDIR_PREFIX: Final = "sweep"
+
+#: What a per-execution directory is called in help and reports. A literal
+#: stand-in rather than today's date, because a report that printed one real
+#: name would be claiming a directory this command has not allocated and might
+#: never get - two runs in one second do not share a name.
+DATED_PLACEHOLDER: Final = "<date>-<time>"
+
+#: What the desktop application's namespace reports instead. It is the one
+#: caller that asks for a name, so a leaf there is whatever the person starting
+#: the scan called it, and only a blank answer produces DATED_PLACEHOLDER.
+NAMED_OR_DATED_PLACEHOLDER: Final = "<name-or-date>"
 
 #: What the paired commands report as their default when no captures directory
 #: is recorded: they have never had one, and still refuse rather than choose.
@@ -330,8 +343,34 @@ def _captures_root_for_help() -> Path | None:
         return None
 
 
+def _capture_commands() -> tuple[str, ...]:
+    """Every command that captures, in the order ``scanner3d config`` lists them.
+
+    The desktop application is here too: it takes a directory under the same
+    root, and a report that quietly omitted it would understate what the
+    setting does. A function rather than a constant only because
+    ``SWEEP_COMMAND`` is defined further down this module.
+    """
+    return (
+        DEPTH_PROFILE.name,
+        RGB_PROFILE.name,
+        PAIRED_CAPTURE_SUBDIR,
+        PAIRED_SERIES_SUBDIR,
+        SWEEP_COMMAND,
+        GUI_CAPTURE_COMMAND,
+    )
+
+
 def _captures_plan(root: Path | None) -> list[tuple[str, str]]:
-    """What each capture command would use as its output directory, right now."""
+    """What each capture command would use as its output directory, right now.
+
+    With a root recorded, every entry carries a placeholder rather than a name,
+    because that is the truth: each execution allocates its own directory under
+    the command's namespace and no two executions share one. The desktop
+    application's is :data:`NAMED_OR_DATED_PLACEHOLDER` rather than
+    :data:`DATED_PLACEHOLDER`, because it asks what to call the scan and only a
+    blank answer is dated.
+    """
     if root is None:
         return [
             (DEPTH_PROFILE.name, str(DEPTH_PROFILE.default_output_dir)),
@@ -339,13 +378,18 @@ def _captures_plan(root: Path | None) -> list[tuple[str, str]]:
             (PAIRED_CAPTURE_SUBDIR, "no default - --output-dir is required"),
             (PAIRED_SERIES_SUBDIR, "no default - --output-dir is required"),
             (SWEEP_COMMAND, "no default - the output argument is required"),
+            (GUI_CAPTURE_COMMAND, "no default - the application asks every time"),
         ]
     return [
-        (DEPTH_PROFILE.name, str(root / DEPTH_PROFILE.name)),
-        (RGB_PROFILE.name, str(root / RGB_PROFILE.name)),
-        (PAIRED_CAPTURE_SUBDIR, str(root / PAIRED_CAPTURE_SUBDIR)),
-        (PAIRED_SERIES_SUBDIR, str(root / PAIRED_SERIES_SUBDIR)),
-        (SWEEP_COMMAND, str(root / f"{SWEEP_SUBDIR_PREFIX}-<date>-<time>")),
+        (
+            name,
+            str(
+                root
+                / name
+                / (NAMED_OR_DATED_PLACEHOLDER if name == GUI_CAPTURE_COMMAND else DATED_PLACEHOLDER)
+            ),
+        )
+        for name in _capture_commands()
     ]
 
 
@@ -355,19 +399,29 @@ def _cmd_config(args: argparse.Namespace) -> int:
     Entirely local: it opens no device and runs no discovery. Setting a value
     is the only thing in this program that writes to the user's home directory,
     and it happens only because this command was typed.
+
+    A mutation is reported against the EFFECTIVE captures root read back
+    afterwards, never against the value that was written. The two differ
+    whenever ``SCANNER3D_CAPTURES_DIR`` is set, and telling someone their
+    captures will go where they just pointed the file - when the environment
+    will send them somewhere else entirely - is the one thing this command must
+    not do.
     """
-    changed: str | None = None
+    action: str | None = None
+    file_value: str | None = None
+    file_changed = False
     try:
         if args.set_captures_dir is not None:
-            target = set_captures_dir(args.set_captures_dir)
-            changed = f"captures directory set to {target}"
+            action = "set"
+            recorded = set_captures_dir(args.set_captures_dir)
+            file_value = str(recorded.path)
+            # The writer's own answer, not an assumption: setting the value the
+            # file already states changes nothing, and saying it did sends
+            # someone looking for a rewrite that never happened.
+            file_changed = recorded.changed
         elif args.unset_captures_dir:
-            removed = clear_captures_dir()
-            changed = (
-                "captures directory cleared; commands are back to their own defaults"
-                if removed
-                else "no captures directory was recorded, so nothing changed"
-            )
+            action = "unset"
+            file_changed = clear_captures_dir()
     except (ConfigFileUnreadable, ConfigWriteRefused) as exc:
         print(f"configuration not changed: {exc}", file=sys.stderr)
         return EXIT_CODES[exc.status]
@@ -382,6 +436,13 @@ def _cmd_config(args: argparse.Namespace) -> int:
         print(f"cannot read configuration: {exc}", file=sys.stderr)
         return EXIT_CODES[exc.status]
 
+    overridden = source == CAPTURES_DIR_ENV_VAR
+    changed = (
+        None
+        if action is None
+        else _describe_change(action, file_value, file_changed, captures, overridden)
+    )
+
     path = config_path()
     payload: dict[str, object] = {
         "config_file": str(path),
@@ -394,8 +455,19 @@ def _cmd_config(args: argparse.Namespace) -> int:
         },
         "capture_output_directories": dict(plan),
     }
-    if changed is not None:
+    if action is not None:
         payload["changed"] = changed
+        # The same facts as the sentence above, taken apart, so a script does
+        # not have to read English to find out that the file it just wrote is
+        # not the value that will be used.
+        payload["change"] = {
+            "action": action,
+            "file_value": file_value,
+            "file_changed": file_changed,
+            "effective_value": None if captures is None else str(captures),
+            "effective_source": source,
+            "overridden_by_environment": overridden,
+        }
 
     if not args.json:
         if changed is not None:
@@ -415,7 +487,7 @@ def _cmd_config(args: argparse.Namespace) -> int:
         width = max(len(name) for name, _ in plan)
         for name, where in plan:
             print(f"    {name:<{width}}  {where}")
-        if changed is not None and source == CAPTURES_DIR_ENV_VAR:
+        if action is not None and overridden:
             print(
                 f"  note: {CAPTURES_DIR_ENV_VAR} is set in this shell and still wins over "
                 "the file that was just written. Unset it there to see the change.",
@@ -423,6 +495,52 @@ def _cmd_config(args: argparse.Namespace) -> int:
             )
     _emit(payload, args)
     return 0
+
+
+def _describe_change(
+    action: str,
+    file_value: str | None,
+    file_changed: bool,
+    effective: Path | None,
+    overridden: bool,
+) -> str:
+    """One sentence about a mutation that is true of the effective setting.
+
+    Split out so the text and the JSON in :func:`_cmd_config` cannot drift: both
+    are built from the same five facts, and neither is allowed to describe a
+    write as though it decided where captures go.
+    """
+    if action == "unset":
+        if not file_changed:
+            if overridden:
+                return (
+                    "no captures directory was recorded, so nothing changed; "
+                    f"{CAPTURES_DIR_ENV_VAR} is set in this shell and captures go under "
+                    f"{effective}"
+                )
+            return "no captures directory was recorded, so nothing changed"
+        if overridden:
+            return (
+                f"captures directory cleared from {config_path()}, but "
+                f"{CAPTURES_DIR_ENV_VAR} is still set in this shell, so captures go under "
+                f"{effective} rather than each command's own default"
+            )
+        return "captures directory cleared; commands are back to their own defaults"
+
+    # "already" rather than a fresh claim when the file already said this: the
+    # ordinary result of running the same command twice is that nothing was
+    # rewritten, and reporting a write that did not happen is how someone ends
+    # up hunting for it in an mtime or a diff.
+    recorded = "recorded as" if file_changed else "already recorded as"
+    if overridden:
+        return (
+            f"captures directory {recorded} {file_value} in {config_path()}, but "
+            f"{CAPTURES_DIR_ENV_VAR} is set in this shell and wins: captures go under "
+            f"{effective}"
+        )
+    if not file_changed:
+        return f"captures directory was already set to {file_value}; nothing changed"
+    return f"captures directory set to {file_value}"
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
@@ -1807,11 +1925,31 @@ def _run_frame_capture(
     # A configured captures directory replaces the profile's own fallback, and
     # is itself replaced by an explicit --output-dir: the more specific answer
     # always wins, and neither ever reaches the hardware.
-    output_dir = (
-        args.output_dir
-        if args.output_dir is not None
-        else captures_dir_for(profile.name, profile.default_output_dir)
-    )
+    #
+    # An execution allocates a fresh directory FIRST, before the device is
+    # opened. These profiles write fixed artifact names exclusively, so a
+    # second capture into the same directory would reach preservation and fail
+    # on a name that already exists - having already spent the capture. A
+    # refusal here costs nothing; a refusal there costs the frame.
+    if args.output_dir is not None:
+        output_dir = args.output_dir
+    elif execute:
+        try:
+            allocated = allocate_capture_dir(profile.name)
+        except CaptureDirUnavailable as exc:
+            print(f"no capture was started: {exc}", file=sys.stderr)
+            return EXIT_CODES[exc.status]
+        if allocated is not None and not args.json:
+            # Said out loud only when nobody typed it: evidence that landed
+            # somewhere the caller never named must not be findable only by
+            # guessing at the naming scheme.
+            print(f"writing this capture to {allocated}", file=sys.stderr, flush=True)
+        output_dir = allocated if allocated is not None else profile.default_output_dir
+    else:
+        # A dry run writes nothing, so it allocates nothing and reports the
+        # namespace the real capture would allocate inside.
+        output_dir = captures_dir_for(profile.name, profile.default_output_dir)
+
     backend = backend_factory(sysfs_root=args.sysfs_root, dev_root=args.dev_root)
     try:
         outcome = (
@@ -2069,16 +2207,35 @@ paired_backend_factory: Callable[[Path], paired_capture.StreamBackend] = _defaul
 paired_termination_shield = defer_termination
 
 
+def _paired_output_dir(args: argparse.Namespace, command: str) -> Path | None:
+    """Where an opted-in paired run will write, or None if it must refuse.
+
+    A configured captures directory stands in for ``--output-dir`` here, and
+    nowhere else does it soften a refusal: a directory that was deliberately
+    recorded is as explicit as one typed, and with neither this still refuses
+    to run with nowhere to put what it captures.
+
+    Called only on the path that is about to construct a real backend, so a dry
+    run and a run refused for its serial allocate nothing. Raises
+    :class:`CaptureDirUnavailable` - before the backend exists and long before
+    anything is opened - rather than capture into a directory it cannot own.
+    """
+    if args.output_dir is not None:
+        return cast(Path, args.output_dir)
+    allocated = allocate_capture_dir(command)
+    if allocated is not None and not args.json:
+        print(f"writing this capture to {allocated}", file=sys.stderr, flush=True)
+    return allocated
+
+
 def _cmd_paired_capture(args: argparse.Namespace) -> int:
     """Run the fixed paired backend only after the exact opt-in."""
-    # A configured captures directory stands in for --output-dir here, and
-    # nowhere else does it soften a refusal: an output directory that was
-    # deliberately recorded is as explicit as one typed, and this command still
-    # refuses to run with nowhere to put what it captures.
-    output_dir = (
-        args.output_dir if args.output_dir is not None else captures_dir_for(PAIRED_CAPTURE_SUBDIR)
-    )
     if args.start_depth_first_rgb_second:
+        output_dir = (
+            _paired_output_dir(args, PAIRED_CAPTURE_SUBDIR)
+            if args.serial == paired_capture.AUTHORIZED_SERIAL
+            else None
+        )
         if args.serial != paired_capture.AUTHORIZED_SERIAL:
             runner = paired_capture.PairedCapture(
                 None, termination_shield=paired_termination_shield
@@ -2171,10 +2328,12 @@ def _cmd_paired_capture(args: argparse.Namespace) -> int:
 def _cmd_paired_rgb_series(args: argparse.Namespace) -> int:
     """Run the fixed depth-first paired RGB-series diagnostic."""
     telemetry_requested = bool(args.read_rgb_controls_during_series)
-    output_dir = (
-        args.output_dir if args.output_dir is not None else captures_dir_for(PAIRED_SERIES_SUBDIR)
-    )
     if args.start_depth_first_rgb_series:
+        output_dir = (
+            _paired_output_dir(args, PAIRED_SERIES_SUBDIR)
+            if args.serial == paired_capture.AUTHORIZED_SERIAL
+            else None
+        )
         if args.serial != paired_capture.AUTHORIZED_SERIAL:
             runner = paired_capture.RgbSeriesCapture(
                 None, termination_shield=paired_termination_shield
@@ -2325,10 +2484,16 @@ def _cmd_sweep(args: argparse.Namespace) -> int:
 
     output = args.output
     if output is None:
-        # A dated directory of its own, never the captures root itself: this
-        # command writes frame_0000.raw upward, so a second sweep sharing a
-        # directory would overwrite the first frame by frame.
-        output = captures_dir_for(dated_capture_name(SWEEP_SUBDIR_PREFIX))
+        # A freshly created dated directory of its own, never the captures root
+        # itself and never one that already exists: this command writes
+        # frame_0000.raw upward, so a second sweep sharing a directory would
+        # overwrite the first frame by frame. Allocated before the device is
+        # opened, so a collision costs nothing but the message.
+        try:
+            output = allocate_capture_dir(SWEEP_SUBDIR_PREFIX)
+        except CaptureDirUnavailable as exc:
+            print(f"no sweep was started: {exc}", file=sys.stderr)
+            return EXIT_CODES[exc.status]
         if output is None:
             print(
                 "nowhere to write this sweep: name a directory, or record a default with "
@@ -2577,6 +2742,18 @@ def build_parser() -> argparse.ArgumentParser:
     # --help rather than only in the behaviour.
     captures_root = _captures_root_for_help()
 
+    def default_dir(command: str, without: object) -> str:
+        """Where ``command`` writes when nobody types a directory.
+
+        With a captures root recorded that is a fresh directory per execution,
+        and the help says so: the alternative - printing one dated name - would
+        promise a directory this parser has not allocated and that a second run
+        in the same second would not get.
+        """
+        if captures_root is None:
+            return str(without)
+        return f"{captures_root / command / DATED_PLACEHOLDER}, a fresh one for every run"
+
     def add_roots(p: argparse.ArgumentParser) -> None:
         p.add_argument(
             "--sysfs-root",
@@ -2600,9 +2777,11 @@ def build_parser() -> argparse.ArgumentParser:
             "Report what this installation has been told - which scanner it may touch, and "
             "where captures go - and where each answer comes from. With "
             "--set-captures-dir, record a captures directory so every capture command "
-            f"writes under it from then on: {DEPTH_PROFILE.name} and {RGB_PROFILE.name} "
-            f"into subdirectories named after themselves, {SWEEP_COMMAND} into a dated one "
-            "of its own. Nothing here opens a device, and the directory is not created or "
+            "writes under it from then on. Each command claims a subdirectory named after "
+            "itself, and every execution gets a freshly created directory inside that "
+            "one - dated, or named by you when the desktop application asks - so no "
+            "capture can ever land on top of an earlier one's evidence. "
+            "Nothing here opens a device, and the root is not created or "
             "checked: the command that writes there reports on it in its own terms. "
             f"{CAPTURES_DIR_ENV_VAR} overrides the recorded value for one shell without "
             "changing the file."
@@ -2988,7 +3167,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "where to write the raw frame and its tightly packed copy. Shapes only local "
             "evidence, never the hardware. Default: "
-            f"{captures_root / DEPTH_PROFILE.name if captures_root else DEFAULT_OUTPUT_DIR}"
+            f"{default_dir(DEPTH_PROFILE.name, DEFAULT_OUTPUT_DIR)}"
         ),
     )
     frame.add_argument("--json-out", type=Path, help="also write the JSON result to this path")
@@ -3060,8 +3239,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help=(
             f"where to write {RGB_ARTIFACT_NAME}. Shapes only local evidence, never the "
-            f"hardware. Default: "
-            f"{captures_root / RGB_PROFILE.name if captures_root else RGB_DEFAULT_OUTPUT_DIR}"
+            f"hardware. Default: {default_dir(RGB_PROFILE.name, RGB_DEFAULT_OUTPUT_DIR)}"
         ),
     )
     rgb.add_argument("--json-out", type=Path, help="also write the JSON result to this path")
@@ -3128,7 +3306,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help=(
             "local evidence directory for an opted-in paired run. Default: "
-            f"{captures_root / PAIRED_CAPTURE_SUBDIR if captures_root else NO_DEFAULT_OUTPUT_DIR}"
+            f"{default_dir(PAIRED_CAPTURE_SUBDIR, NO_DEFAULT_OUTPUT_DIR)}"
         ),
     )
     paired.add_argument("--serial", help="required exact scanner serial for execution")
@@ -3161,7 +3339,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help=(
             "local evidence directory for execution. Default: "
-            f"{captures_root / PAIRED_SERIES_SUBDIR if captures_root else NO_DEFAULT_OUTPUT_DIR}"
+            f"{default_dir(PAIRED_SERIES_SUBDIR, NO_DEFAULT_OUTPUT_DIR)}"
         ),
     )
     series.add_argument("--serial", help="required exact scanner serial for execution")
@@ -3335,12 +3513,12 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="?",
         help=(
             "directory to write raw frames into. Default: "
-            f"{captures_root / f'{SWEEP_SUBDIR_PREFIX}-<date>-<time>'}, a dated directory "
-            "of its own so one sweep cannot overwrite another"
+            f"{default_dir(SWEEP_SUBDIR_PREFIX, '')}, created fresh so one sweep "
+            "cannot overwrite another"
             if captures_root is not None
             else "directory to write raw frames into. Required until a captures directory "
             "is recorded with 'scanner3d config --set-captures-dir DIR', after which "
-            "each sweep gets a dated directory under it"
+            "each sweep gets a dated directory of its own under it"
         ),
     )
     sweep.add_argument(
@@ -3787,6 +3965,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         # worse answer than the sentence the exception already carries, and
         # 'config' can still be run to fix it.
         print(f"cannot read configuration: {exc}", file=sys.stderr)
+        return EXIT_CODES[exc.status]
+    except CaptureDirUnavailable as exc:
+        # Raised before any device is opened, so this is a refusal rather than
+        # a lost capture - and it says so.
+        print(f"no capture was started: {exc}", file=sys.stderr)
         return EXIT_CODES[exc.status]
     return result
 

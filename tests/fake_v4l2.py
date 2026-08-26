@@ -19,11 +19,14 @@ stays exactly where it was.
 
 from __future__ import annotations
 
+import errno
 import os
 import struct
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -38,6 +41,7 @@ from scanner3d.v4l2_capture import (
     BYTES_PER_PIXEL,
     CAPABILITY_FORMAT,
     DEPTH_PROFILE,
+    EXPECTED_FRAME_BYTES,
     FORMAT_FORMAT,
     PIX_FORMAT_FORMAT,
     REQUESTBUFFERS_FORMAT,
@@ -57,6 +61,7 @@ from scanner3d.v4l2_capture import (
     VIDIOC_STREAMOFF,
     VIDIOC_STREAMON,
     CaptureProfile,
+    NodeSnapshot,
     V4l2FrameBackend,
 )
 from tests.conftest import REAL_SERIAL, SysfsBuilder
@@ -461,3 +466,185 @@ def make_backend(
         termination_shield=noop_shield,
         illumination_backend_factory=fake_illumination_factory,
     )
+
+
+# -- the continuous depth stream ------------------------------------------
+#
+# :mod:`scanner3d.v4l2_stream` holds the node open and dequeues in a loop, which
+# :class:`FakeKernel` above cannot express on its own: it answers every
+# ``VIDIOC_DQBUF`` identically. The subclass below scripts a SERIES of buffers
+# instead, which is what a test about the loop needs and what a test about a
+# single bounded capture never did. It stays here rather than in one test module
+# for the reason the class above stays here: two fake kernels would be two sets
+# of assumptions about what the real one does.
+
+#: The buffer the owner's scanner delivered at ``STREAMON`` on 2026-08-26, in
+#: bytes, against the 512000 a whole depth frame is. Not a round number and not
+#: invented: about 70% of a frame, which is enough to look like data and not
+#: enough to be one. It was written to disk and deprojected, and the
+#: ``DepthFrameSizeMismatch`` that followed killed the scan at startup.
+OWNER_SHORT_FRAME_BYTES = 358402
+
+
+@dataclass(frozen=True)
+class Delivery:
+    """One buffer a :class:`StreamKernel` will hand back from ``VIDIOC_DQBUF``.
+
+    ``fill`` is the byte the mapping for this buffer reads as while this
+    delivery is the current one, which is how a test tells the payload a
+    consumer received apart from every other frame in the run.
+    """
+
+    bytes_used: int
+    fill: int
+    buffer_index: int = 0
+    sequence: int = 42
+
+    @property
+    def payload(self) -> bytes:
+        """The bytes a consumer should see, if this delivery reaches one."""
+        return bytes([self.fill]) * self.bytes_used
+
+
+def whole_frame(fill: int, *, buffer_index: int = 0, sequence: int = 42) -> Delivery:
+    """A complete depth frame, exactly ``EXPECTED_FRAME_BYTES`` long."""
+    return Delivery(EXPECTED_FRAME_BYTES, fill, buffer_index=buffer_index, sequence=sequence)
+
+
+def short_frame(
+    bytes_used: int = OWNER_SHORT_FRAME_BYTES,
+    *,
+    fill: int = 0x11,
+    buffer_index: int = 0,
+    sequence: int = 42,
+) -> Delivery:
+    """A partial delivery. Defaults to the byte count the owner actually saw."""
+    return Delivery(bytes_used, fill, buffer_index=buffer_index, sequence=sequence)
+
+
+class StreamKernel(FakeKernel):
+    """A driver that delivers a scripted series of buffers, then nothing.
+
+    Running out is ``EAGAIN`` rather than a hang or an error, which is what a
+    real driver with no buffer ready returns - so a test asks for exactly as
+    many frames as it scripted deliveries for, or stops the run itself.
+    """
+
+    def __init__(self, deliveries: tuple[Delivery, ...], **kwargs: object) -> None:
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self.deliveries = deliveries
+        #: Every delivery actually taken, in order.
+        self.dequeued: list[Delivery] = []
+        #: Buffer indices handed BACK to the driver after ``STREAMON``. The
+        #: priming queues before it are excluded, so this is exactly the set of
+        #: buffers the dequeue loop returned rather than kept.
+        self.requeued: list[int] = []
+        self.streaming = False
+        self.frame_sequences = tuple(delivery.sequence for delivery in deliveries)
+
+    def ioctl(self, fd: int, request: int, packed: bytearray, mutate: bool) -> int:
+        if request == VIDIOC_STREAMON:
+            self.streaming = True
+        elif request == VIDIOC_QBUF and self.streaming:
+            self.requeued.append(struct.unpack_from("=I", bytes(packed), 0)[0])
+        return super().ioctl(fd, request, packed, mutate)
+
+    def _dqbuf(self, packed: bytearray) -> None:
+        if len(self.dequeued) >= len(self.deliveries):
+            raise OSError(errno.EAGAIN, "no buffer is ready")
+        delivery = self.deliveries[len(self.dequeued)]
+        self.dequeued.append(delivery)
+        # Kept in step so FakeKernel._buffer reads THIS delivery's sequence out
+        # of frame_sequences rather than the previous one's.
+        self._series_index = len(self.dequeued)
+        packed[:] = self._buffer(
+            delivery.buffer_index, bytesused=delivery.bytes_used, flags=self.buffer_flags
+        )
+
+    def mmap(self, fd: int, length: int, offset: int) -> FakeMapping:
+        index = len(self.mappings)
+        self.map_calls.append((fd, length, offset))
+        mapping = FakeMapping(bytes(length), lambda: self._contents(index, length))
+        self.mappings.append(mapping)
+        return mapping
+
+    def _contents(self, index: int, length: int) -> bytes:
+        """What buffer ``index`` reads as right now.
+
+        Only the buffer the current delivery names carries that delivery's fill
+        byte; the rest read as zeros. A consumer handed the wrong buffer's bytes
+        therefore fails visibly instead of getting plausible-looking data.
+        """
+        current = self.dequeued[-1] if self.dequeued else None
+        if current is None or current.buffer_index != index:
+            return bytes(length)
+        return bytes([current.fill]) * length
+
+
+def stream_node_snapshot(node: Path) -> NodeSnapshot:
+    """A resolved depth node pointing at ``node``, which is a real file."""
+    return NodeSnapshot(
+        serial=REAL_SERIAL,
+        sysfs_path="/sys/bus/usb/devices/1-1",
+        usb_path="/dev/bus/usb/001/004",
+        bus_number=1,
+        device_number=4,
+        role="depth",
+        interface_number=0,
+        interface_string=f"DepthCam{REAL_SERIAL}",
+        interface_driver="uvcvideo",
+        v4l_index=0,
+        v4l_name="Revopoint MINI: Depth",
+        node_name=node.name,
+        node_path=str(node),
+        rdev=0,
+        rdev_major=81,
+        rdev_minor=5,
+        inode=0,
+        mode="crw-rw----",
+    )
+
+
+@pytest.fixture
+def stream_node(tmp_path: Path) -> Path:
+    """A real file standing in for ``/dev/videoN``.
+
+    Real, so ``os.open``, the descriptor it returns and the ``finally`` block's
+    ``os.close`` are all the genuine article and only the ioctls are faked.
+    """
+    path = tmp_path / "video5"
+    path.write_bytes(b"")
+    return path
+
+
+@pytest.fixture
+def stream_kernel(monkeypatch, stream_node: Path) -> Callable[..., StreamKernel]:
+    """Wire a :class:`StreamKernel` into :mod:`scanner3d.v4l2_stream`.
+
+    Four names are replaced, all of them ON THE MODULE UNDER TEST rather than on
+    ``fcntl`` or ``mmap`` themselves, so nothing else running in this process
+    sees a faked syscall.
+    """
+    from scanner3d import v4l2_stream
+
+    def wire(deliveries: tuple[Delivery, ...], **kwargs: object) -> StreamKernel:
+        kernel = StreamKernel(deliveries, **kwargs)
+        monkeypatch.setattr(v4l2_stream, "resolve_serial", lambda _serial: REAL_SERIAL)
+        monkeypatch.setattr(
+            v4l2_stream,
+            "resolve_capture_node",
+            lambda _serial: (stream_node_snapshot(stream_node), None),
+        )
+        monkeypatch.setattr(v4l2_stream, "fcntl", SimpleNamespace(ioctl=kernel.ioctl))
+        monkeypatch.setattr(
+            v4l2_stream,
+            "mmap",
+            SimpleNamespace(
+                mmap=lambda fd, length, _flags, _prot, offset: kernel.mmap(fd, length, offset),
+                MAP_SHARED=1,
+                PROT_READ=1,
+            ),
+        )
+        return kernel
+
+    return wire
