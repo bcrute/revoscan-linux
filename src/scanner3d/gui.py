@@ -44,6 +44,20 @@ Long work runs on worker threads, and every long job can be stopped. A window
 that freezes during a four-minute capture looks crashed; a capture that cannot
 be abandoned means noticing a mistake in the first ten seconds and having to
 watch the remaining four minutes anyway.
+
+Stop stops, and stays stopped
+-----------------------------
+Stopping a capture is a request the job honours at the next safe boundary -
+after the current buffer has gone back to the driver, because a callback that
+raises skips that hand-back and this hardware answers a buffer held at teardown
+by re-enumerating. So Stop is never instant, and it is never a lie either: the
+capture ends, the frames already written stay written, and the live view is NOT
+put back up. A capture that answered Stop by restarting the preview stream is
+what the owner saw on 2026-08-26, and from outside the process it is
+indistinguishable from the button doing nothing at all.
+
+A capture that reaches its own end still resumes the preview it interrupted,
+because that is the view you want next when a scan finishes on its own terms.
 """
 
 from __future__ import annotations
@@ -113,10 +127,32 @@ DEFAULT_DECIMATE: Final = 3
 #: measured 4.6 fps, enough for two full revolutions.
 DEFAULT_FRAMES: Final = 1250
 
-#: Kept frames between live-coverage refreshes. The refresh registers every
-#: frame captured so far, so doing it per frame would fall progressively
-#: further behind the capture it is meant to be describing.
+#: SUCCESSFUL ALIGNMENTS between live-coverage refreshes. The refresh rebuilds
+#: from every frame aligned so far, so doing it per frame would fall
+#: progressively further behind the capture it is meant to be describing.
+#:
+#: Counted in alignments rather than in saved frames because the refresh is
+#: built out of aligned clouds and nothing else. Keying it to saved frame
+#: numbers meant a frame that failed to align at frame 12 or 24 skipped that
+#: refresh entirely and the model sat still for the next two dozen frames with
+#: no explanation - which is what the owner saw on 2026-08-26.
 COVERAGE_EVERY: Final = 12
+
+#: Aligned clouds needed before the model is worth drawing at all. Below this
+#: the coverage grid has too few observations for its "needs more scanning"
+#: judgement to mean anything, and drawing one or two frames as a model invites
+#: exactly the wrong conclusion about a scan that has barely started.
+MIN_COVERAGE_CLOUDS: Final = 3
+
+#: How many failures of one live-preview stage are reported individually before
+#: the rest are summarised. A capture delivers frames at about 4.6 fps, so a
+#: stage that fails on every frame would write thousands of identical lines into
+#: a log whose whole purpose is being readable after the fact. The first few
+#: carry the reason; the summaries prove it never recovered.
+FAILURES_REPORTED: Final = 3
+
+#: How often to restate a live-preview failure once it has stopped being news.
+FAILURE_SUMMARY_EVERY: Final = 25
 
 #: Points kept per cloud for the live preview. Low on purpose: this estimate is
 #: thrown away and recomputed properly by Reconstruct.
@@ -150,6 +186,11 @@ class Worker(QThread):
     preview = Signal(bytes)
     colour = Signal(bytes)
     coverage = Signal(object, str)
+    #: One saved frame. Deliberately the cheapest signal here - an integer, no
+    #: geometry - because it is the only thing that fires on EVERY kept frame
+    #: and it is what tells the operator the capture is still alive between the
+    #: much rarer model refreshes.
+    saved = Signal(int)
     travel = Signal(float)
     finished_ok = Signal(object)
     stopped = Signal()
@@ -269,6 +310,46 @@ def _coloured_cloud(
     )
 
 
+def capture_progress_text(
+    saved: int, refreshed_at: int | None, refreshes: int, *, running: bool = True
+) -> str:
+    """What the model panel says about the capture it is showing.
+
+    Two different facts, kept apart on purpose. ``saved`` advances on every
+    frame written and is the heartbeat: while that number climbs, the capture is
+    alive, whatever the picture below it is doing. ``refreshed_at`` is the saved
+    frame count the accumulated model was last rebuilt at, and it moves far less
+    often - a rebuild registers every aligned frame so far, so it is deliberately
+    occasional.
+
+    Conflating them is what made a working capture look dead: the 3D view
+    changes subtly between refreshes on a slowly turning object, and with
+    nothing else moving there was no way to tell "still scanning" from "stopped
+    responding".
+
+    ``running`` false is the same two counts after the capture has ended, by any
+    route. The tense matters: a label still saying "Capturing" over a scan that
+    stopped a minute ago is the same lie in the opposite direction.
+
+    A pure function of its arguments so the sentence can be tested without a
+    display; the caller owns the label.
+    """
+    if saved <= 0:
+        return "No frames saved yet." if running else "No frames were saved."
+    frames = "1 frame" if saved == 1 else f"{saved} frames"
+    lead = f"Capturing: {frames} saved." if running else f"Capture ended: {frames} saved."
+    if refreshed_at is None:
+        tail = (
+            "The model below appears once enough of them have aligned."
+            if running
+            else "Too few of them aligned to build a model here; Reconstruct still can."
+        )
+    else:
+        rebuilds = "1 rebuild" if refreshes == 1 else f"{refreshes} rebuilds"
+        tail = f"The model below was last rebuilt after {refreshed_at} of them ({rebuilds})."
+    return f"{lead} {tail}"
+
+
 class ScannerWindow(QMainWindow):
     """Capture and reconstruct, showing both what the scanner sees and what it has."""
 
@@ -283,6 +364,12 @@ class ScannerWindow(QMainWindow):
         self._resume_preview_after = False
         self._capture_dir: Path | None = None
         self._firmware = "reading..."
+        # The heartbeat's counters. All live on the GUI thread and are written
+        # only by its slots; the worker sends numbers, not state.
+        self._saved_frames = 0
+        self._model_refreshes = 0
+        self._model_refreshed_at: int | None = None
+        self._capturing = False
 
         self._build_toolbar()
 
@@ -455,6 +542,13 @@ class ScannerWindow(QMainWindow):
         )
         key.setWordWrap(True)
         layout.addWidget(key)
+        # Above the coverage summary and separate from it, because they answer
+        # different questions at different rates: this one says the capture is
+        # still running, the one below says what the model currently contains.
+        self._capture_progress = QLabel(capture_progress_text(0, None, 0))
+        self._capture_progress.setWordWrap(True)
+        self._capture_progress.setStyleSheet("font-weight:bold; padding:2px;")
+        layout.addWidget(self._capture_progress)
         self._coverage_summary = QLabel("No coverage yet.")
         self._coverage_summary.setWordWrap(True)
         layout.addWidget(self._coverage_summary)
@@ -705,23 +799,60 @@ class ScannerWindow(QMainWindow):
         self._stop_action.setEnabled(busy)
 
     def _stop(self) -> None:
-        if self._worker is not None and self._worker.isRunning():
-            self._worker.cancel()
-            self._stop_action.setEnabled(False)
-            self._log("\nStopping at the next frame...")
+        """Ask the running job to stop. Once, and only the once.
+
+        Cancellation is a request the job honours at its own safe boundary - for
+        a capture, after the current buffer has been handed back to the driver.
+        Asking twice cannot make that boundary arrive sooner, so a second press
+        is dropped rather than logged again.
+        """
+        worker = self._worker
+        if worker is None or not worker.isRunning() or worker.cancelled:
+            return
+        LOG.info("stop requested by the operator")
+        worker.cancel()
+        self._stop_action.setEnabled(False)
+        self._log("\nStopping at the next frame...")
 
     def _log(self, message: str) -> None:
         self._report.appendPlainText(message)
 
+    def _consume_resume_preview(self) -> bool:
+        """Whether preview should come back, clearing the intent as it answers.
+
+        Read exactly once per job, on whichever path that job ended by. Left set,
+        it would outlive the capture it belongs to and hand a later operation -
+        a reconstruction, or a capture the user stopped - a preview it never
+        asked for.
+        """
+        resume, self._resume_preview_after = self._resume_preview_after, False
+        return resume
+
     def _was_stopped(self) -> None:
+        """The operator's Stop, arrived at after the device has been let go.
+
+        Deliberately NOT a completion. Preview is not restarted here even when
+        it was running before the capture: the person who pressed Stop asked for
+        the scanner to stop, and answering that by putting the live stream back
+        up - projector lit, frames flowing - is indistinguishable from the button
+        having done nothing. That is exactly how it read to the owner on
+        2026-08-26.
+        """
         self._busy(False)
-        if self._resume_preview_after:
-            self._preview_action.setChecked(True)
+        resume = self._consume_resume_preview()
+        self._finish_progress()
         kept = len(list(self._capture_dir.glob("frame_*.raw"))) if self._capture_dir else 0
+        LOG.info("capture stopped by the operator with %d frames written", kept)
         self._log(f"Stopped. {kept} frames were already written and are safe to reconstruct.")
+        if resume:
+            self._log("Preview was NOT restarted. Press Preview when you want the live view back.")
 
     def _fail(self, text: str) -> None:
         self._busy(False)
+        # Consumed and dropped: a failed capture is not the moment to reopen the
+        # device, and leaving the intent set would spring it on the next job.
+        self._consume_resume_preview()
+        self._finish_progress()
         self._log("\nFAILED:\n" + text)
         QMessageBox.critical(self, "3D Scanner", text.strip().splitlines()[-1])
 
@@ -755,19 +886,59 @@ class ScannerWindow(QMainWindow):
         )
         self._speed_advice.setText(advice)
 
+    def _refresh_capture_progress(self) -> None:
+        """Restate the heartbeat from the counters. GUI THREAD."""
+        self._capture_progress.setText(
+            capture_progress_text(
+                self._saved_frames,
+                self._model_refreshed_at,
+                self._model_refreshes,
+                running=self._capturing,
+            )
+        )
+
+    def _show_saved(self, saved: int) -> None:
+        """One frame reached the disk. GUI THREAD.
+
+        The cheapest thing this window does per frame, and the only one that is
+        guaranteed to happen on every one of them: a label with a number in it.
+        """
+        self._saved_frames = saved
+        self._refresh_capture_progress()
+
+    def _finish_progress(self) -> None:
+        """Put the heartbeat into the past tense, once, when a capture ends.
+
+        A no-op for a job that was not a capture, so a stopped or failed
+        reconstruction leaves the last capture's summary standing rather than
+        overwriting it with a claim about frames it never wrote.
+        """
+        if not self._capturing:
+            return
+        self._capturing = False
+        self._refresh_capture_progress()
+
     def _show_coverage(self, payload: tuple[np.ndarray, np.ndarray, float], note: str) -> None:
         points, thin, well_covered = payload
         self._cloud.set_cloud(points, thin)
+        self._model_refreshes += 1
+        self._model_refreshed_at = self._saved_frames
         self._coverage_summary.setText(
             f"{note}   {100.0 * well_covered:.0f}% of the surface is covered, "
             f"{100.0 * self._cloud.thin_fraction:.0f}% of what you can see still needs scanning"
         )
+        # Restated here so the heartbeat can say when the picture below it last
+        # changed - which is the difference between a model that is holding
+        # still because nothing is happening and one that is between rebuilds.
+        if self._capturing:
+            self._refresh_capture_progress()
 
     def _run(self, job: Callable[[Worker], object], done: Callable[[object], None]) -> None:
         worker = Worker(job)
         self._worker = worker
         worker.progress.connect(self._log)
         worker.preview.connect(self._show_frame)
+        worker.saved.connect(self._show_saved)
         worker.coverage.connect(self._show_coverage)
         worker.travel.connect(self._show_travel)
         worker.finished_ok.connect(done)
@@ -930,6 +1101,13 @@ class ScannerWindow(QMainWindow):
         self._stop_preview()
         self._resume_preview_after = was_previewing
         self._capture_dir = target
+        # The heartbeat describes THIS capture. Left where the last one finished
+        # it would open by claiming frames that are not in this folder.
+        self._saved_frames = 0
+        self._model_refreshes = 0
+        self._model_refreshed_at = None
+        self._capturing = True
+        self._refresh_capture_progress()
         frames = self._frames_spin.value()
         decimate = self._decimate_spin.value()
         backend = self._backend.currentText()
@@ -941,27 +1119,79 @@ class ScannerWindow(QMainWindow):
         def job(worker: Worker) -> object:
             from scanner3d.geometry import Rigid
             from scanner3d.icp_plane import icp_point_to_plane
-            from scanner3d.v4l2_stream import stream_frames
+            from scanner3d.v4l2_stream import CALLER_STOP_REASON, stream_frames
 
             self._await_device()
+            # Stop pressed while that wait was running - and it can be a long
+            # wait: the previous stream has to end and the device has to come
+            # back on the bus. Without this the capture would go on to open the
+            # node, take a buffer and write one frame for a sweep the operator
+            # has already abandoned. Raising is safe HERE precisely because
+            # nothing has been opened yet: no V4L2 buffer is owned, so there is
+            # no VIDIOC_QBUF to skip, and no artifact has been written.
+            worker.check()
 
             target.mkdir(parents=True, exist_ok=True)
             kept = 0
             clouds: list[tuple[tuple[float, float, float], ...]] = []
             poses: list[Rigid] = []
+            #: Aligned clouds at the last SUCCESSFUL model refresh; 0 for never.
+            #: A count rather than a flag, so a refresh that failed to build
+            #: leaves the next frame due for another attempt instead of moving
+            #: the goalposts past it.
+            refreshed_at = 0
+            failures = {"alignment": 0, "model": 0}
+
+            def note_failure(stage: str, exc: BaseException) -> None:
+                """Say why a live-preview stage failed, without flooding the log.
+
+                These failures were previously swallowed whole. That is defensible
+                for the CAPTURE - a frame that will not align is already safely on
+                disk and Reconstruct will do the job properly later - but it left
+                a stalled-looking model view with no recorded reason anywhere,
+                which is precisely the state the owner had to guess about.
+                """
+                failures[stage] += 1
+                count = failures[stage]
+                if count <= FAILURES_REPORTED:
+                    LOG.warning(
+                        "live %s failed on frame %d (%d so far): %s", stage, kept, count, exc
+                    )
+                elif count % FAILURE_SUMMARY_EVERY == 0:
+                    LOG.info("live %s has now failed %d times; latest: %s", stage, count, exc)
 
             def on_frame(buf: bytes, _record: object) -> None:
-                nonlocal kept
+                """Save the frame, then keep the model view honest about it.
+
+                Never raises, and specifically never raises
+                :class:`Stopped`: this runs between the driver handing a buffer
+                over and ``stream_frames`` handing it back, and an exception here
+                would skip that ``VIDIOC_QBUF`` and leave userspace owning a
+                buffer at teardown - which this hardware answers by
+                re-enumerating. Cancellation is read, not thrown.
+                """
+                nonlocal kept, refreshed_at
                 path = target / f"frame_{kept:04d}.raw"
                 path.write_bytes(buf)
                 kept += 1
+                # Before anything that can be skipped, and never skipped itself:
+                # the frame IS on disk, so the count must say so.
+                worker.saved.emit(kept)
                 worker.preview.emit(buf)
+
+                # Everything below is the live model, and all of it is expensive
+                # enough to be worth not doing for a capture that is ending.
+                # Checked at each stage rather than once, because a Stop pressed
+                # during deprojection should not still pay for the alignment
+                # after it.
+                if worker.cancelled:
+                    return
 
                 # Live coverage is chained alignment only - no loop closure, so
                 # it drifts. It answers "have I pointed at that yet", nothing
                 # more, and Reconstruct recomputes it honestly afterwards.
                 cloud = _load_cloud(path, PREVIEW_POINTS)
-                if not cloud:
+                if not cloud or worker.cancelled:
                     return
                 if not poses:
                     poses.append(Rigid.identity())
@@ -976,24 +1206,44 @@ class ScannerWindow(QMainWindow):
                             keep_fraction=0.8,
                             backend=backend,
                         )
-                    except Exception:
+                    except Exception as exc:
                         # A frame that will not align is not a reason to stop
                         # capturing. It is dropped from the PREVIEW only; the
-                        # raw frame is already safely on disk.
+                        # raw frame is already safely on disk. The next frame
+                        # that DOES align is still due a refresh, because the
+                        # schedule below counts alignments rather than frames.
+                        note_failure("alignment", exc)
                         return
                     poses.append(poses[-1].compose(fit.transform))
                     clouds.append(cloud)
                     # Measured from the alignment that just succeeded, so it
                     # reflects the motion the registration actually sees.
                     worker.travel.emit(frame_travel(cloud, fit.transform))
-                if kept % COVERAGE_EVERY == 0 and len(clouds) >= 3:
-                    try:
-                        payload = _coloured_cloud(clouds, poses)
-                    except Exception:
-                        return
-                    worker.coverage.emit(payload, f"preview after {kept} frames -")
 
-            return stream_frames(
+                aligned = len(clouds)
+                if aligned < MIN_COVERAGE_CLOUDS:
+                    return
+                # The first useful model as soon as there is one, then on a
+                # fixed alignment interval. ``>=`` rather than equality so a
+                # refresh that was skipped or failed is caught up on rather than
+                # lost until the next multiple comes round.
+                due = refreshed_at == 0 or aligned - refreshed_at >= COVERAGE_EVERY
+                if not due or worker.cancelled:
+                    return
+                try:
+                    payload = _coloured_cloud(clouds, poses)
+                except Exception as exc:
+                    # ``refreshed_at`` deliberately unchanged: the next aligned
+                    # frame tries again. A model that fails to build once must
+                    # not be a model that never builds.
+                    note_failure("model", exc)
+                    return
+                refreshed_at = aligned
+                worker.coverage.emit(
+                    payload, f"preview after {aligned} aligned frames of {kept} saved -"
+                )
+
+            result = stream_frames(
                 frames=frames,
                 decimate=decimate,
                 duration_s=900.0,
@@ -1003,13 +1253,37 @@ class ScannerWindow(QMainWindow):
                 # stays written.
                 should_stop=lambda: worker.cancelled,
             )
+            # Only now, with the stream returned and its finally block done -
+            # STREAMOFF, unmap, buffers released, node closed. Raising this any
+            # earlier would unwind through the callback and skip the re-queue
+            # that keeps the device healthy; raising it here simply routes the
+            # finished job to the stopped outcome instead of the completed one.
+            #
+            # The stream's own result is the authority, and deliberately the
+            # ONLY thing consulted. ``worker.cancelled`` is not: a Stop pressed
+            # in the moment between a normal return and this line would relabel
+            # a capture that ran to its full frame count - or out its duration -
+            # as stopped, printing "frames were already written" about a sweep
+            # that in fact finished. The stream polls ``should_stop`` after
+            # every re-queue, so a stop it could act on is one it reports.
+            if result.stopped_early and result.stop_reason == CALLER_STOP_REASON:
+                raise Stopped
+            return result
 
         self._run(job, self._capture_done)
 
     def _capture_done(self, result: object) -> None:
+        """A capture that ran to its own end. Never the operator's Stop.
+
+        Stop arrives at :meth:`_was_stopped` instead, which is what makes
+        resuming the preview here safe: this is the path where the capture
+        finished on its own terms and the live view is the natural next thing to
+        see.
+        """
         self._busy(False)
-        if self._resume_preview_after:
+        if self._consume_resume_preview():
             self._preview_action.setChecked(True)
+        self._finish_progress()
         kept = len(list(self._capture_dir.glob("frame_*.raw"))) if self._capture_dir else 0
         self._log(f"\nCaptured {kept} frames to {self._capture_dir}")
         # Said out loud only when it happened. The stream drops a buffer the

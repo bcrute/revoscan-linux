@@ -11,9 +11,9 @@ Testing the closure through ``_start_capture`` rather than reimplementing it is
 the point. The bug was not in ``stream_frames`` alone and it was not in the GUI
 alone - it was in what the GUI does with everything the stream hands it, and a
 test that stubbed either half would have proved nothing about the pair. The
-window stand-in below therefore carries exactly the attributes the capture path
-touches and no others, and its ``_run`` calls the job on THIS thread so the
-whole sequence is one deterministic call.
+window stand-in in :mod:`tests.gui_harness` therefore carries exactly the
+attributes the capture path touches and no others, and its ``_run`` calls the
+job on THIS thread so the whole sequence is one deterministic call.
 
 Two things are stubbed inside the job, both named:
 
@@ -35,8 +35,6 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from scanner3d import gui
-from scanner3d.gui import ScannerWindow
 from scanner3d.v4l2_capture import EXPECTED_FRAME_BYTES
 from scanner3d.v4l2_stream import StreamResult
 from tests.fake_v4l2 import (
@@ -46,158 +44,18 @@ from tests.fake_v4l2 import (
     stream_node,
     whole_frame,
 )
+from tests.gui_harness import CaptureWindow as Window
+from tests.gui_harness import capture_dir, deprojected, start_capture
 
-__all__ = ["stream_kernel", "stream_node"]
-
-
-class FakeSignal:
-    """One Qt signal, recording what was emitted through it."""
-
-    def __init__(self) -> None:
-        self.emitted: list[tuple[object, ...]] = []
-
-    def emit(self, *args: object) -> None:  # Qt's name
-        self.emitted.append(args)
-
-
-class FakeWorker:
-    """The worker the capture job is handed, with no thread behind it."""
-
-    def __init__(self) -> None:
-        self.cancelled = False
-        self.preview = FakeSignal()
-        self.coverage = FakeSignal()
-        self.travel = FakeSignal()
-        self.progress = FakeSignal()
-
-
-class FakeSpin:
-    def __init__(self, value: int) -> None:
-        self._value = value
-
-    def value(self) -> int:  # Qt's name
-        return self._value
-
-
-class FakeCombo:
-    def __init__(self, text: str) -> None:
-        self._text = text
-
-    def currentText(self) -> str:  # Qt's name
-        return self._text
-
-
-class FakeAction:
-    def __init__(self, checked: bool = False) -> None:
-        self.checked = checked
-
-    def isChecked(self) -> bool:  # Qt's name
-        return self.checked
-
-    def setChecked(self, on: bool) -> None:  # Qt's name
-        self.checked = on
-
-
-class FakeReport:
-    def __init__(self) -> None:
-        self.clears = 0
-
-    def clear(self) -> None:  # Qt's name
-        self.clears += 1
-
-
-class Window:
-    """The parts of :class:`ScannerWindow` a capture actually touches."""
-
-    def __init__(self, frames: int, decimate: int = 1) -> None:
-        self.logged: list[str] = []
-        self.busy: list[bool] = []
-        self.worker = FakeWorker()
-        self.result: object = None
-        self._preview_action = FakeAction()
-        self._frames_spin = FakeSpin(frames)
-        self._decimate_spin = FakeSpin(decimate)
-        self._backend = FakeCombo("python")
-        self._report = FakeReport()
-        self._capture_dir: Path | None = None
-        self._resume_preview_after = False
-        self.awaited = 0
-
-    # -- what the window does to itself ------------------------------------
-    def _log(self, message: str) -> None:
-        self.logged.append(message)
-
-    def _busy(self, on: bool) -> None:
-        self.busy.append(on)
-
-    def _stop_preview(self) -> None:
-        return None
-
-    def _await_device(self) -> None:
-        self.awaited += 1
-
-    def _run(self, job, done) -> None:
-        """Qt's thread, collapsed to a call.
-
-        Deliberately NOT wrapped in a try: the pre-change failure mode was an
-        exception escaping this job, and swallowing it here would turn the
-        regression into a silent pass.
-        """
-        self.result = job(self.worker)
-        done(self.result)
-
-    # -- delegated to the real ones ----------------------------------------
-    def _capture_name(self) -> str | None:
-        return ScannerWindow._capture_name(cast(ScannerWindow, self))
-
-    def _capture_target(self) -> Path | None:
-        return ScannerWindow._capture_target(cast(ScannerWindow, self))
-
-    def _capture_done(self, result: object) -> None:
-        ScannerWindow._capture_done(cast(ScannerWindow, self), result)
+__all__ = ["capture_dir", "deprojected", "stream_kernel", "stream_node"]
 
 
 def _start(window: Window) -> None:
-    ScannerWindow._start_capture(cast(ScannerWindow, window))
-
-
-@pytest.fixture
-def deprojected(monkeypatch) -> list[int]:
-    """Record the size of every frame handed to deprojection, and skip it.
-
-    The GUI's live coverage reads each frame back off disk the moment it is
-    written. Recording the sizes is what lets a test say the short delivery
-    never got that far, rather than merely that the run survived.
-    """
-    sizes: list[int] = []
-
-    def load(path: Path, _target_points: int) -> tuple[tuple[float, float, float], ...]:
-        sizes.append(path.stat().st_size)
-        return ()
-
-    monkeypatch.setattr(gui, "_load_cloud", load)
-    return sizes
-
-
-@pytest.fixture
-def capture_dir(tmp_path: Path, monkeypatch) -> Path:
-    """Answer the name prompt and the folder prompt, and return where frames go."""
-    root = tmp_path / "captures"
-    root.mkdir()
-
-    class FakeInputDialog:
-        @staticmethod
-        def getText(*_a: object, **_k: object) -> tuple[str, bool]:  # Qt's name
-            return ("", True)
-
-    monkeypatch.setattr(gui, "QInputDialog", FakeInputDialog)
-    monkeypatch.setattr(gui, "configured_captures_dir", lambda: root)
-    return root
+    start_capture(window)
 
 
 def _frames(window: Window) -> list[Path]:
-    assert window._capture_dir is not None
-    return sorted(window._capture_dir.glob("frame_*.raw"))
+    return window.frames_on_disk()
 
 
 def test_a_short_startup_delivery_writes_no_raw_file_and_the_scan_continues(

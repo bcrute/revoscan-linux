@@ -116,6 +116,14 @@ FRAME_TIMEOUT_S: Final = 10.0
 #: 221 ms cadence, long enough not to spin a core.
 POLL_SLEEP_S: Final = 0.002
 
+#: The ``stop_reason`` recorded when ``should_stop`` ended a run, and the only
+#: reason that means "the caller asked for this". Named rather than written out
+#: at each site because callers legitimately need to tell their OWN stop apart
+#: from a run that merely finished: a GUI that treats "the user pressed Stop"
+#: as a completed capture reports the wrong outcome, and a GUI that treats every
+#: early end as a stop reports the wrong outcome the other way round.
+CALLER_STOP_REASON: Final = "caller asked to stop"
+
 
 class StreamNotAllowed(ScannerError):
     """A streaming run was requested that this module refuses to start.
@@ -415,6 +423,12 @@ def stream_frames(
     exactly like the scanner being unplugged. Stopping through this flag
     returns every buffer first and leaves the device usable immediately.
 
+    A run ended that way comes back with ``stopped_early`` set and
+    ``stop_reason`` equal to :data:`CALLER_STOP_REASON`, which is a normal
+    return rather than an exception. A caller that needs to present "you asked
+    me to stop" differently from "this finished" reads those two fields; nothing
+    here decides that for it.
+
     Cleanup runs in ``finally`` — ``STREAMOFF``, unmap, release, close — so a
     callback that raises still leaves the device closed rather than held, but
     "closed" and "healthy" are not the same thing and only the flag gives both.
@@ -561,7 +575,7 @@ def stream_frames(
             # Polled here, AFTER re-queueing, so the driver owns every buffer
             # again before the finally block tears the mapping down.
             if should_stop is not None and should_stop():
-                stopped_early, reason = True, "caller asked to stop"
+                stopped_early, reason = True, CALLER_STOP_REASON
                 break
     finally:
         # Each step is suppressed on its own: a failure in one must not skip the
