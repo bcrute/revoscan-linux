@@ -19,6 +19,16 @@ what is actually being captured, and the accumulated model — orbitable, with u
 surface in soft red. A live readout says whether your rotation speed is in the band that
 registers well.
 
+All three keep moving *during* a capture, not only before one. Colour is pumped alongside the
+depth stream — the RGB camera returns nothing unless depth is already streaming, so it starts on
+the first delivered depth frame and stops with that stream. The accumulated model is rebuilt from
+a fixed number of frames sampled across the whole sweep rather than from every frame so far, so a
+rebuild late in a scan costs what an early one did, and the saved-frame counter beside it always
+describes the model actually on screen. Every one of those views crosses to the window through a
+one-slot channel that keeps the newest payload and discards superseded ones, so a busy window
+skips rather than falling further behind. None of this touches what is recorded: every frame is
+written to disk whole, and `reconstruct` reads all of them at full fidelity.
+
 ## The number this project is built around
 
 Registration reports **held-out closure error**: revisited viewpoints are detected geometrically,

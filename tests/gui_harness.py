@@ -27,34 +27,58 @@ depends on: a job that raises :class:`~scanner3d.gui.Stopped` goes to
 Any OTHER exception is deliberately left to escape, because "an exception got
 out of the job" is itself a failure these tests exist to catch.
 
-The signals are real enough to connect to: :class:`FakeSignal` records what was
-emitted AND calls whatever was connected to it, so the real slots run on the
-real payloads. ``saved`` and ``coverage`` are wired to the real slots, which is
-what makes the model panel's own text testable. ``preview`` and ``travel`` are
-recorded but not wired, because their slots build a ``QImage`` and set styled
-widget text - screen work, and not what any of this is asking about.
+The channels are the REAL :class:`~scanner3d.gui.LatestOnly` ones, subclassed
+only to remember what the producer offered. That matters: the coalescing they do
+is the behaviour several of these tests are about, and a stand-in that merely
+recorded emissions would prove nothing about it. What the stand-in supplies is
+the other half - the wake-up. By default it delivers immediately, which is a GUI
+that always keeps up and is what every test written before coalescing existed
+assumes. ``deferred=True`` is the opposite: wake-ups pile up unanswered until
+:meth:`FakeWorker.drain` is called, which is a GUI too busy to draw, and is how a
+flood is expressed without a Qt event loop or a clock.
+
+``saved`` and ``coverage`` are wired to the real slots, which is what makes the
+model panel's own text testable. ``preview`` and ``travel`` are recorded but not
+wired, because their slots build a ``QImage`` and set styled widget text - screen
+work, and not what any of this is asking about.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 import numpy as np
 import pytest
 
-from scanner3d import gui
+from scanner3d import gui, icp_plane
+from scanner3d.geometry import Rigid
 from scanner3d.gui import ScannerWindow
 
 __all__ = [
     "CaptureWindow",
     "FakeSignal",
     "FakeWorker",
+    "RecordingChannel",
+    "alignments",
     "capture_dir",
+    "clouds",
     "deprojected",
+    "live",
+    "models",
     "start_capture",
 ]
+
+#: A payload the real :meth:`~scanner3d.gui.ScannerWindow._show_coverage` can
+#: unpack and hand to the view: points, the per-point "needs more scanning"
+#: flags, and the well-covered fraction.
+MODEL_PAYLOAD = (
+    np.zeros((2, 3), dtype=np.float32),
+    np.array([True, False]),
+    0.5,
+)
 
 
 class FakeSignal:
@@ -73,19 +97,69 @@ class FakeSignal:
             slot(*args)
 
 
-class FakeWorker:
-    """The worker a job is handed, with no thread behind it."""
+class RecordingChannel(gui.LatestOnly):
+    """A real coalescing channel that also remembers what was OFFERED to it.
 
-    def __init__(self) -> None:
+    ``emitted`` is the producer's side, so it stays the same list it always was
+    whether or not the consumer kept up. What the consumer actually applied is
+    read from the slots wired to it, or from the channel's own ``applied``
+    counter - and the gap between the two is the thing worth asserting.
+    """
+
+    def __init__(self, name: str, notify: Callable[[gui.LatestOnly], None]) -> None:
+        super().__init__(name, notify)
+        self.emitted: list[tuple[object, ...]] = []
+
+    def emit(self, *payload: object) -> None:  # Qt's name
+        self.emitted.append(payload)
+        super().emit(*payload)
+
+
+class FakeWorker:
+    """The worker a job is handed, with no thread behind it.
+
+    ``deferred`` decides what the GUI is doing while the job produces. False is
+    a window that draws every wake-up the instant it is posted; True is one that
+    is busy, so wake-ups queue in :attr:`woken` until :meth:`drain` answers them
+    - which is the only way an offline test can be slower than its producer
+    without sleeping.
+    """
+
+    def __init__(self, *, deferred: bool = False) -> None:
         self.cancelled = False
         self.running = False
         self.cancels = 0
-        self.preview = FakeSignal()
-        self.colour = FakeSignal()
-        self.coverage = FakeSignal()
-        self.saved = FakeSignal()
-        self.travel = FakeSignal()
+        self.deferred = deferred
+        #: Channels woken and not yet drained. At most one entry per channel,
+        #: which is the coalescing this exists to make visible.
+        self.woken: list[gui.LatestOnly] = []
+        self.preview = RecordingChannel("depth preview", self._wake)
+        self.colour = RecordingChannel("colour preview", self._wake)
+        self.coverage = RecordingChannel("live model", self._wake)
+        self.saved = RecordingChannel("saved-frame count", self._wake)
+        self.travel = RecordingChannel("rotation speed", self._wake)
         self.progress = FakeSignal()
+
+    def channels(self) -> tuple[gui.LatestOnly, ...]:
+        return (self.preview, self.colour, self.coverage, self.saved, self.travel)
+
+    def _wake(self, channel: gui.LatestOnly) -> None:
+        if self.deferred:
+            self.woken.append(channel)
+            return
+        channel.deliver()
+
+    def drain(self, *only: gui.LatestOnly) -> None:
+        """The GUI finally getting a turn. Applies one payload per wake-up.
+
+        Naming channels drains just those and leaves the rest waiting, which is
+        the realistic shape of the problem: the cheap heartbeat gets drawn while
+        the expensive model is still being rendered.
+        """
+        taken = [channel for channel in self.woken if not only or channel in only]
+        self.woken = [channel for channel in self.woken if channel not in taken]
+        for channel in taken:
+            channel.deliver()
 
     def cancel(self) -> None:
         self.cancels += 1
@@ -169,10 +243,25 @@ class FakeReport:
 class CaptureWindow:
     """The parts of :class:`ScannerWindow` a capture actually touches."""
 
-    def __init__(self, frames: int, decimate: int = 1, *, previewing: bool = False) -> None:
+    def __init__(
+        self,
+        frames: int,
+        decimate: int = 1,
+        *,
+        previewing: bool = False,
+        deferred: bool = False,
+        serial: str | None = None,
+    ) -> None:
         self.logged: list[str] = []
         self.busy: list[bool] = []
-        self.worker = FakeWorker()
+        self.worker = FakeWorker(deferred=deferred)
+        #: What :meth:`_scanner_serial` answers. ``None`` by default, and that
+        #: default is load-bearing: it is what stops every capture test in this
+        #: suite from starting a colour pump against whatever scanner happens to
+        #: be plugged into the machine running them.
+        self.serial = serial
+        #: Colour frames the window was handed, in order.
+        self.colours: list[bytes] = []
         self.result: object = None
         #: Every value handed to the COMPLETION callback. Empty is the assertion
         #: for a stopped capture: completion must not have been reached at all.
@@ -206,6 +295,14 @@ class CaptureWindow:
     def _stop_preview(self) -> None:
         return None
 
+    def _scanner_serial(self) -> str | None:
+        """Answered from the stand-in, never from the machine's own sysfs."""
+        return self.serial
+
+    def _show_colour(self, jpeg: bytes) -> None:
+        """The colour slot, reduced to what it was handed."""
+        self.colours.append(jpeg)
+
     def _await_device(self) -> None:
         self.awaited += 1
 
@@ -219,6 +316,7 @@ class CaptureWindow:
         self._worker = self.worker
         self.worker.saved.connect(self._show_saved)
         self.worker.coverage.connect(self._show_coverage)
+        self.worker.colour.connect(self._show_colour)
         self.worker.running = True
         try:
             self.result = job(self.worker)
@@ -262,8 +360,11 @@ class CaptureWindow:
     def _show_saved(self, saved: int) -> None:
         ScannerWindow._show_saved(cast(ScannerWindow, self), saved)
 
-    def _show_coverage(self, payload: object, note: str) -> None:
-        ScannerWindow._show_coverage(cast(ScannerWindow, self), payload, note)  # type: ignore[arg-type]
+    def _show_coverage(self, snapshot: object) -> None:
+        ScannerWindow._show_coverage(cast(ScannerWindow, self), snapshot)  # type: ignore[arg-type]
+
+    def _log_feedback_load(self) -> None:
+        ScannerWindow._log_feedback_load(cast(ScannerWindow, self))
 
     # -- what a test reads -------------------------------------------------
     @property
@@ -296,6 +397,82 @@ def deprojected(monkeypatch) -> list[int]:
 
     monkeypatch.setattr(gui, "_load_cloud", load)
     return sizes
+
+
+@pytest.fixture
+def clouds(monkeypatch) -> list[int]:
+    """Deprojection, reduced to a distinct three-point cloud per frame."""
+    seen: list[int] = []
+
+    def load(path: Path, _target_points: int) -> tuple[tuple[float, float, float], ...]:
+        index = int(path.stem.split("_")[1])
+        seen.append(index)
+        base = float(index)
+        return ((base, 0.0, 100.0), (0.0, base, 101.0), (base, base, 102.0))
+
+    monkeypatch.setattr(gui, "_load_cloud", load)
+    return seen
+
+
+@pytest.fixture
+def alignments(monkeypatch) -> Callable[[set[int]], list[int]]:
+    """Alignment, reduced to a success unless a test names the attempt to fail.
+
+    Attempts are numbered from 1 in the order ICP is actually called, which is
+    once per frame after the first - the first frame is the reference and is
+    never aligned to anything.
+    """
+    attempts: list[int] = []
+
+    def install(failing: set[int]) -> list[int]:
+        def align(*_args: object, **_kwargs: object) -> object:
+            attempts.append(len(attempts) + 1)
+            if attempts[-1] in failing:
+                raise ValueError(f"synthetic alignment failure on attempt {attempts[-1]}")
+            return SimpleNamespace(transform=Rigid.identity())
+
+        monkeypatch.setattr(icp_plane, "icp_point_to_plane", align)
+        return attempts
+
+    return install
+
+
+@pytest.fixture
+def models(monkeypatch) -> Callable[[set[int]], list[int]]:
+    """The coverage build, reduced to a counter with optional failures.
+
+    Returns the list of BUILD ATTEMPTS, which is not the same list as the
+    emissions the window received: an attempt that raises produces no emission,
+    and proving the next one is still made is the point of one of the tests.
+    """
+    attempts: list[int] = []
+
+    def install(failing: set[int]) -> list[int]:
+        def build(clouds: object, poses: object) -> object:
+            attempts.append(len(attempts) + 1)
+            if attempts[-1] in failing:
+                raise ValueError(f"synthetic coverage failure on attempt {attempts[-1]}")
+            return MODEL_PAYLOAD
+
+        monkeypatch.setattr(gui, "_coloured_cloud", build)
+        return attempts
+
+    return install
+
+
+@pytest.fixture
+def live(clouds, alignments, models) -> Callable[..., tuple[list[int], list[int]]]:
+    """Install the three stubs together and hand back their attempt logs."""
+
+    def install(
+        *, failed_alignments: set[int] | None = None, failed_models: set[int] | None = None
+    ) -> tuple[list[int], list[int]]:
+        return (
+            alignments(failed_alignments or set()),
+            models(failed_models or set()),
+        )
+
+    return install
 
 
 @pytest.fixture

@@ -28,32 +28,35 @@ own correctness lives in ``test_icp_plane.py`` and ``test_coverage.py``.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
 from pathlib import Path
-from types import SimpleNamespace
 from typing import cast
 
-import numpy as np
 import pytest
 
 pytest.importorskip("PySide6")
 
-from scanner3d import gui, icp_plane
-from scanner3d.geometry import Rigid
+from scanner3d import gui
 from scanner3d.gui import COVERAGE_EVERY, MIN_COVERAGE_CLOUDS, capture_progress_text
 from tests.fake_v4l2 import stream_kernel, stream_node, whole_frame
-from tests.gui_harness import CaptureWindow, capture_dir, start_capture
-
-__all__ = ["capture_dir", "stream_kernel", "stream_node"]
-
-#: A payload the real :meth:`~scanner3d.gui.ScannerWindow._show_coverage` can
-#: unpack and hand to the view: points, the per-point "needs more scanning"
-#: flags, and the well-covered fraction.
-MODEL_PAYLOAD = (
-    np.zeros((2, 3), dtype=np.float32),
-    np.array([True, False]),
-    0.5,
+from tests.gui_harness import (
+    CaptureWindow,
+    alignments,
+    capture_dir,
+    clouds,
+    live,
+    models,
+    start_capture,
 )
+
+__all__ = [
+    "alignments",
+    "capture_dir",
+    "clouds",
+    "live",
+    "models",
+    "stream_kernel",
+    "stream_node",
+]
 
 
 def frames(count: int) -> tuple[object, ...]:
@@ -61,84 +64,11 @@ def frames(count: int) -> tuple[object, ...]:
     return tuple(whole_frame(1 + index % 250, buffer_index=index % 4) for index in range(count))
 
 
-@pytest.fixture
-def clouds(monkeypatch) -> list[int]:
-    """Deprojection, reduced to a distinct three-point cloud per frame."""
-    seen: list[int] = []
-
-    def load(path: Path, _target_points: int) -> tuple[tuple[float, float, float], ...]:
-        index = int(path.stem.split("_")[1])
-        seen.append(index)
-        base = float(index)
-        return ((base, 0.0, 100.0), (0.0, base, 101.0), (base, base, 102.0))
-
-    monkeypatch.setattr(gui, "_load_cloud", load)
-    return seen
-
-
-@pytest.fixture
-def alignments(monkeypatch) -> Callable[[set[int]], list[int]]:
-    """Alignment, reduced to a success unless a test names the attempt to fail.
-
-    Attempts are numbered from 1 in the order ICP is actually called, which is
-    once per frame after the first - the first frame is the reference and is
-    never aligned to anything.
-    """
-    attempts: list[int] = []
-
-    def install(failing: set[int]) -> list[int]:
-        def align(*_args: object, **_kwargs: object) -> object:
-            attempts.append(len(attempts) + 1)
-            if attempts[-1] in failing:
-                raise ValueError(f"synthetic alignment failure on attempt {attempts[-1]}")
-            return SimpleNamespace(transform=Rigid.identity())
-
-        monkeypatch.setattr(icp_plane, "icp_point_to_plane", align)
-        return attempts
-
-    return install
-
-
-@pytest.fixture
-def models(monkeypatch) -> Callable[[set[int]], list[int]]:
-    """The coverage build, reduced to a counter with optional failures.
-
-    Returns the list of BUILD ATTEMPTS, which is not the same list as the
-    emissions the window received: an attempt that raises produces no emission,
-    and proving the next one is still made is the point of one of the tests.
-    """
-    attempts: list[int] = []
-
-    def install(failing: set[int]) -> list[int]:
-        def build(clouds: object, poses: object) -> object:
-            attempts.append(len(attempts) + 1)
-            if attempts[-1] in failing:
-                raise ValueError(f"synthetic coverage failure on attempt {attempts[-1]}")
-            return MODEL_PAYLOAD
-
-        monkeypatch.setattr(gui, "_coloured_cloud", build)
-        return attempts
-
-    return install
-
-
-@pytest.fixture
-def live(clouds, alignments, models) -> Callable[..., tuple[list[int], list[int]]]:
-    """Install the three stubs together and hand back their attempt logs."""
-
-    def install(
-        *, failed_alignments: set[int] | None = None, failed_models: set[int] | None = None
-    ) -> tuple[list[int], list[int]]:
-        return (
-            alignments(failed_alignments or set()),
-            models(failed_models or set()),
-        )
-
-    return install
-
-
 def _notes(window: CaptureWindow) -> list[str]:
-    return [str(note) for _payload, note in window.worker.coverage.emitted]
+    """What each model snapshot said about itself, in the order produced."""
+    return [
+        cast(gui.ModelSnapshot, snapshot).note for (snapshot,) in window.worker.coverage.emitted
+    ]
 
 
 def _saved(window: CaptureWindow) -> list[int]:

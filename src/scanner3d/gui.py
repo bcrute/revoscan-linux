@@ -12,7 +12,10 @@ Three views, because there are three different questions
 --------------------------------------------------------
 COLOUR answers "is the object where I think it is" - the framing question, and
 the reason the vendor's own software shows this camera rather than the depth
-one while you position.
+one while you position. It runs DURING a capture as well as before one, because
+the four minutes of a sweep is precisely when the question keeps being asked.
+The RGB camera returns nothing unless a depth stream is already running, so it
+is started by the first delivered depth frame and stopped with that stream.
 
 DEPTH answers "is the scanner actually seeing it" - an object can be perfectly
 framed and still return almost nothing, if it is too close, too far, too shiny
@@ -40,6 +43,28 @@ looked healthy. Treat it as "have I pointed the scanner at that yet", never as
 a measure of quality. The number that can be trusted comes from Reconstruct,
 which scores against evidence it was not allowed to fit.
 
+It is also deliberately INCOMPLETE. It is rebuilt from a fixed number of frames
+sampled across the whole sweep rather than from every frame aligned so far, so
+a rebuild two hundred frames in costs what one forty frames in cost. Every frame
+is still on disk at full length, and Reconstruct still reads all of them.
+
+Nothing frequent is queued to the window
+----------------------------------------
+Depth frames, colour frames, the saved-frame count and the model all cross to
+the GUI through a one-slot channel that replaces its contents rather than
+queueing them. A window that falls behind therefore skips to the newest of each
+instead of working through a backlog of pictures that were true several seconds
+ago.
+
+That backlog is a risk this corrects, not a diagnosis it proves. The owner's
+2026-08-26 report - the model updating two or three times and then sitting
+still - is consistent with it, and offline replay of that capture ruled out the
+scanner, the frames on disk and the geometry; but no trace of that run's event
+loop was ever taken, so the queue is not established as its sole cause. What
+IS established is that an unbounded producer wins against any consumer
+eventually. The produced/applied/superseded lines in the log are what a second
+physical report can be answered with.
+
 Long work runs on worker threads, and every long job can be stopped. A window
 that freezes during a four-minute capture looks crashed; a capture that cannot
 be abandoned means noticing a mistake in the first ten seconds and having to
@@ -64,8 +89,11 @@ from __future__ import annotations
 
 import math
 import sys
+import threading
+import time
 import traceback
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
@@ -100,6 +128,7 @@ from scanner3d.config import (
     allocate_capture_dir,
     captures_dir_source,
     configured_captures_dir,
+    resolve_serial,
     set_captures_dir,
     validate_capture_name,
 )
@@ -109,7 +138,14 @@ from scanner3d.geometry import Rigid
 from scanner3d.logs import configure as configure_logging
 from scanner3d.logs import get_logger, timed
 from scanner3d.pipeline import frame_travel, travel_verdict
-from scanner3d.v4l2_stream import wait_for_scanner
+from scanner3d.v4l2_stream import (
+    CALLER_STOP_REASON,
+    MAX_DURATION_S,
+    MAX_FRAMES,
+    FrameRecord,
+    StreamResult,
+    wait_for_scanner,
+)
 from scanner3d.viewer import depth_to_pixels, frame_stats
 
 #: The only frame geometry this scanner's depth mode produces. Named here
@@ -158,6 +194,35 @@ FAILURE_SUMMARY_EVERY: Final = 25
 #: thrown away and recomputed properly by Reconstruct.
 PREVIEW_POINTS: Final = 900
 
+#: Aligned frames the live model is built from, however many have been aligned.
+#: A rebuild that uses EVERY frame so far costs more the longer the capture runs
+#: - measured at 0.008 s over 3 frames and 0.200 s over 51, on a sweep that
+#: keeps going for hundreds - and produces a payload that grows with it. Both
+#: are wrong for a picture that is thrown away and rebuilt a dozen frames later.
+#: Sampling a fixed number of them spread across the whole sweep makes the cost
+#: and the size flat, and :func:`_sample_span` is what keeps "spread across the
+#: whole sweep" from degenerating into "the beginning" or "the end".
+#:
+#: This bounds the PREVIEW only. Reconstruct reads every frame off disk and is
+#: not affected by anything here.
+LIVE_MODEL_CLOUDS: Final = 40
+
+#: Ceiling on the points in one live model, applied where the model is BUILT.
+#: Below :data:`~scanner3d.cloud_view.MAX_RENDER_POINTS`, so the view never has
+#: to throw any of it away: a payload the producer bounds is one that is never
+#: assembled, copied across a thread boundary and held in full just to be
+#: decimated at the far end.
+LIVE_MODEL_POINTS: Final = 45_000
+
+#: How long a stopping stream waits for the colour grabber to notice. A grab
+#: that has already begun holds the RGB node for up to its own 8 s deadline, and
+#: the wait is bounded rather than absent so a normal stop does not race the
+#: next run for that node. Nothing depends on it succeeding: a pump that is
+#: still running has already been forbidden to touch the window, and its thread
+#: is a daemon, so it can neither confuse the next capture nor hold the
+#: application open.
+COLOUR_STOP_TIMEOUT_S: Final = 10.0
+
 #: The namespace this window claims under the captures folder. Inside it, each
 #: capture gets a freshly created directory - named by whoever started the scan,
 #: or dated when they left the name blank: this window writes frame_0000.raw
@@ -179,27 +244,180 @@ class Stopped(Exception):
     """
 
 
+class LatestOnly:
+    """One slot holding the newest payload, in place of a queue that can grow.
+
+    A Qt queued connection is a QUEUE. A worker that emits faster than the GUI
+    thread can draw does not slow down - it accumulates, and what the operator
+    then watches is a backlog of pictures that were true several seconds ago,
+    arriving in order, long after the moment they described. Seen from outside
+    the process that is one of the things "the model updates two or three times
+    and then freezes" can look like - which is a reason to bound the boundary,
+    not a finding about any particular run - and no amount of making the drawing
+    faster removes it: a producer with no backpressure will always win
+    eventually.
+
+    A depth frame, a colour frame, a saved-frame count and an accumulated model
+    are all things where an older payload is not partial information, it is
+    WRONG information - the newest one supersedes it completely. So this keeps
+    exactly one slot, replaces it in place, and wakes the GUI at most once per
+    slot. Fifty frames produced while the GUI is busy cost one redraw of the
+    fiftieth, not fifty redraws ending at the fiftieth.
+
+    Deliberately shaped like a Qt signal - :meth:`connect` and :meth:`emit` -
+    so that a job producing these payloads reads the same either way, and the
+    decision to coalesce lives in ONE place instead of at every call site.
+
+    NOT for anything whose older values still matter. ``progress`` stays an
+    ordinary signal: it appends lines to a report, and a coalesced log is a log
+    with holes in it.
+
+    :meth:`emit` runs on the producing thread and :meth:`deliver` on the GUI
+    one; the slot and the counters are guarded by one lock held only for the
+    handful of instructions between them.
+    """
+
+    def __init__(self, name: str, notify: Callable[[LatestOnly], None]) -> None:
+        self.name = name
+        self._notify = notify
+        self._lock = threading.Lock()
+        self._pending: tuple[object, ...] | None = None
+        #: Whether the GUI has already been woken for the current slot and has
+        #: not drained it yet. This, not the payload, is what makes N emissions
+        #: cost one wake-up.
+        self._waiting = False
+        self._slots: list[Callable[..., object]] = []
+        #: Offered by the producer, applied to the window, and replaced while
+        #: still waiting to be drawn. Counted rather than silently dropped
+        #: because a physical report has to be able to tell "the model was never
+        #: produced" from "it was produced and superseded before it was drawn",
+        #: and those two have entirely different causes.
+        self.offered = 0
+        self.applied = 0
+        self.superseded = 0
+        #: Payloads dropped by :meth:`discard` because whatever produced them
+        #: ended before the window drew them. Separate from ``superseded``: one
+        #: is "a newer one replaced it", the other is "it stopped being true".
+        self.discarded = 0
+
+    def connect(self, slot: Callable[..., object]) -> None:  # Qt's name
+        self._slots.append(slot)
+
+    def emit(self, *payload: object) -> None:  # Qt's name
+        """Offer the newest payload. PRODUCER THREAD; never waits for the GUI."""
+        with self._lock:
+            self.offered += 1
+            stale = self._pending is not None
+            self._pending = payload
+            waiting, self._waiting = self._waiting, True
+            if stale:
+                self.superseded += 1
+        if stale:
+            # DEBUG because at capture rates this is the common case and the
+            # readable form of it is the one-line summary at the end of the run.
+            LOG.debug("%s: an update was superseded before it could be drawn", self.name)
+        if not waiting:
+            self._notify(self)
+
+    def deliver(self) -> None:
+        """Apply whatever is in the slot right now. GUI THREAD.
+
+        Empty is normal and is not an error: two wake-ups can be outstanding
+        across a producer that emitted either side of a drain.
+        """
+        with self._lock:
+            payload, self._pending = self._pending, None
+            self._waiting = False
+        if payload is None:
+            return
+        self.applied += 1
+        for slot in self._slots:
+            slot(*payload)
+
+    def discard(self) -> bool:
+        """Empty the slot so a queued wake-up applies nothing. ANY THREAD.
+
+        Refusing to produce more is not enough to stop a producer that has
+        already ended from reaching the window. One payload can be sitting in
+        the slot with its wake-up already posted, and that wake-up is answered
+        whenever the GUI next gets a turn - which can be after the stream that
+        produced it has been torn down, and after the NEXT one has put its own
+        picture on the screen. What the operator then sees is the previous
+        scan's frame, arriving on top of the current one, with nothing to
+        distinguish it.
+
+        So teardown says so explicitly rather than relying on the emission
+        guard. The wake-up itself is left outstanding on purpose: an empty
+        delivery is already a normal outcome, and cancelling it is not
+        something a producer thread can do to a queued Qt event anyway.
+
+        Returns whether anything was actually dropped, and counts it: a payload
+        that was produced and never drawn must not be indistinguishable from
+        one that was never produced.
+        """
+        with self._lock:
+            payload, self._pending = self._pending, None
+            if payload is None:
+                return False
+            self.discarded += 1
+        LOG.debug("%s: an update was dropped because its stream ended first", self.name)
+        return True
+
+    def summary(self) -> str:
+        """One line naming what this channel produced, drew, and did not draw."""
+        return (
+            f"{self.name}: {self.offered} produced, {self.applied} applied, "
+            f"{self.superseded} superseded before they could be drawn, "
+            f"{self.discarded} dropped when the stream ended"
+        )
+
+
 class Worker(QThread):
     """Runs one long job off the UI thread and reports back by signal."""
 
     progress = Signal(str)
-    preview = Signal(bytes)
-    colour = Signal(bytes)
-    coverage = Signal(object, str)
-    #: One saved frame. Deliberately the cheapest signal here - an integer, no
-    #: geometry - because it is the only thing that fires on EVERY kept frame
-    #: and it is what tells the operator the capture is still alive between the
-    #: much rarer model refreshes.
-    saved = Signal(int)
-    travel = Signal(float)
     finished_ok = Signal(object)
     stopped = Signal()
     failed = Signal(str)
+    #: Wakes the GUI for ONE :class:`LatestOnly` channel. It carries the channel
+    #: and not the payload, which is the whole difference: by the time this
+    #: arrives, what should be drawn is whatever is in that channel's slot then,
+    #: not whatever was in it when the wake-up was posted.
+    _ready = Signal(object)
 
     def __init__(self, job: Callable[[Worker], object]) -> None:
         super().__init__()
         self._job = job
         self.cancelled = False
+        # A QThread OBJECT lives in the thread that created it - the GUI one -
+        # so this is a queued connection from run() and _deliver really does
+        # happen on the GUI thread.
+        self._ready.connect(self._deliver)
+        #: Every kept depth frame. Latest-only: a frame the operator never saw
+        #: is not worth catching up on.
+        self.preview = LatestOnly("depth preview", self._wake)
+        self.colour = LatestOnly("colour preview", self._wake)
+        self.coverage = LatestOnly("live model", self._wake)
+        #: One saved frame. Deliberately the cheapest payload here - an integer,
+        #: no geometry - because it is the only thing that fires on EVERY kept
+        #: frame and it is what tells the operator the capture is still alive
+        #: between the much rarer model refreshes. Coalescing it loses nothing:
+        #: the count only ever climbs, so the newest one is the true one.
+        self.saved = LatestOnly("saved-frame count", self._wake)
+        self.travel = LatestOnly("rotation speed", self._wake)
+
+    def channels(self) -> tuple[LatestOnly, ...]:
+        """Every coalescing channel, for reporting what the run cost the GUI."""
+        return (self.preview, self.colour, self.coverage, self.saved, self.travel)
+
+    def _wake(self, channel: LatestOnly) -> None:
+        """PRODUCER THREAD. One posted event, whatever is waiting in the slot."""
+        self._ready.emit(channel)
+
+    def _deliver(self, channel: object) -> None:
+        """GUI THREAD, by queued connection from :meth:`_wake`."""
+        if isinstance(channel, LatestOnly):
+            channel.deliver()
 
     def cancel(self) -> None:
         """Ask the job to stop. Checked by the job at its own safe points."""
@@ -308,6 +526,308 @@ def _coloured_cloud(
         np.array(thin, dtype=bool),
         report.well_covered_fraction,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class ModelSnapshot:
+    """One accumulated model, carrying the counts it was BUILT from.
+
+    The counts travel WITH the picture instead of being read off the window at
+    the moment it is drawn, and that is the whole reason this type exists. A
+    snapshot can be superseded, and a snapshot can be drawn a moment after
+    several more frames have landed on disk; a panel that says "rebuilt after 41
+    frames" while showing the model built at frame 27 is describing something
+    that was never on the screen, and it is worse than saying nothing because it
+    is believable.
+    """
+
+    points: np.ndarray
+    thin: np.ndarray
+    well_covered: float
+    #: Aligned clouds and saved frames AT BUILD TIME, never at draw time.
+    aligned: int
+    saved: int
+    #: How many of those aligned clouds actually contributed points, which is
+    #: :data:`LIVE_MODEL_CLOUDS` once a sweep is longer than that.
+    sampled: int
+    note: str
+
+
+def _sample_span(
+    clouds: Sequence[Sequence[tuple[float, float, float]]],
+    poses: Sequence[Rigid],
+    limit: int,
+) -> tuple[list[Sequence[tuple[float, float, float]]], list[Rigid]]:
+    """At most ``limit`` frames, spread evenly across the WHOLE sweep.
+
+    Not the first ``limit`` and not the last ``limit``, both of which are a
+    cheaper way to bound this and both of which answer the model panel's one
+    question wrongly. "Have I pointed the scanner at that yet" is about the
+    object, so a model that quietly stops including anything after frame 40
+    reports an object that stops there, and one that keeps only the last 40
+    forgets the half already scanned and sends the operator back over it.
+
+    The first and last frames are always kept: the last is the one that has just
+    arrived, and the first is where the sweep started from.
+    """
+    total = len(clouds)
+    if total <= limit:
+        return list(clouds), list(poses)
+    picks = [round(index * (total - 1) / (limit - 1)) for index in range(limit)]
+    return [clouds[index] for index in picks], [poses[index] for index in picks]
+
+
+def _live_snapshot(
+    clouds: Sequence[Sequence[tuple[float, float, float]]],
+    poses: Sequence[Rigid],
+    *,
+    saved: int,
+    aligned: int,
+) -> ModelSnapshot:
+    """The disposable "scanned so far" model, bounded where it is BUILT.
+
+    Two bounds, both applied here rather than in the view. Which frames
+    contribute is bounded by :data:`LIVE_MODEL_CLOUDS`, which is what keeps the
+    cost of a rebuild flat as the sweep grows; how many points cross to the GUI
+    is bounded by :data:`LIVE_MODEL_POINTS`, which is what keeps a payload from
+    being assembled in full, copied across a thread boundary and held, only for
+    the view to throw most of it away at the far end.
+
+    Neither bound touches the capture. Every frame is on disk at full length and
+    Reconstruct reads all of them; what is sampled here is only the picture.
+    """
+    sampled_clouds, sampled_poses = _sample_span(clouds, poses, LIVE_MODEL_CLOUDS)
+    points, thin, well_covered = _coloured_cloud(sampled_clouds, sampled_poses)
+    if len(points) > LIVE_MODEL_POINTS:
+        step = len(points) // LIVE_MODEL_POINTS + 1
+        points, thin = points[::step], thin[::step]
+    return ModelSnapshot(
+        points=points,
+        thin=thin,
+        well_covered=well_covered,
+        aligned=aligned,
+        saved=saved,
+        sampled=len(sampled_clouds),
+        note=f"preview after {aligned} aligned frames of {saved} saved -",
+    )
+
+
+class ColourPump:
+    """Pulls colour frames for as long as a depth stream is up, and no longer.
+
+    MEASURED: the RGB camera delivers nothing on its own - a lone capture times
+    out after 8 s with no buffer - but returns frames reliably while a depth
+    stream is running. The vendor's own depth-first ordering is therefore a
+    requirement, not a habit, and it is why :meth:`start` is called from the
+    first delivered depth frame rather than before the stream opens.
+
+    It is specifically STREAMING that is required, not merely the depth node
+    being open: holding the node open with no STREAMON still times out at 8 s.
+    So a colour preview cannot be had with the projector dark. This project has
+    separately failed to darken the emitter by any means - registers 0x922,
+    0xb04, 0xb01, 0xb00 and the device's own actuator ioctl were all accepted
+    while the owner watched it stay lit - so the blue light while colour is
+    running is not a bug and is not currently avoidable.
+
+    ONE thread per stream. Not one per frame, and never one that outlives the
+    stream that started it: a grabber still running after a capture ends holds
+    the RGB node the NEXT preview or capture wants, and keeps pushing pictures
+    into a window that has moved on to a different scan. :meth:`stop` therefore
+    runs from the stream's ``finally`` - on completion, on Stop and on failure
+    alike - and it both ends the loop and closes the door on any picture already
+    in flight.
+    """
+
+    def __init__(
+        self,
+        serial: str,
+        emit: Callable[[bytes], None],
+        *,
+        should_stop: Callable[[], bool],
+    ) -> None:
+        self._serial = serial
+        self._emit = emit
+        self._should_stop = should_stop
+        # Reentrant because :meth:`_publish` holds it ACROSS the emission - that
+        # is what makes the "stopped means stopped" guarantee airtight - and a
+        # slot on the far end is entitled to answer a picture by stopping the
+        # pump that sent it.
+        self._lock = threading.RLock()
+        self._stopped = False
+        self._thread: threading.Thread | None = None
+        #: Pictures handed to the window, and grabs that produced none.
+        self.frames = 0
+        self.failures = 0
+
+    def start(self) -> None:
+        """Begin pumping, at most once. Called once DEPTH has delivered."""
+        with self._lock:
+            if self._stopped or self._thread is not None or self._should_stop():
+                return
+            self._thread = threading.Thread(target=self._run, name="colour-pump", daemon=True)
+            self._thread.start()
+        LOG.info("colour pump started, after the first depth frame")
+
+    def stop(self) -> None:
+        """End the pump and forbid any further emission. Bounded, idempotent."""
+        with self._lock:
+            already, self._stopped = self._stopped, True
+            thread = self._thread
+            # A stop reached from the pump's OWN thread - a colour slot deciding
+            # it has seen enough - cannot join itself, and has no need to: the
+            # flag is set, so nothing further is published and the loop ends at
+            # its next turn.
+            joinable = thread is not None and thread is not threading.current_thread()
+        if already or thread is None:
+            return
+        if joinable:
+            thread.join(COLOUR_STOP_TIMEOUT_S)
+            if thread.is_alive():
+                LOG.warning(
+                    "the colour grabber has not finished within %.0fs; it can no longer reach "
+                    "the window and it is a daemon thread, so it cannot outlast the application",
+                    COLOUR_STOP_TIMEOUT_S,
+                )
+        LOG.info(
+            "colour pump ended: %d pictures shown, %d grabs without one",
+            self.frames,
+            self.failures,
+        )
+
+    def _done(self) -> bool:
+        with self._lock:
+            if self._stopped:
+                return True
+        return self._should_stop()
+
+    def _publish(self, frame: bytes) -> None:
+        """Hand one picture to the window, unless the pump has been stopped.
+
+        Under the same lock :meth:`stop` sets its flag with, so a picture
+        grabbed in the instant before Stop cannot arrive in a window that has
+        already moved on. Cheap to hold: the far end is a one-slot channel that
+        does not wait for the GUI.
+        """
+        with self._lock:
+            if self._stopped:
+                return
+            self.frames += 1
+            self._emit(frame)
+
+    def _run(self) -> None:
+        """The pump itself. COLOUR THREAD. Never raises into the depth stream."""
+        import tempfile
+
+        from scanner3d.rgb_frame import V4l2RgbFrameBackend
+
+        statuses = 0
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory)
+            frame = target / "rgb-frame.jpg"
+            backend = V4l2RgbFrameBackend()
+            while not self._done():
+                try:
+                    outcome = backend.run(self._serial, target)
+                except Exception as exc:
+                    # Colour is a convenience for framing. Losing it must never
+                    # take the depth stream down with it - but it must not
+                    # vanish silently either, or a blank colour panel is
+                    # unexplainable. Reported once and then given up on: a
+                    # grabber that raised on the device is not going to succeed
+                    # on the next turn of this loop, and retrying it twice a
+                    # second for a four-minute capture is a thousand identical
+                    # lines in a log whose only purpose is being read afterwards.
+                    self.failures += 1
+                    LOG.warning("colour grab failed, giving up: %s", exc)
+                    return
+                status = outcome.as_dict().get("status")
+                if status != "ok":
+                    # Not a failure of the run - the depth stream is unaffected
+                    # and the next grab may well succeed - so it is reported on
+                    # the same "first few, then summaries" budget the live model
+                    # failures use rather than once per grab.
+                    statuses += 1
+                    self.failures += 1
+                    if statuses <= FAILURES_REPORTED:
+                        LOG.info("colour grab status %s (%d so far)", status, statuses)
+                    elif statuses % FAILURE_SUMMARY_EVERY == 0:
+                        LOG.info("colour grab status %s, %d times now", status, statuses)
+                if frame.exists():
+                    payload = frame.read_bytes()
+                    frame.unlink(missing_ok=True)
+                    self._publish(payload)
+
+
+def stream_with_colour(
+    worker: Worker,
+    serial: str | None,
+    on_frame: Callable[[bytes, FrameRecord], None],
+    *,
+    frames: int,
+    decimate: int,
+    duration_s: float,
+) -> StreamResult:
+    """Run the depth stream with the colour camera pumped alongside it.
+
+    Shared by preview and capture because the ORDER is a device requirement
+    rather than a preference. Launching the grabber first meant it sat timing
+    out while depth was still starting and the first picture took 22 s to appear
+    instead of about one; and starting no grabber at all during a capture - which
+    is what happened until now - meant the colour panel froze for the entire
+    sweep, at exactly the moment the operator is deciding where to point next.
+
+    ``serial`` may be ``None``. A scanner whose serial could not be read is
+    still perfectly capturable, and colour is the part that is given up.
+    """
+    from scanner3d.v4l2_stream import stream_frames
+
+    pump = (
+        ColourPump(serial, worker.colour.emit, should_stop=lambda: worker.cancelled)
+        if serial
+        else None
+    )
+
+    started = False
+
+    def deliver(buf: bytes, record: FrameRecord) -> None:
+        # Depth first, always. The frame is what the run is FOR, and starting
+        # the pump is the last thing done with the FIRST one - once, here, and
+        # not once per frame. :meth:`ColourPump.start` refuses a second thread
+        # by itself as well, but a callback that asks per frame is a callback
+        # one edit away from meaning it.
+        nonlocal started
+        on_frame(buf, record)
+        if pump is not None and not started:
+            started = True
+            pump.start()
+
+    try:
+        return stream_frames(
+            frames=frames,
+            decimate=decimate,
+            duration_s=duration_s,
+            on_frame=deliver,
+            # Stopping through the flag rather than by raising: the stream
+            # re-queues the buffer first, and every frame already written stays
+            # written.
+            should_stop=lambda: worker.cancelled,
+        )
+    finally:
+        # Every path out: the stream's own end, the operator's Stop, and an
+        # exception on the way through. A pump that survives any of them keeps
+        # the RGB node away from the next run and keeps drawing into a window
+        # that is no longer showing this capture.
+        if pump is not None:
+            pump.stop()
+        # AFTER the stop, and never before it: the stop is what guarantees no
+        # further picture can be published, so this is the last one there will
+        # ever be. Stopping the pump closes the door on future emissions but
+        # says nothing about a picture already in the slot with its wake-up
+        # posted - and that one, drawn whenever the GUI next gets a turn, would
+        # land in whatever run is on screen by then. Frames already APPLIED are
+        # untouched: this empties one slot, it does not undraw anything.
+        if worker.colour.discard():
+            LOG.info("colour: a picture offered before teardown was dropped rather than shown")
 
 
 def capture_progress_text(
@@ -634,6 +1154,42 @@ class ScannerWindow(QMainWindow):
         )
         self._colour_label.setText(f"{image.width()}x{image.height()}, about 2 frames a second")
 
+    def _scanner_serial(self) -> str | None:
+        """The serial the COLOUR camera will be aimed at, or ``None``.
+
+        Resolved by :func:`~scanner3d.config.resolve_serial`, which is the same
+        authority :func:`~scanner3d.v4l2_stream.stream_frames` resolves the
+        depth node through: configuration first, and the single attached device
+        only when nothing is configured. Asking the enumeration directly for
+        whichever scanner it happened to list first was wrong on the one bench
+        where it matters - two units plugged in and a serial written in the
+        config file - because then colour and depth are two different scanners
+        and the framing view shows an object the capture is not recording.
+
+        ``None`` means "not resolvable", and that covers both unavailability
+        (nothing attached, enumeration failed, the config file unreadable) and
+        AMBIGUITY (several attached, none configured). Refusing the ambiguous
+        case is the point: this feeds an optional convenience view, and the
+        cost of guessing wrong is a silently misleading picture.
+
+        It changes nothing about the depth capture either way. Every caller
+        treats ``None`` as a reason to do less - a capture without a resolvable
+        serial is still a capture, just without colour - and the depth stream
+        resolves its own node, so an ambiguity that stops colour still reaches
+        the operator as the stream's own explicit refusal rather than as this
+        quietly doing nothing.
+
+        Never raises. GUI thread, before the job starts.
+        """
+        try:
+            return resolve_serial()
+        except Exception as exc:
+            # Once per run, not per frame. A blank colour panel with nothing in
+            # the log is unexplainable, and "which scanner" is exactly the
+            # question a two-scanner bench needs answered in words.
+            LOG.info("no colour camera this run: %s", exc)
+            return None
+
     def _start_preview(self) -> None:
         """Stream frames to the screen and write nothing.
 
@@ -643,92 +1199,33 @@ class ScannerWindow(QMainWindow):
         """
         if self._preview_worker is not None and self._preview_worker.isRunning():
             return
-        try:
-            devices = find_scanners()
-        except Exception:
-            return
-        if not devices or not devices[0].serial:
-            return
-        serial = devices[0].serial
+        # Only colour depends on this, exactly as in a capture. Framing that
+        # cannot be resolved to one scanner must not decide whether the DEPTH
+        # view runs: the stream resolves its own node and says so out loud when
+        # it cannot, and that message is worth more to the operator than a
+        # Preview button that silently does nothing.
+        serial = self._scanner_serial()
 
         def job(worker: Worker) -> object:
-            import tempfile
-            import threading
-
-            from scanner3d.rgb_frame import V4l2RgbFrameBackend
-            from scanner3d.v4l2_stream import MAX_DURATION_S, MAX_FRAMES, stream_frames
-
             self._await_device()
-
-            def grab_colour() -> None:
-                """Pull colour frames while the depth stream is up.
-
-                MEASURED: the RGB camera delivers nothing on its own - a lone
-                capture times out after 8 s with no buffer - but returns frames
-                reliably while a depth stream is running. The vendor's own
-                depth-first ordering is therefore a requirement, not a habit.
-                About 0.43 s per frame, and depth loses none.
-
-                It is specifically STREAMING that is required, not merely the
-                depth node being open: holding the node open with no STREAMON
-                still times out at 8 s. So a colour preview cannot be had with
-                the projector dark. This project has separately failed to
-                darken the emitter by any means - registers 0x922, 0xb04,
-                0xb01, 0xb00 and the device's own actuator ioctl were all
-                accepted while the owner watched it stay lit - so the blue
-                light during preview is not a bug and is not currently
-                avoidable.
-                """
-                with tempfile.TemporaryDirectory() as directory:
-                    target = Path(directory)
-                    backend = V4l2RgbFrameBackend()
-                    while not worker.cancelled:
-                        try:
-                            outcome = backend.run(serial, target)
-                        except Exception as exc:
-                            # Colour is a convenience for framing. Losing it
-                            # must never take the depth preview down with it -
-                            # but it must not vanish silently either, or a
-                            # blank colour panel is unexplainable.
-                            LOG.warning("colour grab failed, giving up: %s", exc)
-                            return
-                        status = outcome.as_dict().get("status")
-                        if status != "ok":
-                            LOG.info("colour grab status %s", status)
-                        frame = target / "rgb-frame.jpg"
-                        if frame.exists():
-                            worker.colour.emit(frame.read_bytes())
-                            frame.unlink(missing_ok=True)
-
-            # Started only once DEPTH is actually delivering. The RGB camera
-            # returns nothing while depth is idle - a lone capture blocks for
-            # its full 8 s timeout - so launching this first meant the grabber
-            # sat timing out while depth was still starting, and the first
-            # picture took 22 s to appear instead of about one.
-            #
-            # This is the vendor's own depth-first ordering, arrived at the
-            # hard way: paired_capture.py already modelled a one-second gap
-            # between the two STREAMONs, copied from observing the SDK.
-            started_colour = False
-
-            def on_frame(buf: bytes, _record: object) -> None:
-                nonlocal started_colour
-                if not started_colour:
-                    started_colour = True
-                    threading.Thread(target=grab_colour, daemon=True).start()
-                worker.preview.emit(buf)
-
             # The module's own ceilings rather than a number of my choosing.
             # They exist as runaway guards, and a preview that runs until the
             # user stops it is exactly the shape of thing they guard against -
             # so it ends on its own if the stop signal is ever missed. At the
             # measured rate MAX_FRAMES is about twenty minutes of framing.
-            return stream_frames(
+            #
+            # Colour is pumped by the shared helper, which starts it on the
+            # first delivered depth frame and stops it on every way out. It used
+            # to be a thread started here that ended only when this worker was
+            # CANCELLED - so a preview that hit its own ceiling left a grabber
+            # running against a stream that had closed.
+            return stream_with_colour(
+                worker,
+                serial,
+                lambda buf, _record: worker.preview.emit(buf),
                 frames=MAX_FRAMES,
                 decimate=1,
                 duration_s=MAX_DURATION_S,
-                on_frame=on_frame,
-                should_stop=lambda: worker.cancelled,
             )
 
         worker = Worker(job)
@@ -917,15 +1414,47 @@ class ScannerWindow(QMainWindow):
             return
         self._capturing = False
         self._refresh_capture_progress()
+        self._log_feedback_load()
 
-    def _show_coverage(self, payload: tuple[np.ndarray, np.ndarray, float], note: str) -> None:
-        points, thin, well_covered = payload
-        self._cloud.set_cloud(points, thin)
+    def _log_feedback_load(self) -> None:
+        """What the run cost the GUI, once, at the end of a capture.
+
+        The readable form of what the per-event DEBUG lines record. It is the
+        difference between the three explanations a physical "it froze" report
+        cannot otherwise be told apart by: a model that was never PRODUCED (the
+        alignment or the build failed), one that was produced and APPLIED (the
+        picture really did change and was too subtle to see), and one produced
+        and then SUPERSEDED before it could be drawn (the window could not keep
+        up, which is the failure this bounding exists to prevent, and which
+        nothing in the previous run's evidence could have told apart from the
+        other two).
+        """
+        worker = self._worker
+        if worker is None:
+            return
+        for channel in worker.channels():
+            LOG.info("live feedback - %s", channel.summary())
+
+    def _show_coverage(self, snapshot: ModelSnapshot) -> None:
+        """Draw one accumulated model, described by ITS OWN counts. GUI THREAD.
+
+        ``snapshot.saved`` rather than ``self._saved_frames``: the frame count
+        that belongs to this picture is the one it was built at, and by the time
+        it is drawn the live count may have moved on. Reading the live one made
+        the panel claim a rebuild that had not happened yet.
+        """
+        self._cloud.set_cloud(snapshot.points, snapshot.thin)
         self._model_refreshes += 1
-        self._model_refreshed_at = self._saved_frames
+        self._model_refreshed_at = snapshot.saved
         self._coverage_summary.setText(
-            f"{note}   {100.0 * well_covered:.0f}% of the surface is covered, "
+            f"{snapshot.note}   {100.0 * snapshot.well_covered:.0f}% of the surface is covered, "
             f"{100.0 * self._cloud.thin_fraction:.0f}% of what you can see still needs scanning"
+        )
+        LOG.info(
+            "live model applied: %d points from %d aligned frames of %d saved",
+            len(snapshot.points),
+            snapshot.aligned,
+            snapshot.saved,
         )
         # Restated here so the heartbeat can say when the picture below it last
         # changed - which is the difference between a model that is holding
@@ -938,6 +1467,7 @@ class ScannerWindow(QMainWindow):
         self._worker = worker
         worker.progress.connect(self._log)
         worker.preview.connect(self._show_frame)
+        worker.colour.connect(self._show_colour)
         worker.saved.connect(self._show_saved)
         worker.coverage.connect(self._show_coverage)
         worker.travel.connect(self._show_travel)
@@ -1115,11 +1645,14 @@ class ScannerWindow(QMainWindow):
         self._log(f"Capturing to {target}")
         self._log("Move all the way around, and come BACK to where you started.")
         self._busy(True)
+        # Read here rather than on the worker: it decides only whether the
+        # colour camera can be pumped alongside the depth stream, and a scanner
+        # that will not say who it is is still perfectly capturable.
+        serial = self._scanner_serial()
 
         def job(worker: Worker) -> object:
             from scanner3d.geometry import Rigid
             from scanner3d.icp_plane import icp_point_to_plane
-            from scanner3d.v4l2_stream import CALLER_STOP_REASON, stream_frames
 
             self._await_device()
             # Stop pressed while that wait was running - and it can be a long
@@ -1230,8 +1763,9 @@ class ScannerWindow(QMainWindow):
                 due = refreshed_at == 0 or aligned - refreshed_at >= COVERAGE_EVERY
                 if not due or worker.cancelled:
                     return
+                started = time.monotonic()
                 try:
-                    payload = _coloured_cloud(clouds, poses)
+                    snapshot = _live_snapshot(clouds, poses, saved=kept, aligned=aligned)
                 except Exception as exc:
                     # ``refreshed_at`` deliberately unchanged: the next aligned
                     # frame tries again. A model that fails to build once must
@@ -1239,19 +1773,30 @@ class ScannerWindow(QMainWindow):
                     note_failure("model", exc)
                     return
                 refreshed_at = aligned
-                worker.coverage.emit(
-                    payload, f"preview after {aligned} aligned frames of {kept} saved -"
+                # "Produced" is the half of the story this side of the boundary
+                # can vouch for. Whether it was ever DRAWN is the window's to
+                # report, and the two being separate lines is what lets a
+                # physical report distinguish a model that failed to build from
+                # one the GUI could not keep up with. Once every
+                # COVERAGE_EVERY alignments, so this is not per-frame spam.
+                LOG.info(
+                    "live model produced: %d points from %d of %d aligned frames "
+                    "in %.3fs, at %d saved",
+                    len(snapshot.points),
+                    snapshot.sampled,
+                    aligned,
+                    time.monotonic() - started,
+                    kept,
                 )
+                worker.coverage.emit(snapshot)
 
-            result = stream_frames(
+            result = stream_with_colour(
+                worker,
+                serial,
+                on_frame,
                 frames=frames,
                 decimate=decimate,
                 duration_s=900.0,
-                on_frame=on_frame,
-                # Stopping through the flag rather than by raising: the stream
-                # re-queues the buffer first, and every frame already written
-                # stays written.
-                should_stop=lambda: worker.cancelled,
             )
             # Only now, with the stream returned and its finally block done -
             # STREAMOFF, unmap, buffers released, node closed. Raising this any
@@ -1338,7 +1883,22 @@ class ScannerWindow(QMainWindow):
             result = reconstruct_sweep(
                 clouds, backend=backend, workers=workers, on_progress=report_progress
             )
-            worker.coverage.emit(_coloured_cloud(clouds, list(result.poses)), "registered -")
+            # Every frame, every point: this is the one the operator is being
+            # asked to trust, it is built once at the end rather than a dozen
+            # times a minute, and nothing about the live preview's bounds
+            # applies to it.
+            points, thin, well_covered = _coloured_cloud(clouds, list(result.poses))
+            worker.coverage.emit(
+                ModelSnapshot(
+                    points=points,
+                    thin=thin,
+                    well_covered=well_covered,
+                    aligned=len(clouds),
+                    saved=len(clouds),
+                    sampled=len(clouds),
+                    note="registered -",
+                )
+            )
             return result
 
         self._run(job, self._reconstruct_done)
