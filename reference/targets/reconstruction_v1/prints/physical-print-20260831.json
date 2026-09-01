@@ -1,0 +1,80 @@
+{
+  "capture_readiness": {
+    "ready_for_first_comparative_scan": true,
+    "ready_for_formal_physical_gate": false,
+    "why_not_formal_yet": [
+      "caliper resolution has not yet been recorded",
+      "printer, material, nozzle and layer height have not yet been recorded",
+      "each dimension currently has one reading, so repeatability is not measured"
+    ]
+  },
+  "dense_reference_adjustment": {
+    "method": "scale the nominal CAD about x=0 and y=0, and from z=0, by the independently measured overall axis factors; keep pocket depth as a separate measured dimension rather than warping the local CAD to force it",
+    "scale_x": 0.9989130434782608,
+    "scale_y": 0.9981707317073172,
+    "scale_z": 0.9973214285714286,
+    "status": "predeclared for this print before its first scan"
+  },
+  "instrument": {
+    "resolution_mm": null,
+    "type": "calipers"
+  },
+  "planned_capture": {
+    "camera": "fixed",
+    "motion": "target rotates continuously on a turntable",
+    "selected_by": "owner",
+    "status": "predeclared before capture"
+  },
+  "measurements": {
+    "overall_x": {
+      "error_from_nominal_mm": -0.1,
+      "nominal_mm": 92.0,
+      "readings_mm": [
+        91.9
+      ]
+    },
+    "overall_y": {
+      "error_from_nominal_mm": -0.15,
+      "nominal_mm": 82.0,
+      "readings_mm": [
+        81.85
+      ]
+    },
+    "overall_z": {
+      "error_from_nominal_mm": -0.15,
+      "nominal_mm": 56.0,
+      "readings_mm": [
+        55.85
+      ]
+    },
+    "pocket_depth": {
+      "error_from_nominal_mm": 0.1,
+      "nominal_mm": 12.0,
+      "readings_mm": [
+        12.1
+      ]
+    }
+  },
+  "print": {
+    "layer_height_mm": null,
+    "material": null,
+    "nozzle_mm": null,
+    "printer": null
+  },
+  "reported": {
+    "date": "2026-08-31",
+    "source": "owner-reported measurements in the active scanner development session",
+    "unit": "millimetres"
+  },
+  "schema_version": 1,
+  "summary": {
+    "largest_observed_absolute_nominal_deviation_mm": 0.15,
+    "note": "This is an observed floor on print uncertainty, not a gate tolerance; instrument resolution, surface/layer variation and scanner error remain separate terms.",
+    "overall_axis_errors_percent": {
+      "x": -0.10869565217391304,
+      "y": -0.18292682926829268,
+      "z": -0.26785714285714285
+    }
+  },
+  "target_id": "reconstruction-target-v1"
+}

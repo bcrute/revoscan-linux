@@ -105,9 +105,10 @@ import os
 import struct
 import textwrap
 from collections import Counter, deque
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
+from types import MappingProxyType
 from typing import Final
 
 from scanner3d.errors import DoctorStatus, ScannerError
@@ -222,6 +223,74 @@ INHERENT_LIMITATIONS: Final[tuple[str, ...]] = (
     "resolution the connectivity is a convention and not a measurement",
     "no normals, colours, texture coordinates or materials are exported; nothing in this "
     "repository has established any of them",
+)
+
+#: Caveats a mesh built by fusing a truncated signed-distance field inherits.
+#:
+#: A different construction has different inherent defects, and attaching one
+#: method's to the other's output is not extra caution - it is a false statement
+#: about what is in the file. Six of the eight caveats above are about a voxel
+#: OCCUPANCY grid specifically: the stand-off of a solid that contains its
+#: samples, an iso level counted over a node's eight cells, a six-connected
+#: flood fill deciding an interior, and a padded grid that always closes. None
+#: of those happened to a level set of a fused field, so none of them is
+#: repeated here. What IS shared is repeated verbatim - the same string object,
+#: so a reader diffing the two files sees one sentence and not two spellings of
+#: it, and so no edit can move one without the other.
+#:
+#: Fixed, and not the caller's to compose: :class:`MeshProvenance` selects a
+#: family by name and can add to what the family already states, never replace
+#: it.
+TSDF_INHERENT_LIMITATIONS: Final[tuple[str, ...]] = (
+    INHERENT_LIMITATIONS[0],
+    "the surface is the zero level set of a fused truncated signed-distance field sampled at "
+    "voxel centres, and is resolution-limited by it: no feature narrower than about one voxel "
+    "survives, and every vertex lies on a straight line between two neighbouring voxel centres "
+    "rather than on a measured sample",
+    "this is NOT an occupancy reconstruction, and the caveats of one are deliberately absent "
+    "rather than forgotten: no cell was called solid because a sample landed in it, so this "
+    "surface does not inherit occupancy's deterministic cell-containment stand-off - the "
+    "outward offset of a solid built to CONTAIN every cell a sample landed in. That is not a "
+    "claim that this surface is unbiased: a fused level set has bias of its own, from the "
+    "truncation, from averaging observations that disagree, and from being sampled at voxel "
+    "centres, and this repository has not measured it. What is claimed is only that "
+    "occupancy's stand-off is not among them. Likewise no iso level was counted over a node's "
+    "cells; no six-connected fill from a grid border decided an interior; and no padding was "
+    "added to make the grid close, so a closed mesh here is closed because the evidence "
+    "surrounded the object and an open one is where the evidence stopped",
+    "where a cube face is ambiguous - two corners on one side of the level and their diagonal "
+    "neighbours on the other - the connectivity is decided by a fixed convention in the shared "
+    "marching-cubes tables rather than measured, so an ambiguous face at this resolution is "
+    "resolved consistently and not necessarily correctly",
+    INHERENT_LIMITATIONS[-1],
+)
+
+
+class MeshMethod(enum.StrEnum):
+    """Which construction produced a surface, and so which caveats it inherits.
+
+    Named rather than inferred from :attr:`MeshProvenance.method`, whose text is
+    prose a caller writes: a family that could be guessed from a sentence would
+    be guessed wrong the first time somebody reworded one.
+    """
+
+    #: :func:`reconstruct` - a voxel occupancy grid, flood-filled and marched.
+    OCCUPANCY = "occupancy"
+
+    #: :func:`scanner3d.tsdf_surface.extract_surface` - the zero level set of a
+    #: field fused by :mod:`scanner3d.tsdf`.
+    TSDF = "tsdf"
+
+
+#: The caveats each family inherits. Read through
+#: :attr:`MeshProvenance.all_limitations`; a family with no entry here would be
+#: a family whose meshes carry no inherent caveats at all, which is why this is
+#: exhaustive over :class:`MeshMethod` and checked by the suite.
+METHOD_LIMITATIONS: Final[Mapping[MeshMethod, tuple[str, ...]]] = MappingProxyType(
+    {
+        MeshMethod.OCCUPANCY: INHERENT_LIMITATIONS,
+        MeshMethod.TSDF: TSDF_INHERENT_LIMITATIONS,
+    }
 )
 
 
@@ -772,10 +841,13 @@ def _ensure_iso_level(iso_level: float) -> float:
     return iso_level
 
 
-def _quantise(
-    points: Iterable[Sequence[float]], voxel_size: float, max_points: int
-) -> set[tuple[int, int, int]]:
-    """Consume the points into occupied voxel coordinates, or refuse.
+def _quantise_into(
+    points: Iterable[Sequence[float]],
+    voxel_size: float,
+    max_points: int,
+    occupied: set[tuple[int, int, int]],
+) -> int:
+    """Add the points to ``occupied`` as voxel coordinates, and say how many were read.
 
     The floats are never kept. Quantising as they stream past is both the
     spatial index and the downsample, and it bounds the memory by the number of
@@ -790,8 +862,15 @@ def _quantise(
     then lies entirely outside the samples, up to a full voxel out. Rounding
     centres the cell on the sample, and :func:`_march` shifts the grid origin
     back by the matching half voxel so the two agree.
+
+    Adds INTO a set the caller owns rather than returning a new one, which is
+    what lets :class:`SurfaceAccumulator` keep one growing set across a whole
+    capture instead of re-reading every frame it has ever seen. It says nothing
+    about an empty input: emptiness is a refusal for :func:`reconstruct` and a
+    normal event for an accumulator, and those two answers belong to the callers
+    rather than to the arithmetic.
     """
-    occupied: set[tuple[int, int, int]] = set()
+    read = 0
     for index, point in enumerate(points):
         if index >= max_points:
             raise PointCountExceeded(
@@ -812,6 +891,16 @@ def _quantise(
                 math.floor(values[2] / voxel_size + 0.5),
             )
         )
+        read = index + 1
+    return read
+
+
+def _quantise(
+    points: Iterable[Sequence[float]], voxel_size: float, max_points: int
+) -> set[tuple[int, int, int]]:
+    """Every point's voxel coordinate, refusing a cloud with no points in it."""
+    occupied: set[tuple[int, int, int]] = set()
+    _quantise_into(points, voxel_size, max_points, occupied)
     if not occupied:
         raise NoPointsOffered(
             "no points were offered, so there is no cloud to reconstruct; refused rather "
@@ -819,6 +908,46 @@ def _quantise(
             "reconstruction that found no surface in real data"
         )
     return occupied
+
+
+def _grid_extent(
+    occupied: set[tuple[int, int, int]],
+) -> tuple[tuple[int, int, int], tuple[int, int, int]]:
+    """The padded low corner and the grid shape the occupied cells imply."""
+    low = tuple(min(cell[axis] for cell in occupied) - PAD_CELLS for axis in range(3))
+    high = tuple(max(cell[axis] for cell in occupied) + PAD_CELLS for axis in range(3))
+    shape = tuple(high[axis] - low[axis] + 1 for axis in range(3))
+    return (low[0], low[1], low[2]), (shape[0], shape[1], shape[2])
+
+
+def _surface_of(occupied: set[tuple[int, int, int]], voxel: float, level: float) -> Mesh:
+    """Solidify the occupied cells and march their boundary. No bounds checked here.
+
+    The half of :func:`reconstruct` that is arithmetic, split out so that
+    :class:`SurfaceAccumulator` runs the identical fill and the identical march
+    rather than a second implementation of either. Two marching cubes in one
+    module that disagreed by a cell would put the live preview and the exported
+    mesh on different surfaces, and that discrepancy is invisible until someone
+    compares them.
+    """
+    low, (nx, ny, nz) = _grid_extent(occupied)
+    state = bytearray(nx * ny * nz)
+    for i, j, k in occupied:
+        state[((k - low[2]) * ny + (j - low[1])) * nx + (i - low[0])] = _OCCUPIED
+    _solidify(state, nx, ny, nz)
+    enclosed = state.count(_UNKNOWN)
+
+    vertices, faces = _march(state, (nx, ny, nz), low, voxel, level)
+    return Mesh(
+        vertices=vertices,
+        faces=faces,
+        limitations=(
+            *INHERENT_LIMITATIONS,
+            _grid_limitation(voxel, nx, ny, nz, len(occupied)),
+            _enclosure_limitation(enclosed),
+            _closure_limitation(faces),
+        ),
+    )
 
 
 def _border_cells(nx: int, ny: int, nz: int) -> Iterator[int]:
@@ -932,9 +1061,7 @@ def reconstruct(
         )
 
     occupied = _quantise(points, voxel, max_points)
-    low = tuple(min(cell[axis] for cell in occupied) - PAD_CELLS for axis in range(3))
-    high = tuple(max(cell[axis] for cell in occupied) + PAD_CELLS for axis in range(3))
-    nx, ny, nz = (high[axis] - low[axis] + 1 for axis in range(3))
+    _, (nx, ny, nz) = _grid_extent(occupied)
     cells = nx * ny * nz
     if cells > max_grid_cells:
         raise GridTooLarge(
@@ -942,25 +1069,7 @@ def reconstruct(
             f"{cells} cells, past the {max_grid_cells}-cell cap; nothing was allocated. Use "
             "a larger voxel size, or raise the cap up to the module ceiling"
         )
-
-    state = bytearray(cells)
-    for i, j, k in occupied:
-        state[((k - low[2]) * ny + (j - low[1])) * nx + (i - low[0])] = _OCCUPIED
-    _solidify(state, nx, ny, nz)
-    enclosed = state.count(_UNKNOWN)
-
-    vertices, faces = _march(state, (nx, ny, nz), low, voxel, level)
-    mesh = Mesh(
-        vertices=vertices,
-        faces=faces,
-        limitations=(
-            *INHERENT_LIMITATIONS,
-            _grid_limitation(voxel, nx, ny, nz, len(occupied)),
-            _enclosure_limitation(enclosed),
-            _closure_limitation(faces),
-        ),
-    )
-    return mesh
+    return _surface_of(occupied, voxel, level)
 
 
 def _grid_limitation(voxel: float, nx: int, ny: int, nz: int, occupied: int) -> str:
@@ -1006,6 +1115,245 @@ def _closure_limitation(faces: tuple[tuple[int, int, int], ...]) -> str:
         f"used by one face and {census.nonmanifold_edge_count} by three or more. The surface "
         "has holes or self-contact and should not be treated as a solid"
     )
+
+
+# --- reconstructing WHILE the capture runs ------------------------------------
+
+
+class SurfaceAccumulator:
+    """The occupied cells of one growing scan, and the surface they currently imply.
+
+    Why this exists
+    ---------------
+    :func:`reconstruct` reads a whole cloud and throws its grid away. A capture
+    that wants to show a surface every few frames cannot afford that: at 900
+    points a frame and several hundred frames, re-reading everything seen so far
+    costs more every time it is asked, on a thread that is between two frame
+    deliveries.
+
+    What makes the incremental form possible is that the grid is the ONLY state
+    the reconstruction has. Occupancy is a set union - a cell a frame marks
+    solid is solid whatever arrives later - so a frame can be folded in once and
+    then forgotten, and the memory is bounded by the cells the object occupies
+    rather than by how long the scan has run. Measured over a 120-frame
+    synthetic sweep: 0.6 ms per frame to fold in, and an occupied set that stops
+    growing once the sweep has been round once.
+
+    What it costs, and what it is not
+    ---------------------------------
+    :meth:`surface` is NOT incremental. The fill and the march are linear in the
+    grid's cells, and they are redone in full every time one is asked for -
+    measured at 64 ms over a 79000-cell grid and 289 ms over a 238000-cell one.
+    That is the number a caller has to budget against; folding frames in is free
+    by comparison.
+
+    And the deeper limitation, which no amount of speed answers: a surface from
+    this accumulator is built from the poses that were accepted AT THE TIME each
+    frame was added. During a live capture those are the sequential chain, which
+    drifts. Nothing here revises a cell once it is set, so a pose correction -
+    the pose graph closing the loop at the end of a sweep - does not reach the
+    cells that were placed with the old poses. A live surface is a PREVIEW of
+    where the scan has been; the exported mesh is reconstructed again from the
+    optimised poses, and the two are not expected to be identical.
+
+    Coarsening, and why it is the caller's call
+    -------------------------------------------
+    An object that turns out to be bigger than the first frames suggested
+    eventually needs more cells than the caller budgeted for. :meth:`coarsen`
+    doubles the cell edge and re-bins the cells' own CENTRES, which is exact
+    integer arithmetic on the indices - a cell centre is ``index * voxel_size``,
+    so at twice the edge its new index is ``(index + 1) // 2`` - and costs one
+    pass over the occupied cells rather than over the points, which are long
+    gone. It loses resolution, permanently and without any way to get it back.
+
+    It is not done automatically. :attr:`grid_cells` says what the current cells
+    would cost to march, and the caller decides what it can afford; a class that
+    silently halved its own resolution would change the picture an operator is
+    watching for a reason they never saw.
+    """
+
+    __slots__ = ("_added", "_coarsenings", "_max_points", "_occupied", "_voxel_size")
+
+    def __init__(self, *, voxel_size: float, max_points: int = MAX_INPUT_POINTS) -> None:
+        """Start empty, at ``voxel_size``.
+
+        ``max_points`` bounds ONE :meth:`add`, not the accumulator's lifetime:
+        the whole point of the grid is that the number of points that have
+        passed through it does not bound anything. It may be lowered by a caller
+        and never raised past the module ceiling.
+        """
+        if not 0 < max_points <= MAX_INPUT_POINTS:
+            raise MeshNotAllowed(
+                f"max_points {max_points} is outside (0, {MAX_INPUT_POINTS}]; the module "
+                "ceiling is never widened at run time"
+            )
+        self._voxel_size = _ensure_voxel_size(voxel_size)
+        self._max_points = max_points
+        self._occupied: set[tuple[int, int, int]] = set()
+        self._added = 0
+        self._coarsenings = 0
+
+    # -- what it holds -----------------------------------------------------
+    @property
+    def voxel_size(self) -> float:
+        """The current cell edge, which :meth:`coarsen` doubles."""
+        return self._voxel_size
+
+    @property
+    def occupied_cells(self) -> int:
+        """How many cells any point has ever landed in."""
+        return len(self._occupied)
+
+    @property
+    def added_points(self) -> int:
+        """How many points have been folded in, across every :meth:`add`."""
+        return self._added
+
+    @property
+    def coarsenings(self) -> int:
+        """How many times the cell edge has been doubled since this was empty."""
+        return self._coarsenings
+
+    @property
+    def grid_shape(self) -> tuple[int, int, int]:
+        """The padded grid the current cells imply, or zeros while it is empty.
+
+        This is what :meth:`surface` would have to allocate and walk, so it is
+        the quantity a caller budgets against - not the occupied count, which
+        for a hollow object is a small fraction of it.
+        """
+        if not self._occupied:
+            return (0, 0, 0)
+        return _grid_extent(self._occupied)[1]
+
+    @property
+    def grid_cells(self) -> int:
+        """Cells in that grid: the cost of the next :meth:`surface`, before paying it."""
+        nx, ny, nz = self.grid_shape
+        return nx * ny * nz
+
+    @property
+    def is_empty(self) -> bool:
+        """Whether anything has been added that landed in a cell."""
+        return not self._occupied
+
+    # -- growing it --------------------------------------------------------
+    def add(self, points: Iterable[Sequence[float]]) -> int:
+        """Fold one frame's points into the grid, and say how many cells are new.
+
+        The points must already be in the shared frame - this applies no pose
+        and knows of none. An empty iterable is a no-op returning zero, because
+        a frame that caught nothing is a normal event during a capture and not
+        an error the way it is for :func:`reconstruct`.
+
+        Refuses exactly what :func:`reconstruct` refuses about points -
+        :class:`PointCountExceeded` past ``max_points``, :class:`MeshNotAllowed`
+        for something that is not a triple and the non-finite refusal from
+        :func:`~scanner3d.geometry.ensure_finite` - and it refuses them
+        MID-STREAM, so a bad point leaves the cells that preceded it in the
+        grid. That is deliberate: the alternative is buffering a whole frame to
+        preserve an all-or-nothing that the union does not need, and a cell is
+        as true as the point that put it there whatever came next in the same
+        frame.
+        """
+        before = len(self._occupied)
+        self._added += _quantise_into(points, self._voxel_size, self._max_points, self._occupied)
+        return len(self._occupied) - before
+
+    def coarsen(self) -> float:
+        """Double the cell edge, re-binning the cells that are already here.
+
+        Returns the new edge. Exact integer arithmetic on the indices, as the
+        class docstring explains, so this costs one pass over the occupied cells
+        and never touches a coordinate.
+
+        Lossy and one-way, in two distinct ways worth separating. Two cells that
+        merge cannot be separated again, and the points that distinguished them
+        were discarded when they were added. And the result is NOT the grid the
+        original points would have produced at the new edge: a point is re-binned
+        from its old cell's centre rather than from where it actually was, so a
+        cell can land up to half the new edge away from where a fresh quantise
+        would have put it. Coarsening is a way to keep drawing something on a
+        budget, not a way to have chosen a coarser voxel size in the first place.
+        """
+        self._voxel_size *= 2.0
+        self._occupied = {((i + 1) // 2, (j + 1) // 2, (k + 1) // 2) for i, j, k in self._occupied}
+        self._coarsenings += 1
+        return self._voxel_size
+
+    def coarsen_to_fit(self, max_grid_cells: int) -> int:
+        """Coarsen until :attr:`grid_cells` is within ``max_grid_cells``, or until
+        coarsening stops helping. Returns how many times it doubled the edge.
+
+        The loop a live caller would otherwise write, offered here so that the
+        termination argument lives with the arithmetic - and it is NOT "the grid
+        shrinks until it reaches the padding". Re-binning maps a cell index to
+        ``(index + 1) // 2``, which has 0 and 1 as FIXED POINTS, so a grid whose
+        occupied cells have settled on indices 0 and 1 in some axis stays that
+        size for ever however many times it is halved. That grid is a handful of
+        cells wide and still not within a small enough budget, and a loop that
+        only watched the budget would spin.
+
+        So what is watched is progress: when a doubling leaves the grid the same
+        shape it was, this is as small as the grid gets and the budget cannot be
+        met. The caller is not told twice - :meth:`surface` refuses a grid past
+        the budget it is given, which is where an impossible budget surfaces as
+        a refusal rather than as a hang.
+        """
+        if not 0 < max_grid_cells <= MAX_GRID_CELLS:
+            raise MeshNotAllowed(
+                f"max_grid_cells {max_grid_cells} is outside (0, {MAX_GRID_CELLS}]; the module "
+                "ceiling is never widened at run time"
+            )
+        done = 0
+        while self._occupied and self.grid_cells > max_grid_cells:
+            before = self.grid_shape
+            self.coarsen()
+            done += 1
+            if self.grid_shape == before:
+                break
+        return done
+
+    # -- reading it --------------------------------------------------------
+    def surface(
+        self,
+        *,
+        iso_level: float = DEFAULT_ISO_LEVEL,
+        max_grid_cells: int = MAX_GRID_CELLS,
+    ) -> Mesh:
+        """March the cells as they stand, and return the surface they imply.
+
+        The same fill and the same march :func:`reconstruct` runs, over the same
+        kind of grid, so a live preview and an exported mesh built from the same
+        cells at the same edge are the same surface.
+
+        Refuses rather than allocating: :class:`NoPointsOffered` while nothing
+        has been added, :class:`IsoLevelUnusable` for a level no node can
+        straddle, and :class:`GridTooLarge` when the cells imply a grid past
+        ``max_grid_cells`` - which is the signal to call :meth:`coarsen_to_fit`,
+        not something this decides on the caller's behalf.
+        """
+        level = _ensure_iso_level(iso_level)
+        if not 0 < max_grid_cells <= MAX_GRID_CELLS:
+            raise MeshNotAllowed(
+                f"max_grid_cells {max_grid_cells} is outside (0, {MAX_GRID_CELLS}]; the module "
+                "ceiling is never widened at run time"
+            )
+        if not self._occupied:
+            raise NoPointsOffered(
+                "nothing has been added to this accumulator, so there is no grid to march; "
+                "refused rather than answered with an empty mesh, which downstream is "
+                "indistinguishable from a scan that found no surface"
+            )
+        nx, ny, nz = self.grid_shape
+        cells = nx * ny * nz
+        if cells > max_grid_cells:
+            raise GridTooLarge(
+                f"the cells added so far need a {nx}x{ny}x{nz} grid of {cells} cells at a "
+                f"voxel size of {self._voxel_size!r}, past the {max_grid_cells}-cell cap; "
+                "nothing was allocated. Call coarsen_to_fit to trade resolution for it"
+            )
+        return _surface_of(self._occupied, self._voxel_size, level)
 
 
 def _march(
@@ -1180,34 +1528,84 @@ class MeshProvenance:
     cloud: CloudProvenance
     method: str
     voxel_size: float | None = None
+    #: How many of a node's eight touching cells had to be solid - a parameter
+    #: of :func:`reconstruct` and of nothing else. A TSDF surface has no such
+    #: quantity, so :attr:`summary` and :meth:`as_dict` report the fixed zero
+    #: level for that family and do not print this one at all.
     iso_level: float | None = None
     limitations: tuple[str, ...] = ()
+    #: Which construction this was, and so which fixed caveats the file
+    #: inherits. Defaults to :attr:`MeshMethod.OCCUPANCY` deliberately: every
+    #: call site that predates the field built an occupancy mesh, and a default
+    #: that dropped occupancy's caveats would silently weaken files nobody
+    #: touched. A caller SELECTS a family; it cannot supply one.
+    method_family: MeshMethod = MeshMethod.OCCUPANCY
 
     @property
     def summary(self) -> str:
-        """One line, for the file's comment block."""
+        """One line, for the file's comment block.
+
+        The occupancy wording is byte for byte what it always was, including
+        ``iso level: not stated`` when a caller left it out: those bytes are in
+        every occupancy file this repository has ever written and a reader
+        diffing an old export against a new one should see no difference.
+
+        A TSDF mesh says the level instead of the iso level, because the two are
+        different quantities and only one of them happened. An iso level is how
+        many of a grid node's eight touching cells must be solid; the level of a
+        fused field is zero, not by choice but because that is where a signed
+        distance changes sign. Printing ``iso level:`` here - with a number or
+        with ``not stated`` - would name a parameter of a reconstruction that
+        did not run, which is the whole reason :class:`MeshMethod` exists.
+        """
         voxel = "not stated" if self.voxel_size is None else repr(self.voxel_size)
+        if MeshMethod(self.method_family) is MeshMethod.TSDF:
+            return f"{self.method}; voxel size: {voxel}; level set: zero (the sign change)"
         level = "not stated" if self.iso_level is None else repr(self.iso_level)
         return f"{self.method}; voxel size: {voxel}; iso level: {level}"
 
     @property
+    def inherent_limitations(self) -> tuple[str, ...]:
+        """The fixed caveats of :attr:`method_family`, whatever the caller said."""
+        return METHOD_LIMITATIONS[MeshMethod(self.method_family)]
+
+    @property
     def all_limitations(self) -> tuple[str, ...]:
-        """:data:`INHERENT_LIMITATIONS`, then the cloud's, then the caller's.
+        """:attr:`inherent_limitations`, then the cloud's, then the caller's.
 
         The inherent ones are not the caller's to omit, and de-duplication keeps
         a caller who restates one from making the file say it twice.
         """
         seen: list[str] = []
-        for item in (*INHERENT_LIMITATIONS, *self.cloud.all_limitations, *self.limitations):
+        for item in (
+            *self.inherent_limitations,
+            *self.cloud.all_limitations,
+            *self.limitations,
+        ):
             if item not in seen:
                 seen.append(item)
         return tuple(seen)
 
     def as_dict(self) -> dict[str, object]:
+        """The record, carrying the level the family actually has.
+
+        ``iso_level`` is an OCCUPANCY key and it keeps its place - present, and
+        ``null`` when unstated - for that family, so records written before
+        there was a second one still read identically. A TSDF record carries
+        ``level_set`` instead: a consumer that finds ``iso_level`` in a mesh
+        record is looking at a mesh whose surface really was decided by counting
+        a node's solid cells, and one that finds it absent is not.
+        """
+        level: dict[str, object] = (
+            {"level_set": 0.0}
+            if MeshMethod(self.method_family) is MeshMethod.TSDF
+            else {"iso_level": self.iso_level}
+        )
         return {
             "method": self.method,
+            "method_family": str(MeshMethod(self.method_family)),
             "voxel_size": self.voxel_size,
-            "iso_level": self.iso_level,
+            **level,
             "cloud": self.cloud.as_dict(),
             "limitations": list(self.all_limitations),
         }

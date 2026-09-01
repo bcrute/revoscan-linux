@@ -1,0 +1,789 @@
+{
+  "candidates": [
+    {
+      "expectation": {
+        "failed_gates": [
+          "coverage.temporal_recovery"
+        ],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "confidence.high_confidence_false_fill",
+          "confidence.high_confidence_worst",
+          "confirmation.confirmed_false",
+          "confirmation.confirmed_on_surface",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst",
+          "temporal_work.within_budget"
+        ],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "baseline",
+      "what": "the unchanged pipeline: the two held-out samples stay holes and nothing is invented in the aperture"
+    },
+    {
+      "expectation": {
+        "failed_gates": [
+          "confidence.high_confidence_false_fill",
+          "confidence.high_confidence_worst",
+          "coverage.false_fill",
+          "coverage.temporal_recovery",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst"
+        ],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "confirmation.confirmed_false",
+          "confirmation.confirmed_on_surface",
+          "temporal_work.within_budget"
+        ],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "dense_nearest",
+      "what": "fills every hole from the nearest sample in the same frame, aperture included"
+    },
+    {
+      "expectation": {
+        "failed_gates": [
+          "confidence.high_confidence_false_fill",
+          "confidence.high_confidence_worst",
+          "coverage.false_fill",
+          "coverage.temporal_recovery",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst"
+        ],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "confirmation.confirmed_false",
+          "confirmation.confirmed_on_surface",
+          "temporal_work.within_budget"
+        ],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "broad_interpolation",
+      "what": "averages the ring of plane samples around each hole, which closes the aperture and calls the pillar plane"
+    },
+    {
+      "expectation": {
+        "failed_gates": [
+          "confidence.high_confidence_false_fill",
+          "confidence.high_confidence_worst",
+          "coverage.false_fill",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst"
+        ],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "confirmation.confirmed_false",
+          "confirmation.confirmed_on_surface",
+          "temporal_work.within_budget"
+        ],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "naive_temporal_carry",
+      "what": "carries the other frames' samples at the same pixel. At one pixel of motion the same-pixel answer is close enough to settle the two real dropouts, and it also fills the aperture in every frame from the other frames' plane samples - which is the failure this corpus gates absolutely"
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "confirmation.confirmed_false",
+          "confirmation.confirmed_on_surface",
+          "temporal_work.within_budget"
+        ],
+        "outcome": "pass",
+        "refusal": null
+      },
+      "name": "posed_temporal_carry",
+      "what": "carries the same raw samples through the exact poses. No sample of any other frame lies on the aperture ray, so it recovers both dropouts and leaves the aperture empty. The positive control for what this scene makes available"
+    },
+    {
+      "expectation": {
+        "failed_gates": [
+          "confidence.high_confidence_false_fill",
+          "confidence.high_confidence_worst",
+          "coverage.false_fill",
+          "coverage.temporal_recovery",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst"
+        ],
+        "inapplicable_gates": [
+          "confirmation.confirmed_false",
+          "confirmation.confirmed_on_surface",
+          "temporal_work.within_budget"
+        ],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "spatial_completion",
+      "what": "the accepted single-frame primitive, which cannot distinguish the aperture from a dropout and cannot know the pillar is not the plane. Its exact accepted failure, carried into this case unchanged"
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "confirmation.confirmed_false",
+          "confirmation.confirmed_on_surface"
+        ],
+        "outcome": "pass",
+        "refusal": null
+      },
+      "name": "temporal_completion",
+      "what": "the product primitive with no spatial estimate offered. It recovers both held-out samples from independent posed evidence, invents nothing in the aperture, and passes every gate this case states"
+    },
+    {
+      "expectation": {
+        "failed_gates": [
+          "confidence.high_confidence_false_fill",
+          "coverage.false_fill"
+        ],
+        "inapplicable_gates": [
+          "completion_work.within_budget"
+        ],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "spatial_then_temporal_completion",
+      "what": "the product primitive offered the accepted spatial estimate. One estimate is confirmed, one is contradicted and replaced by the independent measurement, and the three aperture estimates are never observed and stay spatial - so the single-frame false fill is still there, still gated, and still labelled spatial"
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "confidence.high_confidence_false_fill",
+          "confidence.high_confidence_worst",
+          "confirmation.confirmed_false",
+          "confirmation.confirmed_on_surface",
+          "coverage.false_fill",
+          "coverage.measured_fraction",
+          "coverage.supported_fraction",
+          "coverage.temporal_recovery",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst",
+          "temporal_work.within_budget"
+        ],
+        "outcome": "refused",
+        "refusal": "measured_value_changed"
+      },
+      "name": "forged_measured_states",
+      "what": "reports every reconstructed sample as a camera measurement"
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "confidence.high_confidence_false_fill",
+          "confidence.high_confidence_worst",
+          "confirmation.confirmed_false",
+          "confirmation.confirmed_on_surface",
+          "coverage.false_fill",
+          "coverage.measured_fraction",
+          "coverage.supported_fraction",
+          "coverage.temporal_recovery",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst",
+          "temporal_work.within_budget"
+        ],
+        "outcome": "refused",
+        "refusal": "raw_frame_mutated"
+      },
+      "name": "mutated_raw_frame",
+      "what": "returns raw bytes that are not the ones it was given"
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "confidence.high_confidence_false_fill",
+          "confidence.high_confidence_worst",
+          "confirmation.confirmed_false",
+          "confirmation.confirmed_on_surface",
+          "coverage.false_fill",
+          "coverage.measured_fraction",
+          "coverage.supported_fraction",
+          "coverage.temporal_recovery",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst",
+          "temporal_work.within_budget"
+        ],
+        "outcome": "refused",
+        "refusal": "unsupported_reconstruction"
+      },
+      "name": "unsupported_fill",
+      "what": "reconstructs without naming any support"
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "confidence.high_confidence_false_fill",
+          "confidence.high_confidence_worst",
+          "confirmation.confirmed_false",
+          "confirmation.confirmed_on_surface",
+          "coverage.false_fill",
+          "coverage.measured_fraction",
+          "coverage.supported_fraction",
+          "coverage.temporal_recovery",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst",
+          "temporal_work.within_budget"
+        ],
+        "outcome": "refused",
+        "refusal": "confidence_out_of_range"
+      },
+      "name": "forged_confidence",
+      "what": "claims a confidence outside the fraction it is declared to be"
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "confidence.high_confidence_false_fill",
+          "confidence.high_confidence_worst",
+          "confirmation.confirmed_false",
+          "confirmation.confirmed_on_surface",
+          "coverage.false_fill",
+          "coverage.measured_fraction",
+          "coverage.supported_fraction",
+          "coverage.temporal_recovery",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst",
+          "temporal_work.within_budget"
+        ],
+        "outcome": "refused",
+        "refusal": "missing_carries_depth"
+      },
+      "name": "missing_carrying_depth",
+      "what": "declares a sample missing and hands out a depth for it anyway"
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "confidence.high_confidence_false_fill",
+          "confidence.high_confidence_worst",
+          "confirmation.confirmed_false",
+          "confirmation.confirmed_on_surface",
+          "coverage.false_fill",
+          "coverage.measured_fraction",
+          "coverage.supported_fraction",
+          "coverage.temporal_recovery",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst",
+          "temporal_work.within_budget"
+        ],
+        "outcome": "refused",
+        "refusal": "unknown_state"
+      },
+      "name": "unknown_provenance_state",
+      "what": "invents a fifth provenance state"
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "confidence.high_confidence_false_fill",
+          "confidence.high_confidence_worst",
+          "confirmation.confirmed_false",
+          "confirmation.confirmed_on_surface",
+          "coverage.false_fill",
+          "coverage.measured_fraction",
+          "coverage.supported_fraction",
+          "coverage.temporal_recovery",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst",
+          "temporal_work.within_budget"
+        ],
+        "outcome": "refused",
+        "refusal": "sample_count_mismatch"
+      },
+      "name": "truncated_window",
+      "what": "returns fewer samples than the window, dropping the hardest"
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "confidence.high_confidence_false_fill",
+          "confidence.high_confidence_worst",
+          "confirmation.confirmed_false",
+          "confirmation.confirmed_on_surface",
+          "coverage.false_fill",
+          "coverage.measured_fraction",
+          "coverage.supported_fraction",
+          "coverage.temporal_recovery",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst",
+          "temporal_work.within_budget"
+        ],
+        "outcome": "refused",
+        "refusal": "support_not_measured"
+      },
+      "name": "phantom_support",
+      "what": "names support at a pixel that returned no measurement"
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "confidence.high_confidence_false_fill",
+          "confidence.high_confidence_worst",
+          "confirmation.confirmed_false",
+          "confirmation.confirmed_on_surface",
+          "coverage.false_fill",
+          "coverage.measured_fraction",
+          "coverage.supported_fraction",
+          "coverage.temporal_recovery",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst",
+          "temporal_work.within_budget"
+        ],
+        "outcome": "refused",
+        "refusal": "temporal_support_not_another_frame"
+      },
+      "name": "temporal_support_from_own_frame",
+      "what": "calls a same-frame fill a temporal reconstruction"
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "confidence.high_confidence_false_fill",
+          "confidence.high_confidence_worst",
+          "confirmation.confirmed_false",
+          "confirmation.confirmed_on_surface",
+          "coverage.false_fill",
+          "coverage.measured_fraction",
+          "coverage.supported_fraction",
+          "coverage.temporal_recovery",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst",
+          "temporal_work.within_budget"
+        ],
+        "outcome": "refused",
+        "refusal": "work_counts_inconsistent"
+      },
+      "name": "temporal_completion_forged_work",
+      "what": "reports a temporal run that refused one hole fewer than it did"
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "confidence.high_confidence_false_fill",
+          "confidence.high_confidence_worst",
+          "confirmation.confirmed_false",
+          "confirmation.confirmed_on_surface",
+          "coverage.false_fill",
+          "coverage.measured_fraction",
+          "coverage.supported_fraction",
+          "coverage.temporal_recovery",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst",
+          "temporal_work.within_budget"
+        ],
+        "outcome": "refused",
+        "refusal": "temporal_support_not_another_frame"
+      },
+      "name": "temporal_completion_self_support",
+      "what": "cites the target frame's own measured sample as temporal evidence about itself"
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "confidence.high_confidence_false_fill",
+          "confidence.high_confidence_worst",
+          "confirmation.confirmed_false",
+          "confirmation.confirmed_on_surface",
+          "coverage.false_fill",
+          "coverage.measured_fraction",
+          "coverage.supported_fraction",
+          "coverage.temporal_recovery",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst",
+          "temporal_work.within_budget"
+        ],
+        "outcome": "refused",
+        "refusal": "support_not_measured"
+      },
+      "name": "temporal_completion_unmeasured_support",
+      "what": "cites another frame's NO-RETURN sample as temporal evidence"
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "confidence.high_confidence_false_fill",
+          "confidence.high_confidence_worst",
+          "confirmation.confirmed_false",
+          "confirmation.confirmed_on_surface",
+          "coverage.false_fill",
+          "coverage.measured_fraction",
+          "coverage.supported_fraction",
+          "coverage.temporal_recovery",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst",
+          "temporal_work.within_budget"
+        ],
+        "outcome": "refused",
+        "refusal": "confirmation_inconsistent"
+      },
+      "name": "temporal_completion_forged_confirmation",
+      "what": "calls a spatial estimate no independent evidence ever reached CONFIRMED, and leaves it spatial"
+    }
+  ],
+  "case_id": "temporal-confirmation",
+  "gates": [
+    {
+      "comparison": ">=",
+      "context": "the acceptance target: this fraction of the window must end up measured, or reconstructed onto surface that is really there. 0.95 of the surface this scene actually has; the unchanged baseline does not reach it, which is the whole reason this thread exists",
+      "limit": 0.94901,
+      "measurement": "coverage",
+      "name": "coverage.supported_fraction",
+      "path": [
+        "supported_fraction"
+      ],
+      "unit": "fraction of 1"
+    },
+    {
+      "comparison": ">=",
+      "context": "non-inferiority: the raw measurements the sensor did return must all still be there and still be called measurements. A completion that discards awkward samples and interpolates over them is not a completion",
+      "limit": 0.998263,
+      "measurement": "coverage",
+      "name": "coverage.measured_fraction",
+      "path": [
+        "measured_fraction"
+      ],
+      "unit": "fraction of 1"
+    },
+    {
+      "comparison": "<=",
+      "context": "absolute: 4 raw codes. Error is scored ONLY on samples the candidate reconstructed where truth was held out, so copying the input cannot earn a good score here, and the coverage gates stop a candidate improving this by reconstructing only the easy holes",
+      "limit": 0.03125,
+      "measurement": "reconstructed_depth",
+      "name": "reconstructed_depth.p95",
+      "path": [
+        "absolute",
+        "p95"
+      ],
+      "unit": "synthetic depth units: raw code x depth scale, exact by construction"
+    },
+    {
+      "comparison": "<=",
+      "context": "absolute: 16 raw codes. A single sample placed on the wrong surface is the failure a percentile hides",
+      "limit": 0.125,
+      "measurement": "reconstructed_depth",
+      "name": "reconstructed_depth.worst",
+      "path": [
+        "absolute",
+        "worst"
+      ],
+      "unit": "synthetic depth units: raw code x depth scale, exact by construction"
+    },
+    {
+      "comparison": "<=",
+      "context": "absolute: zero. Space this scene really leaves empty must stay empty. This is the gate a dense fill fails while its aggregate coverage improves",
+      "limit": 0.0,
+      "measurement": "coverage",
+      "name": "coverage.false_fill",
+      "path": [
+        "false_fill"
+      ],
+      "unit": "samples"
+    },
+    {
+      "comparison": ">=",
+      "context": "a strict gain, stated by this scene and not by any candidate: 2 dropped sample(s) of these frames, away from any foreground boundary the scene declares, were measured by at least two OTHER posed frames, at the sample and the depth the truth puts them at, with the correspondence holding in both directions. A pose-compensated method must put at least that many back, as temporally reconstructed samples standing on surface the truth really has. Only recovered depth pays this gate: a refusal, a contradicted spatial estimate and a single-frame fill are each evidence about a sample rather than a sample put back. The unchanged baseline and the single-frame spatial primitive recover none of them",
+      "limit": 2.0,
+      "measurement": "coverage",
+      "name": "coverage.temporal_recovery",
+      "path": [
+        "temporally_reconstructed_on_surface"
+      ],
+      "unit": "samples"
+    },
+    {
+      "comparison": "<=",
+      "context": "absolute: zero. A spatial estimate standing in space this scene really leaves empty must never be CONFIRMED by independent posed evidence. This is the failure a temporal stage is most likely to produce and the hardest to see: the estimate was already there, the confirmation only blesses it, and the sample walks away with a stronger provenance label than one frame could ever have given it",
+      "limit": 0.0,
+      "measurement": "confirmation",
+      "name": "confirmation.confirmed_false",
+      "path": [
+        "confirmed_false"
+      ],
+      "unit": "samples"
+    },
+    {
+      "comparison": ">=",
+      "context": "a strict bar stated by this scene: 1 of its spatial estimate(s) sit on real surface that at least two other posed frames measured, so independent evidence exists for them and a stage that confirms nothing has not checked. Beside confirmation.confirmed_false, which refuses the opposite failure",
+      "limit": 1.0,
+      "measurement": "confirmation",
+      "name": "confirmation.confirmed_on_surface",
+      "path": [
+        "confirmed_on_surface"
+      ],
+      "unit": "samples"
+    },
+    {
+      "comparison": "<=",
+      "context": "absolute: 16 raw codes, the same worst-sample tolerance the held-out error gate uses, applied only to reconstructions the candidate itself published at confidence 0.5 or above. A completion is free to be unsure; what it may not do is be sure and wrong. Lowering its own confidence is the only way to leave this gate, and that lowering is visible in the same measurement",
+      "limit": 0.125,
+      "measurement": "confidence",
+      "name": "confidence.high_confidence_worst",
+      "path": [
+        "high_confidence_worst"
+      ],
+      "unit": "synthetic depth units: raw code x depth scale, exact by construction"
+    },
+    {
+      "comparison": "<=",
+      "context": "absolute: zero, and scoped to this case alone. Elsewhere false fill of any confidence already fails coverage.false_fill, which makes a confidence-only bar vacuous. Here the aperture and the held-out dropout score identical input bytes, so a completion may be unsure about the aperture without failing this gate - that is the disclosed ambiguity - but it may not be sure and wrong, because nothing in one frame could have told it apart from the real surface a few pixels away",
+      "limit": 0.0,
+      "measurement": "confidence",
+      "name": "confidence.high_confidence_false_fill",
+      "path": [
+        "high_confidence_false_fill"
+      ],
+      "unit": "samples"
+    },
+    {
+      "comparison": "is",
+      "context": "the work a completion spent must be inside the budget derivable from its input before it ran - one neighbourhood scan per hole at its published radius. A bound by construction rather than a wall-clock assertion, which would measure the machine. Candidates that report no work record leave this gate inapplicable, and each case declares exactly which ones those are",
+      "limit": true,
+      "measurement": "completion_work",
+      "name": "completion_work.within_budget",
+      "path": [
+        "within_budget"
+      ]
+    },
+    {
+      "comparison": "is",
+      "context": "the projection and comparison work a temporal completion spent must be inside the budget derivable from its input before it ran - one projection per eligible source sample into its published footprint, and one bounded comparison per hole. A bound by construction rather than a wall-clock assertion, which would measure the machine. Candidates that report no temporal run leave this gate inapplicable",
+      "limit": true,
+      "measurement": "temporal_work",
+      "name": "temporal_work.within_budget",
+      "path": [
+        "within_budget"
+      ]
+    }
+  ],
+  "kind": "scanner3d.depth-completeness-case",
+  "notes": [
+    "The aperture is the same four-slab construction as the single-view ambiguity case: a one-sample gap with nothing behind it. It moves one column between views, and no sample of any other frame lies on the target's aperture ray, which is why no independent evidence for it exists to confirm it with.",
+    "The pillar is one sample wide at the window's scale, so its held-out sample has a full ring of plane samples around it and no single-frame method can know it is not plane. That is what makes the contradiction load-bearing: the spatial estimate here is not careless, it is the best one frame supports.",
+    "The two other views are displaced one pixel at the plane's depth, one each way. That is two genuinely distinct viewpoints under the primitive's own baseline rule, and small enough that the pillar - which is nearer, and so moves further per unit of camera shift - still lands within half a pixel of the sample it belongs to.",
+    "Frames 1 and 2 carry no dropout mask. Their only holes are their own aperture samples, which have no truth behind them, so a candidate that fills them has invented geometry in protected empty space in every frame rather than in one."
+  ],
+  "regions": {
+    "dimensions": false,
+    "foreground_below": null,
+    "fusion": null,
+    "landmarks": false,
+    "plane": false,
+    "slot_columns": [],
+    "surface_tolerance": null,
+    "tracking": false,
+    "weighted_fusion": null
+  },
+  "scene": {
+    "depth_scale": 0.0078125,
+    "frames": [
+      {
+        "index": 0,
+        "input_returned": 957,
+        "input_sha256": "25839bf574dc33dc738d8cca7bb6332d03704e4764dec442b16edf1e44f2e36c",
+        "masks": [
+          {
+            "column": 9,
+            "kind": "blob",
+            "radius": 0.5,
+            "row": 6
+          },
+          {
+            "column": 20,
+            "kind": "blob",
+            "radius": 0.5,
+            "row": 18
+          }
+        ],
+        "pose": {
+          "axis": [
+            0.0,
+            1.0,
+            0.0
+          ],
+          "degrees": 0.0,
+          "through": [
+            0.0,
+            0.0,
+            100.0
+          ],
+          "translation": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "truth_returned": 959,
+        "truth_sha256": "b99cb5ed76fae872f298d95ddbfe25cccc184b3d7fcc544e3ca320c1f2cbc5e2"
+      },
+      {
+        "index": 1,
+        "input_returned": 959,
+        "input_sha256": "33e1dd5491a96a689cae3e6e2acf385616c2178cab330b174c0641d4f01a2457",
+        "masks": [],
+        "pose": {
+          "axis": [
+            0.0,
+            1.0,
+            0.0
+          ],
+          "degrees": 0.0,
+          "through": [
+            0.0,
+            0.0,
+            100.0
+          ],
+          "translation": [
+            -0.25,
+            0.0,
+            0.0
+          ]
+        },
+        "truth_returned": 959,
+        "truth_sha256": "33e1dd5491a96a689cae3e6e2acf385616c2178cab330b174c0641d4f01a2457"
+      },
+      {
+        "index": 2,
+        "input_returned": 959,
+        "input_sha256": "7d0ff06850a3538691ee122a03a10023867ce453c648542e71ff87bfd690ee9f",
+        "masks": [],
+        "pose": {
+          "axis": [
+            0.0,
+            1.0,
+            0.0
+          ],
+          "degrees": 0.0,
+          "through": [
+            0.0,
+            0.0,
+            100.0
+          ],
+          "translation": [
+            0.25,
+            0.0,
+            0.0
+          ]
+        },
+        "truth_returned": 959,
+        "truth_sha256": "7d0ff06850a3538691ee122a03a10023867ce453c648542e71ff87bfd690ee9f"
+      }
+    ],
+    "intrinsics": {
+      "cx": 320.0,
+      "cy": 200.0,
+      "fx": 400.0,
+      "fy": 400.0,
+      "height": 400,
+      "width": 640
+    },
+    "seed": "depth-completeness-028:temporal-confirmation",
+    "shapes": [
+      {
+        "half_extents": [
+          40.0,
+          40.0,
+          0.02
+        ],
+        "kind": "box",
+        "translation": [
+          -37.875,
+          0.0,
+          100.02
+        ]
+      },
+      {
+        "half_extents": [
+          40.0,
+          40.0,
+          0.02
+        ],
+        "kind": "box",
+        "translation": [
+          42.375,
+          0.0,
+          100.02
+        ]
+      },
+      {
+        "half_extents": [
+          40.0,
+          40.0,
+          0.02
+        ],
+        "kind": "box",
+        "translation": [
+          0.0,
+          -40.125,
+          100.02
+        ]
+      },
+      {
+        "half_extents": [
+          40.0,
+          40.0,
+          0.02
+        ],
+        "kind": "box",
+        "translation": [
+          0.0,
+          40.125,
+          100.02
+        ]
+      },
+      {
+        "half_extents": [
+          0.13,
+          0.13,
+          2.0
+        ],
+        "kind": "box",
+        "translation": [
+          -2.64,
+          -1.44,
+          98.0
+        ]
+      }
+    ],
+    "window": {
+      "height": 24,
+      "sample_count": 960,
+      "u0": 300,
+      "v0": 188,
+      "width": 40
+    }
+  },
+  "schema_version": 1,
+  "what": "One genuinely empty aperture, one held-out plane sample and one held-out sample of a pillar standing in front of the plane, from three posed views.",
+  "why": "A temporal stage has to do three different things to three spatial estimates that look identical from inside one frame, and this scene contains one of each. The plane sample was really the plane, two other views measured it, and the estimate is CONFIRMED. The pillar sample was really four units nearer than the plane its neighbours are on, so the single-frame estimate is confidently wrong and the two other views CONTRADICT it - and the contradiction is published rather than averaged, because a value halfway between 12288 and 12800 is evidence of neither. The aperture is empty space, no other view measured anything on that ray, and the estimate is NOT OBSERVED: it stays explicitly spatial, and the single-frame ambiguity the corpus already records is neither erased nor blessed by having passed through a second stage."
+}

@@ -1,0 +1,114 @@
+{
+  "appliance": {
+    "backend": "numpy",
+    "min_weight": 1.0,
+    "policy": "scanner3d.reconstruction_export.choose_tsdf_resolution over the case's own measured points at the desktop Reconstruct action's voxel budget (scanner3d.gui.RECONSTRUCT_VOXEL_BUDGET, 128 ** 3), fused and extracted with the constants scanner3d.reconstruction_export ships",
+    "truncation_voxels": 3.0,
+    "voxel_budget": 2097152,
+    "weight_policy": "uniform",
+    "work_budget": 14000000
+  },
+  "files": [
+    {
+      "bytes": 27466,
+      "case_id": "combined-realistic",
+      "name": "combined-realistic.json",
+      "perturbation": "combined",
+      "sha256": "07ff28311cdc65178854783c245b61896e8b599c09fac89a28bfba1082242f05"
+    },
+    {
+      "bytes": 25726,
+      "case_id": "depth-noise",
+      "name": "depth-noise.json",
+      "perturbation": "depth-noise",
+      "sha256": "7880fa7727997b4298fba35c0a98dd94a0324c68d0cafb73925e15a95fa080df"
+    },
+    {
+      "bytes": 25845,
+      "case_id": "depth-outliers",
+      "name": "depth-outliers.json",
+      "perturbation": "depth-outliers",
+      "sha256": "18537d7c94c3cd04022156b27d512139ebb016546ca653a1d1990edd780e1e7a"
+    },
+    {
+      "bytes": 24454,
+      "case_id": "exact-control",
+      "name": "exact-control.json",
+      "perturbation": "exact",
+      "sha256": "a5a6288dad10f7539cc4c741c8037f25bf3d2f33ec991fbfbf10473a286668a3"
+    },
+    {
+      "bytes": 25700,
+      "case_id": "no-return-bands",
+      "name": "no-return-bands.json",
+      "perturbation": "no-return-bands",
+      "sha256": "4e1151a038375fe1aff24f0ba0a20e12a5178ea0f3b28bef400e57626963e804"
+    },
+    {
+      "bytes": 25490,
+      "case_id": "pose-rotation",
+      "name": "pose-rotation.json",
+      "perturbation": "pose-rotation",
+      "sha256": "bead91809449c92ec5d843848ad99c05e0274d135031c0b0c558a391e283ac0a"
+    },
+    {
+      "bytes": 25618,
+      "case_id": "pose-translation",
+      "name": "pose-translation.json",
+      "perturbation": "pose-translation",
+      "sha256": "e4320aeab44155707a25276456019fbed14a85883e20674cddd9070e1d7742c8"
+    }
+  ],
+  "generated_by": "tests/build_surface_oracle_fixtures.py",
+  "grid": [
+    {
+      "cell_id": "v15-t3-w1-uniform",
+      "min_weight": 1.0,
+      "truncation_voxels": 3.0,
+      "voxel_size": 0.15,
+      "weight_policy": "uniform"
+    },
+    {
+      "cell_id": "v15-t3-w2-uniform",
+      "min_weight": 2.0,
+      "truncation_voxels": 3.0,
+      "voxel_size": 0.15,
+      "weight_policy": "uniform"
+    },
+    {
+      "cell_id": "v15-t2-w1-uniform",
+      "min_weight": 1.0,
+      "truncation_voxels": 2.0,
+      "voxel_size": 0.15,
+      "weight_policy": "uniform"
+    },
+    {
+      "cell_id": "v15-t3-w1-ramped",
+      "min_weight": 1.0,
+      "truncation_voxels": 3.0,
+      "voxel_size": 0.15,
+      "weight_policy": "ramped_behind"
+    },
+    {
+      "cell_id": "v25-t3-w1-uniform",
+      "min_weight": 1.0,
+      "truncation_voxels": 3.0,
+      "voxel_size": 0.25,
+      "weight_policy": "uniform"
+    },
+    {
+      "cell_id": "v10-t4-w1-uniform",
+      "min_weight": 1.0,
+      "truncation_voxels": 4.0,
+      "voxel_size": 0.1,
+      "weight_policy": "uniform"
+    }
+  ],
+  "kind": "scanner3d.surface-oracle-corpus",
+  "schema_version": 1,
+  "selection_rule": "the recommended cell is the one with the highest analytic.reference_coverage_fraction over the dense exact sampling of the scene's own shapes. Ties break on the lower analytic.distances.p95, then the lower field.work_units, then the lexicographically first cell_id. It is applied to EVERY declared cell after all of them have run; a case that did not run a declared cell is refused before any cell is chosen. The derived shipped-policy arm is reported beside the winner and is never eligible to be it, because its resolution is not a choice the grid offers.",
+  "units": "Lengths are synthetic depth units: raw code times depth scale, exact by construction. No physical length is implied anywhere in this corpus.",
+  "what": "Exact-truth multi-view scenes for comparing the measured point cloud with the raw TSDF surface extracted from the same frames and the same poses, one perturbation at a time.",
+  "why": "The fused surface looks lumpier and less complete than the measured dots. This corpus separates raw depth noise, localized outliers, structured no-return loss, translational pose error, rotational pose error and their interaction as causes of that, against exact truth and a predeclared parameter grid, so a fix is chosen from evidence rather than by eye.",
+  "work_budget": 500000
+}

@@ -1,0 +1,37 @@
+{
+  "candidate_sha256": "4fe6627ea7618b372cf833eae805547420fa91c412808e1e12701b1191178ca2",
+  "generated_by": "tests/build_shell_discriminant_fixtures.py",
+  "kind": "scanner3d.shell-discriminant-corpus",
+  "material_fraction": 0.5,
+  "population": {
+    "bytes": 59853,
+    "name": "population.json",
+    "sha256": "0566b4f1c10a83147c3ce56f61e7ec87d120ad14cc7811384ce813ec4a216390"
+  },
+  "protocol_sha256": "7cb400cfec9465de744577e5e31106d992ed274c2b32c94ff4c1e58218ba252e",
+  "resolutions": [
+    "appliance",
+    "v10-t4-w1-uniform"
+  ],
+  "schema_version": 1,
+  "sealed_holdout": [
+    "sealed-outlier-125-p41",
+    "sealed-outlier-185-p43",
+    "sealed-outlier-155-p47",
+    "sealed-outlier-105-p53",
+    "sealed-combined-a",
+    "sealed-combined-b",
+    "sealed-combined-c",
+    "sealed-combined-outlier-d"
+  ],
+  "selection_protocol": "Every rule in tests.shell_discriminant.RULE_GRID is evaluated exactly once against every declared unsupported observable shell, into one immutable cached decision matrix, and every confusion, cross-tab, eligibility test, ordering, gate, selection and recommendation is derived from that matrix rather than from a second application of any rule. Selection is asked at the product's own resolution: training eligibility and ordering read TRAIN records at SELECTION_RESOLUTION and nothing else, and the second declared resolution is diagnostic and can never help a candidate qualify or pass. A rule is eligible when, over the training appliance records, it removes zero analytically acceptable shell faces and at least MATERIAL_FRACTION of the false shell faces. Eligible rules are ordered by the most false training faces removed, then by the fewest shells selected, then by rule id, and the first is the selected rule. The sealed HOLDOUT split is measured once afterwards, at the same appliance resolution, as evaluation only: the candidate bodies, the gates, the ceiling and the selection are frozen before any holdout number exists, and swapping or withholding the holdout labels cannot change the selection. A selected rule is recommended only if it also clears the holdout gates AND its counterfactual - the actual removal of exactly the whole shells the rule selects over ALL closed shells, with no analytic unsupported prefilter, on every sealed holdout appliance population where it fires, re-measured by the accepted surface oracle's own code - shows an output-facing false-surface gain with every preservation gate holding across the complete set. Any analytically acceptable supported or unsupported surface the rule removes is damage and is published as such. If no rule is eligible, or the selected rule fails holdout or any counterfactual, the experiment selects none and recommends no pruning. The truth-fed upper bound is evaluator-only and is never a candidate.",
+  "selection_resolution": "appliance",
+  "units": "Lengths are synthetic depth units: raw code times depth scale, exact by construction. No physical length is implied anywhere in this population.",
+  "upper_bound": {
+    "cell_id": "appliance",
+    "member_id": "sealed-outlier-185-p43"
+  },
+  "what": "One whole synthetic realization per member, over the accepted surface-oracle exact-control scene, declared before any result and split into training and holdout halves by whole realization.",
+  "why": "The accepted surface oracle proved that a fused surface contains sealed shells nothing measured, and that some are false surface while others are correct geometry. This population exists to answer whether a bounded rule over evidence the appliance actually has can tell those two apart on data it was not chosen on.",
+  "work_ceiling": 40000
+}

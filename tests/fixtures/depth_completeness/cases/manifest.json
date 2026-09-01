@@ -1,0 +1,70 @@
+{
+  "files": [
+    {
+      "bytes": 16472,
+      "case_id": "aperture-ambiguity",
+      "name": "aperture-ambiguity.json",
+      "sha256": "049e37438d556fdd52240ef0a288bcf8fc8fdbae2fb5d82c294b05bda1584de1"
+    },
+    {
+      "bytes": 10735,
+      "case_id": "curved-surface",
+      "name": "curved-surface.json",
+      "sha256": "e9ff7fecd4823a45692d909b45c025130a04c82e8e46515f6f8ecae21a719033"
+    },
+    {
+      "bytes": 11860,
+      "case_id": "depth-step",
+      "name": "depth-step.json",
+      "sha256": "c14c69cc5505e992edcc78c788f2880f111c44e2a9532994528beee52beffd95"
+    },
+    {
+      "bytes": 30174,
+      "case_id": "multiview-object",
+      "name": "multiview-object.json",
+      "sha256": "22c341ff8320964e3fe7cf970b73c8d1d1140c3673cc2a23b1b78f0e7c2c9012"
+    },
+    {
+      "bytes": 10300,
+      "case_id": "narrow-slot",
+      "name": "narrow-slot.json",
+      "sha256": "c817732f2220a8fa61a0f0e1ab954a63da648696c3c861616dc361b3abde384c"
+    },
+    {
+      "bytes": 9977,
+      "case_id": "plane-fronto-complete",
+      "name": "plane-fronto-complete.json",
+      "sha256": "84e15487df8dfd8ee0832487a939e909e92338349a73121d251c44f7e643f5ee"
+    },
+    {
+      "bytes": 20522,
+      "case_id": "plane-fronto",
+      "name": "plane-fronto.json",
+      "sha256": "73ca3b46de0637e3ffacef9a8f2486663de9cf1aec9401f1da974aa85f8c34b6"
+    },
+    {
+      "bytes": 11649,
+      "case_id": "plane-oblique",
+      "name": "plane-oblique.json",
+      "sha256": "0038a3eebec7befeb392928b1efdd81a3707893ac18b3696441f5e0142e26efd"
+    },
+    {
+      "bytes": 29394,
+      "case_id": "temporal-confirmation",
+      "name": "temporal-confirmation.json",
+      "sha256": "7ba1329ee707bb3eefd68ac55ce800da21e7e09212b28a88415bad011e90e6d6"
+    },
+    {
+      "bytes": 27156,
+      "case_id": "temporal-motion",
+      "name": "temporal-motion.json",
+      "sha256": "80bbb950e379a50e64b0ab3b68e8ec4c91c05405bc59c064ce16f9a8713cd54b"
+    }
+  ],
+  "generated_by": "tests/build_depth_completeness_fixtures.py",
+  "kind": "scanner3d.depth-completeness-corpus",
+  "schema_version": 1,
+  "units": "Depth is raw code times depth scale, in the constructed scene's own units, and is exact by construction. Nothing here is a physical measurement and no case makes a dimensional-accuracy or scanner-performance claim.",
+  "what": "Deterministic synthetic depth-completeness scenes, dropout masks, gates and candidate expectations, read by tests/depth_completeness_harness.py.",
+  "why": "So that a depth completion cannot be called an improvement for being denser. Each case states one bar and runs many candidates against it, including deliberately bad fills whose exact failures are the evidence that the bar is load-bearing."
+}

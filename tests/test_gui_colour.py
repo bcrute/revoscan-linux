@@ -31,7 +31,6 @@ from __future__ import annotations
 import logging
 import threading
 import time
-import traceback
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -43,16 +42,16 @@ pytest.importorskip("PySide6")
 from scanner3d import discovery, gui, rgb_frame, v4l2_stream
 from scanner3d.gui import ColourPump, ScannerWindow
 from tests.conftest import REAL_SERIAL
-from tests.fake_v4l2 import stream_kernel, stream_node, whole_frame
+from tests.fake_v4l2 import short_frame, stream_kernel, stream_node, whole_frame
 from tests.gui_harness import (
     CaptureWindow,
-    FakeSignal,
-    FakeWorker,
+    PreviewWindow,
     alignments,
     capture_dir,
     clouds,
     live,
     models,
+    previewing,
     start_capture,
 )
 
@@ -62,6 +61,7 @@ __all__ = [
     "clouds",
     "live",
     "models",
+    "previewing",
     "stream_kernel",
     "stream_node",
 ]
@@ -136,20 +136,29 @@ class RecordingPump:
     ends.
     """
 
-    def __init__(self, serial: str, emit, *, should_stop, saved) -> None:
+    def __init__(self, serial: str, emit, *, should_stop, saved, previewed) -> None:
         self.serial = serial
         self.emit = emit
         self.should_stop = should_stop
         #: The window's saved-frame emissions, read at the moment start() runs.
         self.saved = saved
+        #: Every depth frame offered to the preview, which is every COMPLETE
+        #: delivery. What the pump waits for is a depth stream that is running,
+        #: and a delivery is the proof of that; a keep is a decision this run
+        #: made about which frames to write, and the RGB camera knows nothing
+        #: about it.
+        self.previewed = previewed
         self.starts = 0
         self.stops = 0
         #: How many frames had already been saved each time start() was called.
         self.started_after_saved: list[int] = []
+        #: How many had been delivered and previewed each time it was called.
+        self.started_after_previewed: list[int] = []
 
     def start(self) -> None:
         self.starts += 1
         self.started_after_saved.append(self.saved[-1] if self.saved else 0)
+        self.started_after_previewed.append(len(self.previewed))
         self.emit(JPEG)
 
     def stop(self) -> None:
@@ -163,10 +172,12 @@ def recording_pump(monkeypatch):
     def install(window: CaptureWindow) -> list[RecordingPump]:
         made: list[RecordingPump] = []
         seen: list[int] = []
+        shown: list[bytes] = []
         window.worker.saved.connect(seen.append)
+        window.worker.preview.connect(shown.append)
 
         def make(serial: str, emit, *, should_stop) -> RecordingPump:
-            pump = RecordingPump(serial, emit, should_stop=should_stop, saved=seen)
+            pump = RecordingPump(serial, emit, should_stop=should_stop, saved=seen, previewed=shown)
             made.append(pump)
             return pump
 
@@ -324,10 +335,14 @@ def test_a_capture_starts_colour_only_after_the_first_depth_frame(
 ) -> None:
     """Depth first, once, and never before there is a depth stream to ride on.
 
-    ``started_after_saved == [1]`` carries both halves: the pump was started
-    when exactly one frame had been saved - so not before the stream delivered -
-    and it was started exactly once over the whole capture, so a five-hundred
-    frame sweep is one grabber and not five hundred.
+    ``started_after_previewed == [1]`` carries both halves: the pump was started
+    with exactly one complete delivery behind it - so not before the stream
+    delivered - and it was started exactly once over the whole capture, so a
+    five-hundred frame sweep is one grabber and not five hundred.
+
+    What it waits for is the DELIVERY and not the write. The measured
+    requirement is that a depth stream be running; a delivered buffer is proof
+    of that, and the writing that follows it is this run's own business.
     """
     stream_kernel(frames(6))
     window = CaptureWindow(frames=6, serial=REAL_SERIAL)
@@ -338,8 +353,54 @@ def test_a_capture_starts_colour_only_after_the_first_depth_frame(
 
     assert len(made) == 1
     assert made[0].serial == REAL_SERIAL
-    assert made[0].started_after_saved == [1]
+    assert made[0].started_after_previewed == [1]
+    assert made[0].started_after_saved == [0]
     assert len(window.frames_on_disk()) == 6
+
+
+def test_a_capture_that_keeps_one_frame_in_three_still_starts_colour_at_once(
+    stream_kernel, capture_dir: Path, live, recording_pump
+) -> None:
+    """Decimation is about what is WRITTEN, and colour is not written.
+
+    At ``decimate=3`` the first kept frame is the third delivery. Waiting for it
+    would leave the colour view - the one that answers "is the object where I
+    think it is" - dark for two extra deliveries at the exact moment the
+    operator is aiming the scanner, for no reason the RGB camera knows about.
+    """
+    stream_kernel(frames(6))
+    window = CaptureWindow(frames=6, decimate=3, serial=REAL_SERIAL)
+    made = recording_pump(window)
+    live()
+
+    start_capture(window)
+
+    assert [pump.started_after_previewed for pump in made] == [[1]]
+    assert [pump.started_after_saved for pump in made] == [[0]]
+    # And the capture itself stayed decimated: two of the six deliveries kept.
+    assert len(window.frames_on_disk()) == 2
+
+
+def test_a_short_first_delivery_does_not_start_colour(
+    stream_kernel, capture_dir: Path, live, recording_pump
+) -> None:
+    """An incomplete buffer is a transport event, not a frame.
+
+    It is not previewed, it is not written, and it must not be read as evidence
+    that the depth stream is delivering either - which is exactly what the
+    owner's 2026-08-26 scanner opened with.
+    """
+    stream_kernel((short_frame(), *frames(3)[:3]))
+    window = CaptureWindow(frames=4, serial=REAL_SERIAL)
+    made = recording_pump(window)
+    live()
+
+    start_capture(window)
+
+    # Started by the FIRST COMPLETE delivery - the second buffer - and not by
+    # the short one before it.
+    assert [pump.started_after_previewed for pump in made] == [[1]]
+    assert len(window.frames_on_disk()) == 3
 
 
 def test_a_capture_shows_colour_while_it_is_recording(
@@ -651,90 +712,6 @@ def test_a_picture_the_window_already_drew_is_not_taken_back(
 
 
 # -- preview, which resolves colour the same way ----------------------------
-
-
-class PreviewWorker(FakeWorker):
-    """:class:`~scanner3d.gui.Worker` collapsed to a synchronous call.
-
-    Keeps the one thing about it the preview path depends on: what the job
-    returns goes to ``finished_ok`` and what it raises goes to ``failed``.
-    """
-
-    def __init__(self, job) -> None:
-        super().__init__()
-        self._job = job
-        self.failed = FakeSignal()
-        self.finished_ok = FakeSignal()
-
-    def start(self) -> None:  # Qt's name
-        self.running = True
-        try:
-            result = self._job(self)
-        except Exception:
-            self.failed.emit(traceback.format_exc())
-        else:
-            self.finished_ok.emit(result)
-        finally:
-            self.running = False
-
-
-class PreviewWindow:
-    """The parts of :class:`ScannerWindow` that ``_start_preview`` touches."""
-
-    def __init__(self) -> None:
-        self._preview_worker: object = None
-        self.frames: list[bytes] = []
-        self.colours: list[bytes] = []
-        self.failures: list[str] = []
-        self.ended: list[object] = []
-        self.awaited = 0
-
-    def _scanner_serial(self) -> str | None:
-        """The REAL one: which scanner colour is aimed at is what is on trial."""
-        return ScannerWindow._scanner_serial(cast(ScannerWindow, self))
-
-    def _await_device(self) -> None:
-        self.awaited += 1
-
-    def _show_frame(self, raw: bytes) -> None:
-        self.frames.append(raw)
-
-    def _show_colour(self, jpeg: bytes) -> None:
-        self.colours.append(jpeg)
-
-    def _preview_failed(self, text: str) -> None:
-        self.failures.append(text)
-
-    def _preview_ended(self, result: object) -> None:
-        self.ended.append(result)
-
-    def statusBar(self) -> object:  # Qt's name
-        return SimpleNamespace(showMessage=lambda *_a, **_k: None)
-
-
-@pytest.fixture
-def previewing(monkeypatch):
-    """Run ``_start_preview`` with its worker and its stream both stood in for.
-
-    The stream is recorded rather than run: what a preview does with a serial
-    it could not resolve is the question, and :func:`stream_with_colour`'s own
-    behaviour given ``None`` is already the capture tests' subject.
-    """
-    calls: list[SimpleNamespace] = []
-
-    def stream(worker, serial, on_frame, *, frames, decimate, duration_s):
-        calls.append(SimpleNamespace(serial=serial, frames=frames, decimate=decimate))
-        on_frame(b"a depth frame", None)
-        return "the stream ended"
-
-    monkeypatch.setattr(gui, "stream_with_colour", stream)
-    monkeypatch.setattr(gui, "Worker", PreviewWorker)
-
-    def start(window: PreviewWindow) -> list[SimpleNamespace]:
-        ScannerWindow._start_preview(cast(ScannerWindow, window))
-        return calls
-
-    return start
 
 
 def test_preview_aims_colour_at_the_configured_scanner(monkeypatch, previewing) -> None:

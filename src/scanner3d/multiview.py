@@ -94,6 +94,59 @@ SCORE_CELL_FRACTION: Final = 0.04
 #: for symmetric objects - and saying so is more useful than picking one.
 AMBIGUITY_MARGIN: Final = 1.15
 
+#: The origin :func:`coarse_align` gives a candidate that came from its caller's
+#: ``priors`` rather than from the two clouds' own geometry.
+PRIOR_ORIGIN: Final = "prior"
+
+#: What one source point that found NO neighbour costs the coarse score, in
+#: :data:`SCORE_CELL_FRACTION` grid cells.
+#:
+#: The score is a TRUNCATED mean nearest-neighbour distance: every sampled
+#: source point contributes either the distance to its nearest target point or
+#: this penalty, whichever is smaller, and the mean is taken over ALL of them
+#: rather than over the ones that found a partner.
+#:
+#: Excluding the misses instead - which this module used to do - measures only
+#: the geometry a candidate happened to land on, so a transform that puts nine
+#: tenths of the frame off the reference and the remaining tenth tidily on it
+#: outscores one that puts the whole frame roughly where it belongs. Measured on
+#: this repository's incompatible-minima tracking fixture, that is not a
+#: theoretical worry: the right placement and a genuinely different one scored
+#: within 1.05x of each other on the matched-only mean while covering the
+#: reference 0.47 against 0.34, so the shared stage called a ranking ambiguous
+#: that the geometry distinguishes clearly.
+#:
+#: TRUNCATED rather than charged in full, because a partial view legitimately
+#: has points the other view never saw and an unbounded penalty would rank on
+#: how much of the frame overlaps at all rather than on how well it fits. A
+#: bounded miss cost is the standard robust form: it says a miss is worth no
+#: more than the worst match, and no less.
+#:
+#: The value is derived, not chosen. ``2 * sqrt(3)`` cells is the furthest apart
+#: two points can be and still be found by :func:`_score`'s own neighbour
+#: search, which scans the 3x3x3 block of cells around a moved point: a partner
+#: in a diagonally adjacent cell can sit up to two cells away along each axis.
+#: So no matched point can ever cost more than a miss, which is what makes the
+#: truncated mean monotone in coverage - adding overlap can only improve a
+#: score, and losing it can only worsen one.
+SCORE_MISS_CELLS: Final = 2.0 * math.sqrt(3.0)
+
+#: How far apart, in :data:`SCORE_CELL_FRACTION` grid cells, two candidates must
+#: place the source before :func:`coarse_align` treats them as different
+#: placements rather than one placement spelled twice.
+#:
+#: Two, because that is the reach of the scoring pass's OWN neighbour search:
+#: :func:`_score` looks in the 3x3x3 block of cells around each moved point, so
+#: a partner up to two cells away in an axis can be found and two placements
+#: closer than that match largely the same points and score largely the same.
+#: A margin between two such candidates is arithmetic noise, and reporting it as
+#: an ambiguity calls a shape ambiguous for agreeing with itself. Measured on
+#: this repository's asymmetric tracking fixture: the caller's prior placed the
+#: source 3.40 from the best generated orientation against a 4.88 reach - one
+#: placement - and the score margin between the two was 1.01, while the best
+#: genuinely different orientation sat 22.5 away and 1.17 behind.
+SCORE_NEIGHBOUR_REACH: Final = 2.0
+
 #: Eigenvalue ratio below which a cloud's principal axes are treated as
 #: degenerate: two comparable extents leave the frame undetermined about the
 #: axis between them.
@@ -137,11 +190,33 @@ class CoarseAlignment:
     """The ranked coarse candidates, and whether the best is clearly best."""
 
     candidates: tuple[AlignmentCandidate, ...]
+    #: Whether the best candidate is clearly better than the best GENUINELY
+    #: DIFFERENT one, and by how much.
+    #:
+    #: The runner-up used for this margin is not simply ``candidates[1]``. Two
+    #: candidates that place the source within this scoring pass's own search
+    #: reach of each other are one placement spelled twice - they match nearly
+    #: the same points and therefore score nearly the same - and a margin
+    #: between them measures rounding, not the geometry. Reporting such a pair
+    #: as an ambiguity would call a shape ambiguous for agreeing with itself.
+    #: So the runner-up is the best candidate that actually puts the source
+    #: SOMEWHERE ELSE - see :data:`SCORE_NEIGHBOUR_REACH` - and
+    #: :attr:`rival_index` says which one it was.
     unambiguous: bool
     margin: float
     source_principal_degenerate: bool
     target_principal_degenerate: bool
     limitations: tuple[str, ...]
+    #: Index in :attr:`candidates` of the genuinely different runner-up
+    #: :attr:`margin` was measured against, or ``None`` when every other
+    #: candidate placed the source in the same place as the best one.
+    rival_index: int | None = None
+    #: How many candidates ranked between the best and that runner-up, all of
+    #: them near-duplicates of the best. Zero on an ordinary ranking.
+    duplicates_skipped: int = 0
+    #: How many of :attr:`candidates` came from ``priors`` rather than from the
+    #: generated orientation set.
+    priors_ranked: int = 0
 
     @property
     def best(self) -> AlignmentCandidate | None:
@@ -156,6 +231,9 @@ class CoarseAlignment:
             "margin": self.margin,
             "source_principal_degenerate": self.source_principal_degenerate,
             "target_principal_degenerate": self.target_principal_degenerate,
+            "rival_index": self.rival_index,
+            "duplicates_skipped": self.duplicates_skipped,
+            "priors_ranked": self.priors_ranked,
             "limitations": list(self.limitations),
         }
 
@@ -300,14 +378,23 @@ def _decimate(points: Sequence[Point], target: int) -> tuple[Point, ...]:
 def _score(
     moved: Sequence[Point], grid: dict[tuple[int, int, int], list[Point]], cell: float
 ) -> tuple[float, int]:
-    """Mean nearest-neighbour distance over matched points, and how many matched.
+    """Truncated mean nearest-neighbour distance, and how many points matched.
 
-    Unmatched points are excluded rather than penalised with a large distance:
-    a partial view legitimately has points the other view never saw, and
-    charging for them would favour transforms that hide the object rather than
-    align it. The matched COUNT is returned alongside so a caller can see when a
-    good-looking score came from very little overlap.
+    Every point in ``moved`` contributes: the distance to its nearest point in
+    ``grid`` if it found one, and :data:`SCORE_MISS_CELLS` cells if it did not.
+    The mean is over ALL of them, so a candidate that leaves most of the source
+    off the target is ranked as what it is rather than judged on the fraction of
+    itself it managed to place. See :data:`SCORE_MISS_CELLS` for why the miss
+    cost is bounded and why that particular bound.
+
+    The matched COUNT is still returned, because the score alone cannot say
+    whether a mediocre number came from a poor fit over the whole frame or a
+    good fit over a little of it, and a caller deciding anything more than a
+    ranking needs to know which.
     """
+    if not moved:
+        return math.inf, 0
+    miss = SCORE_MISS_CELLS * cell
     total = 0.0
     matched = 0
     for p in moved:
@@ -321,11 +408,13 @@ def _score(
                         if d < best:
                             best = d
         if best < math.inf:
-            total += math.sqrt(best)
+            total += min(math.sqrt(best), miss)
             matched += 1
+        else:
+            total += miss
     if matched == 0:
         return math.inf, 0
-    return total / matched, matched
+    return total / len(moved), matched
 
 
 def _extent(points: Sequence[Point]) -> float:
@@ -334,18 +423,64 @@ def _extent(points: Sequence[Point]) -> float:
     return max(hi[i] - lo[i] for i in range(3))
 
 
+def _distinct_rival(
+    candidates: Sequence[AlignmentCandidate], sample: Sequence[Point], reach: float
+) -> int | None:
+    """Index of the best candidate that places ``sample`` somewhere else.
+
+    Somewhere else meaning: further, on average over the same decimated sample
+    the scores were computed from, than ``reach``. Averaged rather than taken at
+    the worst point because the score being defended is itself a mean, and one
+    corner of a cloud swinging past the reach while the rest of it stays put is
+    not two placements.
+
+    ``None`` when no candidate does, which says the search found one placement
+    and several spellings of it.
+    """
+    if len(candidates) < 2 or not sample:
+        return None
+    placed = [candidates[0].transform.apply(point) for point in sample]
+    for index in range(1, len(candidates)):
+        moved = candidates[index].transform.apply_all(sample)
+        total = 0.0
+        for a, b in zip(placed, moved, strict=True):
+            total += math.dist(a, b)
+        if total / len(placed) > reach:
+            return index
+    return None
+
+
+def _transform_key(transform: Rigid) -> tuple[int, ...]:
+    """A hashable identity for one transform, rounded so float noise ties."""
+    return tuple(round(v * 1e6) for row in transform.rotation for v in row) + tuple(
+        round(v * 1e6) for v in transform.translation
+    )
+
+
 def coarse_align(
     source: Sequence[Point],
     target: Sequence[Point],
     *,
     sample: int = COARSE_SAMPLE,
     include_octahedral: bool = True,
+    priors: Sequence[Rigid] = (),
 ) -> CoarseAlignment:
     """Rank candidate orientations taking ``source`` onto ``target``.
 
     Returns candidates, best first, and says whether the best is *clearly* best.
     This is a starting point for ICP, not an alignment: the scores come from
     heavily decimated clouds and a coarse grid, which is all that ranking needs.
+
+    ``priors`` are complete transforms a caller already has a reason to believe -
+    a pose an earlier frame was accepted at, say - offered to this ONE ranking
+    rather than compared against its result afterwards. They are scored by
+    exactly the same decimated pass on exactly the same grid as the generated
+    orientations and carry the origin ``"prior"``, so a prior that fits the
+    target better than every generated orientation wins the ranking on the same
+    measurement they lose it on, and :attr:`~CoarseAlignment.margin` is a margin
+    over everything the caller offered rather than over a subset of it. A prior
+    is not privileged: it earns its rank or it does not, and passing one adds no
+    search - it costs one more score of ``sample`` points.
     """
     src_frame, src_degenerate = principal_frame(source)
     dst_frame, dst_degenerate = principal_frame(target)
@@ -376,34 +511,49 @@ def coarse_align(
         for extra in octahedral_rotations():
             bases.append((_multiply(_multiply(dst_frame, extra), src_t), "principal+octahedral"))
 
+    # Keyed on the whole transform rather than on its rotation. Every generated
+    # basis derives its translation from the same two centroids, so for those
+    # the two keys are the same test; a PRIOR is a complete transform and can
+    # share a rotation with a generated orientation while placing the source
+    # somewhere else entirely, and deduplicating that away would silently drop
+    # the candidate the caller had a reason to offer.
     seen: set[tuple[int, ...]] = set()
     candidates: list[AlignmentCandidate] = []
+    offered: list[tuple[Rigid, str]] = []
     for rotation, origin in bases:
-        key = tuple(round(v * 1e6) for row in rotation for v in row)
-        if key in seen:
-            continue
-        seen.add(key)
         try:
             spin = Rigid.of(rotation, (0.0, 0.0, 0.0))
         except ScannerError:
             continue
         moved_centre = spin.apply(src_centre)
-        transform = Rigid.of(rotation, subtract(dst_centre, moved_centre))
+        offered.append((Rigid.of(rotation, subtract(dst_centre, moved_centre)), origin))
+    offered.extend((prior, PRIOR_ORIGIN) for prior in priors)
+    for transform, origin in offered:
+        key = _transform_key(transform)
+        if key in seen:
+            continue
+        seen.add(key)
         score, matched = _score(tuple(transform.apply_all(small_src)), grid, cell)
         if matched:
             candidates.append(AlignmentCandidate(transform, score, matched, origin))
 
     candidates.sort(key=lambda c: (c.score, -c.matched))
+    rival_index = _distinct_rival(candidates, small_src, cell * SCORE_NEIGHBOUR_REACH)
+    duplicates_skipped = 0 if rival_index is None else rival_index - 1
     margin = math.inf
-    if len(candidates) >= 2 and candidates[0].score > 0.0:
-        margin = candidates[1].score / candidates[0].score
+    if rival_index is not None and candidates[0].score > 0.0:
+        margin = candidates[rival_index].score / candidates[0].score
     unambiguous = bool(candidates) and margin >= AMBIGUITY_MARGIN
 
     limitations = [
         "A coarse orientation is a starting point for ICP, not an alignment. The scores "
         "come from decimated clouds on a coarse grid and are for ranking only.",
-        "Unmatched points are excluded from the score rather than penalised, so a high "
-        "score with a low matched count means very little overlap, not a good fit.",
+        "The score is a TRUNCATED mean: a source point that found no neighbour costs "
+        f"{SCORE_MISS_CELLS:.2f} grid cells rather than nothing and rather than everything, so "
+        "unmatched geometry lowers a candidate's rank without letting a barely-overlapping "
+        "placement be scored on the fraction of itself it managed to place. Because the cost is "
+        "bounded, a score close to it means very little of the source landed on the target at "
+        "all, and the matched count says how little.",
     ]
     if src_degenerate or dst_degenerate:
         limitations.append(
@@ -411,9 +561,31 @@ def coarse_align(
             "is not determined by its geometry. The principal candidate is a guess there; "
             "the octahedral set is what is actually doing the work."
         )
+    ranked_priors = sum(1 for candidate in candidates if candidate.origin == PRIOR_ORIGIN)
+    if ranked_priors:
+        limitations.append(
+            f"{ranked_priors} of these candidates came from the caller as priors rather than "
+            "from the two clouds' geometry. They are scored, ranked and judged exactly as the "
+            "generated orientations are; being offered by the caller buys a candidate nothing."
+        )
+    if duplicates_skipped:
+        limitations.append(
+            f"{duplicates_skipped} candidate(s) ranked between the best and the runner-up this "
+            "margin was measured against, and every one of them placed the source within this "
+            "scoring pass's own search reach of the best - the same placement spelled more than "
+            "once, not an alternative to it."
+        )
+    if rival_index is None:
+        limitations.append(
+            "Every candidate placed the source in the same place as the best one, so there was "
+            "no genuinely different placement to measure a margin against. The margin is "
+            "infinite because nothing disagreed, which is not the same evidence as one "
+            "candidate beating a real alternative."
+        )
     if not unambiguous:
         limitations.append(
-            f"The best candidate is only {margin:.2f}x better than the runner-up, under the "
+            f"The best candidate is only {margin:.2f}x better than the best genuinely different "
+            f"runner-up, under the "
             f"{AMBIGUITY_MARGIN} margin. The geometry does not clearly distinguish them - "
             "common for symmetric objects - and picking one anyway would manufacture "
             "confidence that is not there."
@@ -425,6 +597,9 @@ def coarse_align(
         source_principal_degenerate=src_degenerate,
         target_principal_degenerate=dst_degenerate,
         limitations=tuple(limitations),
+        rival_index=rival_index,
+        duplicates_skipped=duplicates_skipped,
+        priors_ranked=ranked_priors,
     )
 
 

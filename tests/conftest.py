@@ -212,6 +212,68 @@ def isolated_config(monkeypatch, tmp_path_factory):
 
 
 @pytest.fixture
+def readiness_stood_down(monkeypatch):
+    """Let a test past the reconstruction readiness gates, ON PURPOSE and by name.
+
+    :mod:`scanner3d.reconstruction_readiness` refuses a reconstruction whose
+    poses do not describe a scan, and small synthetic fixtures usually do not:
+    nine renders across twenty-four degrees, or four identical frames placed at
+    the identity, are manufactured pose sequences and the gate is right about
+    them. That verdict is correct and completely beside the point for a test
+    asking what the CLI put in its JSON payload or what the shared preparation
+    path reported.
+
+    So this replaces the evaluation with a ready verdict. Every number in it is
+    one a real evaluation could have produced, because the strict reader
+    derives the required reason set from the evidence: a stand-in whose
+    evidence would have obliged a refusal is not a ready record however empty
+    its failure list is. It is deliberately NOT autouse: the real gate has to
+    be the default everywhere, and what it does on each front end is proved
+    against fixtures built to be judged - in
+    :mod:`tests.test_reconstruction_readiness`,
+    :mod:`tests.test_reconstruction_export_readiness`,
+    :mod:`tests.test_gui_readiness_refusal` and
+    :mod:`tests.test_cli_readiness`.
+    """
+    from scanner3d import reconstruction_readiness
+
+    policy = reconstruction_readiness.DEFAULT_POLICY
+
+    def ready(*_args: object, **_kwargs: object) -> object:
+        return reconstruction_readiness.ReconstructionReadiness(
+            policy=policy,
+            tracking=reconstruction_readiness.TrackingEvidence(0, 0, unresolved=False, detail=""),
+            poses=reconstruction_readiness.PoseEvidence(
+                poses=4,
+                adjacent_steps=3,
+                moving_steps=3,
+                stationary_steps=0,
+                travel_median=10.0 * policy.noise_floor,
+                travel_worst=10.0 * policy.noise_floor,
+                distinct_viewpoints=4,
+                viewpoints_capped=False,
+                excursion=20.0 * policy.noise_floor,
+                probe_points=policy.probe_points,
+            ),
+            coverage=reconstruction_readiness.CoverageEvidence(
+                measured=True,
+                frames_offered=4,
+                frames_used=4,
+                points_used=400,
+                cell_size=1.0,
+                total_cells=10,
+                supported_cells=10,
+                supported_fraction=1.0,
+                detail="stood down by the readiness_stood_down fixture",
+            ),
+            surface=None,
+            failures=(),
+        )
+
+    monkeypatch.setattr(reconstruction_readiness, "evaluate_readiness", ready)
+
+
+@pytest.fixture
 def builder(tmp_path: Path) -> SysfsBuilder:
     return SysfsBuilder(tmp_path)
 

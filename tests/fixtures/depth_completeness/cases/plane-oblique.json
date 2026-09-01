@@ -1,0 +1,342 @@
+{
+  "candidates": [
+    {
+      "expectation": {
+        "failed_gates": [
+          "coverage.local_recovery",
+          "coverage.supported_fraction"
+        ],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "confidence.high_confidence_worst",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst"
+        ],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "baseline",
+      "what": "the unchanged pipeline"
+    },
+    {
+      "expectation": {
+        "failed_gates": [
+          "plane.residual.p95",
+          "plane.residual.worst",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst"
+        ],
+        "inapplicable_gates": [
+          "completion_work.within_budget"
+        ],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "dense_nearest",
+      "what": "fills every hole with its nearest returned sample, which on a tilted surface is a staircase"
+    },
+    {
+      "expectation": {
+        "failed_gates": [
+          "confidence.high_confidence_worst",
+          "plane.residual.p95",
+          "plane.residual.worst",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst"
+        ],
+        "inapplicable_gates": [
+          "completion_work.within_budget"
+        ],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "broad_interpolation",
+      "what": "averages the nearest measured sample in each direction"
+    },
+    {
+      "expectation": {
+        "failed_gates": [
+          "coverage.supported_fraction"
+        ],
+        "inapplicable_gates": [],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "spatial_completion",
+      "what": "the product primitive on a tilted surface: the same holes it recovered on the fronto-parallel plane, and this time the answer is a different depth at every one of them. Copying the nearest code cannot do this and a local fit can"
+    },
+    {
+      "expectation": {
+        "failed_gates": [
+          "coverage.supported_fraction"
+        ],
+        "inapplicable_gates": [
+          "completion_work.within_budget"
+        ],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "easy_samples_only",
+      "what": "fills only the easy holes: accurate where it acts, and short of the target"
+    },
+    {
+      "expectation": {
+        "failed_gates": [
+          "coverage.measured_fraction",
+          "coverage.supported_fraction",
+          "dimensions.worst",
+          "landmarks.worst",
+          "plane.residual.p95",
+          "plane.residual.worst",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst"
+        ],
+        "inapplicable_gates": [
+          "completion_work.within_budget"
+        ],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "discarded_measurements",
+      "what": "drops the extreme returned samples and interpolates over them"
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "confidence.high_confidence_worst",
+          "coverage.local_recovery",
+          "coverage.measured_fraction",
+          "coverage.supported_fraction",
+          "dimensions.worst",
+          "landmarks.worst",
+          "plane.residual.p95",
+          "plane.residual.worst",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst"
+        ],
+        "outcome": "refused",
+        "refusal": "support_not_measured"
+      },
+      "name": "spatial_completion_recursive_support",
+      "what": "cites one of its own reconstructions as the evidence for another"
+    }
+  ],
+  "case_id": "plane-oblique",
+  "gates": [
+    {
+      "comparison": ">=",
+      "context": "the acceptance target: this fraction of the window must end up measured, or reconstructed onto surface that is really there. 0.95 of the surface this scene actually has; the unchanged baseline does not reach it, which is the whole reason this thread exists",
+      "limit": 0.95,
+      "measurement": "coverage",
+      "name": "coverage.supported_fraction",
+      "path": [
+        "supported_fraction"
+      ],
+      "unit": "fraction of 1"
+    },
+    {
+      "comparison": ">=",
+      "context": "non-inferiority: the raw measurements the sensor did return must all still be there and still be called measurements. A completion that discards awkward samples and interpolates over them is not a completion",
+      "limit": 0.765625,
+      "measurement": "coverage",
+      "name": "coverage.measured_fraction",
+      "path": [
+        "measured_fraction"
+      ],
+      "unit": "fraction of 1"
+    },
+    {
+      "comparison": "<=",
+      "context": "absolute: 4 raw codes. Error is scored ONLY on samples the candidate reconstructed where truth was held out, so copying the input cannot earn a good score here, and the coverage gates stop a candidate improving this by reconstructing only the easy holes",
+      "limit": 0.03125,
+      "measurement": "reconstructed_depth",
+      "name": "reconstructed_depth.p95",
+      "path": [
+        "absolute",
+        "p95"
+      ],
+      "unit": "synthetic depth units: raw code x depth scale, exact by construction"
+    },
+    {
+      "comparison": "<=",
+      "context": "absolute: 16 raw codes. A single sample placed on the wrong surface is the failure a percentile hides",
+      "limit": 0.125,
+      "measurement": "reconstructed_depth",
+      "name": "reconstructed_depth.worst",
+      "path": [
+        "absolute",
+        "worst"
+      ],
+      "unit": "synthetic depth units: raw code x depth scale, exact by construction"
+    },
+    {
+      "comparison": "<=",
+      "context": "non-inferiority: the baseline's own roughness plus 4 raw codes. A surface known to be flat may not come out of a completion lumpier than it went in",
+      "limit": 0.034701,
+      "measurement": "plane",
+      "name": "plane.residual.p95",
+      "path": [
+        "residuals",
+        "p95"
+      ],
+      "unit": "synthetic depth units: raw code x depth scale, exact by construction"
+    },
+    {
+      "comparison": "<=",
+      "context": "non-inferiority: the baseline's own worst residual plus 4 raw codes, for a local bump a percentile would hide",
+      "limit": 0.034941,
+      "measurement": "plane",
+      "name": "plane.residual.worst",
+      "path": [
+        "residuals",
+        "worst"
+      ],
+      "unit": "synthetic depth units: raw code x depth scale, exact by construction"
+    },
+    {
+      "comparison": "<=",
+      "context": "non-inferiority: the baseline's own worst extent error plus 8 raw codes. Smoothing an object smaller is the classic way a denser result looks better and measures worse",
+      "limit": 0.0625,
+      "measurement": "dimensions",
+      "name": "dimensions.worst",
+      "path": [
+        "absolute",
+        "worst"
+      ],
+      "unit": "synthetic depth units: raw code x depth scale, exact by construction"
+    },
+    {
+      "comparison": "<=",
+      "context": "non-inferiority: the baseline's own worst landmark offset plus 8 raw codes. A feature must not move",
+      "limit": 0.0625,
+      "measurement": "landmarks",
+      "name": "landmarks.worst",
+      "path": [
+        "offsets",
+        "worst"
+      ],
+      "unit": "synthetic depth units: raw code x depth scale, exact by construction"
+    },
+    {
+      "comparison": ">=",
+      "context": "a strict gain, stated by this scene and not by any candidate: 50 sample(s) of this frame were dropped with a returned measurement on all four sides of them, on geometry that is locally planar, and a completion must recover at least that many onto surface that is really there. Beside coverage.measured_fraction, which pins the measured population, this is a strict supported-coverage gain over the unchanged baseline - which recovers none of them",
+      "limit": 50.0,
+      "measurement": "coverage",
+      "name": "coverage.local_recovery",
+      "path": [
+        "reconstructed_on_surface"
+      ],
+      "unit": "samples"
+    },
+    {
+      "comparison": "<=",
+      "context": "absolute: 16 raw codes, the same worst-sample tolerance the held-out error gate uses, applied only to reconstructions the candidate itself published at confidence 0.5 or above. A completion is free to be unsure; what it may not do is be sure and wrong. Lowering its own confidence is the only way to leave this gate, and that lowering is visible in the same measurement",
+      "limit": 0.125,
+      "measurement": "confidence",
+      "name": "confidence.high_confidence_worst",
+      "path": [
+        "high_confidence_worst"
+      ],
+      "unit": "synthetic depth units: raw code x depth scale, exact by construction"
+    },
+    {
+      "comparison": "is",
+      "context": "the work a completion spent must be inside the budget derivable from its input before it ran - one neighbourhood scan per hole at its published radius. A bound by construction rather than a wall-clock assertion, which would measure the machine. Candidates that report no work record leave this gate inapplicable, and each case declares exactly which ones those are",
+      "limit": true,
+      "measurement": "completion_work",
+      "name": "completion_work.within_budget",
+      "path": [
+        "within_budget"
+      ]
+    }
+  ],
+  "kind": "scanner3d.depth-completeness-case",
+  "notes": [
+    "The truth is quantised to whole raw codes, so the plane's own residuals are not zero. The roughness gates are the baseline's own value plus a margin, which is what makes 'lumpier than before' the thing being measured."
+  ],
+  "regions": {
+    "dimensions": true,
+    "foreground_below": null,
+    "fusion": null,
+    "landmarks": true,
+    "plane": true,
+    "slot_columns": [],
+    "surface_tolerance": null,
+    "tracking": false,
+    "weighted_fusion": null
+  },
+  "scene": {
+    "depth_scale": 0.0078125,
+    "frames": [
+      {
+        "index": 0,
+        "input_returned": 735,
+        "input_sha256": "8d634a0e7af5838caee10531cb35e2012b089799635400e67b5d1f6bc237ab5a",
+        "masks": [
+          {
+            "fraction": 0.12,
+            "kind": "speckle"
+          },
+          {
+            "column": 10,
+            "kind": "blob",
+            "radius": 3.5,
+            "row": 10
+          },
+          {
+            "first_column": 30,
+            "kind": "strip",
+            "last_column": 33
+          }
+        ],
+        "pose": {
+          "axis": [
+            0.0,
+            1.0,
+            0.0
+          ],
+          "degrees": 0.0,
+          "through": [
+            0.0,
+            0.0,
+            100.0
+          ]
+        },
+        "truth_returned": 960,
+        "truth_sha256": "4d1ce2495b0b4073b3c6c95147c4152120c6f0dea31aafecc1cd2fd1e00a1ee7"
+      }
+    ],
+    "intrinsics": {
+      "cx": 320.0,
+      "cy": 200.0,
+      "fx": 400.0,
+      "fy": 400.0,
+      "height": 400,
+      "width": 640
+    },
+    "seed": "depth-completeness-028:plane-oblique",
+    "shapes": [
+      {
+        "kind": "plane",
+        "normal": [
+          0.3,
+          0.15,
+          1.0
+        ],
+        "offset": 105.0
+      }
+    ],
+    "window": {
+      "height": 24,
+      "sample_count": 960,
+      "u0": 300,
+      "v0": 188,
+      "width": 40
+    }
+  },
+  "schema_version": 1,
+  "what": "An oblique plane with the same three dropout shapes.",
+  "why": "The same dense fills that are exactly right on a fronto-parallel plane are wrong here, and wrong in the way that matters: the surface comes out lumpier than the one that went in. Tilt is the whole difference between the two cases."
+}

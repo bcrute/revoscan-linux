@@ -269,8 +269,9 @@ def test_a_stop_during_the_device_wait_never_opens_the_stream_at_all(
     kernel = stream_kernel(_three_frames())
     window = CaptureWindow(frames=3)
 
-    def wait_then_stopped() -> None:
+    def wait_then_stopped(serial: str | None) -> None:
         window.awaited += 1
+        window.awaited_serials.append(serial)
         # The real Stop, on the real window method, landing inside the wait.
         window._stop()
 

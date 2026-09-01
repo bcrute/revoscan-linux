@@ -39,21 +39,33 @@ from __future__ import annotations
 import http.client
 import json
 import struct
+import threading
 import time
 import tkinter
 import zlib
 from collections.abc import Mapping
 from dataclasses import FrozenInstanceError
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 import scanner3d.viewer as viewer_module
 from scanner3d.errors import DoctorStatus, ScannerError
+from scanner3d.return_health import (
+    NO_RETURNS,
+    SEVERELY_SPARSE,
+    USABLE,
+    health_summary,
+    return_health,
+)
 from scanner3d.v4l2_capture import EXPECTED_FRAME_BYTES, FRAME_HEIGHT, FRAME_WIDTH
 from scanner3d.viewer import (
     DEFAULT_PALETTE,
     MIN_RENDER_INTERVAL,
+    NO_DATA_BLOCK,
+    NO_DATA_PRIMARY,
+    NO_DATA_SECONDARY,
     PNG_SIGNATURE,
     SCHEMA_VERSION,
     DepthViewer,
@@ -70,7 +82,11 @@ from scanner3d.viewer import (
     frame_stats,
     png_bytes,
     ppm_bytes,
+    render_frame,
 )
+
+#: The two pixels the default palette ever draws where nothing was returned.
+NO_DATA_PIXELS = (bytes(NO_DATA_PRIMARY), bytes(NO_DATA_SECONDARY))
 
 # --- building synthetic frames ----------------------------------------------
 
@@ -239,35 +255,126 @@ def test_nothing_is_unpacked_before_the_length_refusal():
 # --- zero is never a measurement, anywhere -----------------------------------
 
 
-def test_zero_samples_render_as_the_no_data_colour_everywhere():
+def no_data_pixel_at(u: int, v: int) -> bytes:
+    """What the default palette draws at (u, v) where nothing was returned.
+
+    Written out from the checker's definition rather than asked of the palette,
+    so a palette that silently stopped alternating would fail here.
+    """
+    same = (u // NO_DATA_BLOCK) % 2 == (v // NO_DATA_BLOCK) % 2
+    return bytes(NO_DATA_PRIMARY if same else NO_DATA_SECONDARY)
+
+
+def test_zero_samples_render_as_the_no_data_treatment_everywhere():
     raw = make_frame({(50, 50): 40000}, fill=0)
     pixels = depth_to_pixels(raw)
-    no_data_pixel = bytes(DEFAULT_PALETTE.no_data)
     for u in range(FRAME_WIDTH):
         for v in (0, FRAME_HEIGHT - 1):
             if (u, v) != (50, 50):
-                assert pixels[v * FRAME_WIDTH + u] == no_data_pixel
-    assert pixels[50 * FRAME_WIDTH + 50] != no_data_pixel
+                assert pixels[v * FRAME_WIDTH + u] == no_data_pixel_at(u, v)
+    assert pixels[50 * FRAME_WIDTH + 50] not in NO_DATA_PIXELS
 
 
-def test_all_zero_frame_is_entirely_no_data_colour():
+def test_all_zero_frame_is_entirely_the_no_data_treatment():
     pixels = depth_to_pixels(ALL_ZERO_FRAME)
-    no_data_pixel = bytes(DEFAULT_PALETTE.no_data)
     assert len(pixels) == FRAME_WIDTH * FRAME_HEIGHT
-    assert all(pixel == no_data_pixel for pixel in pixels)
+    assert all(pixel in NO_DATA_PIXELS for pixel in pixels)
 
 
-def test_no_data_colour_is_never_a_colour_the_ramp_itself_produces():
-    """The palette's reserved no-data colour must not double as a real reading."""
-    no_data = DEFAULT_PALETTE.no_data
-    for fraction in (0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0):
-        assert DEFAULT_PALETTE.color_for(fraction) != no_data
+def test_a_frame_with_no_returns_is_not_a_featureless_black_field():
+    """The failure this whole treatment exists for: a black panel and no data look alike.
+
+    The physical report of 2026-08-28 was "the preview stopped showing the
+    object" for a capture whose frames really had returned almost nothing. So
+    an all-zero frame must be BOTH: not black anywhere, and visibly patterned
+    rather than one flat colour that could be mistaken for a rendered surface.
+    """
+    pixels = set(depth_to_pixels(ALL_ZERO_FRAME))
+    assert pixels == set(NO_DATA_PIXELS)
+    assert bytes((0, 0, 0)) not in pixels
+    assert len(pixels) == 2
+
+
+def test_render_frame_gives_exactly_what_the_two_separate_calls_give():
+    """One unpack, both answers, and not a value different from the old pair.
+
+    The window and the Tk viewer both draw through :func:`render_frame` now.
+    That is only allowed to be cheaper, never different, so the pair it
+    replaced is the comparison.
+    """
+    raw = make_frame({(3, 4): 12345, (600, 390): 54321, (0, 0): 7})
+    rendered = render_frame(raw)
+    assert rendered.pixels == depth_to_pixels(raw)
+    assert rendered.stats == frame_stats(raw)
+
+
+def test_render_frame_honours_an_explicit_stretch_and_a_custom_palette():
+    raw = make_frame({(1, 1): 20000})
+    custom = Palette(no_data=(1, 2, 3), stops=((0.0, (4, 5, 6)), (1.0, (7, 8, 9))))
+    rendered = render_frame(raw, low=10000, high=30000, palette=custom)
+    assert rendered.pixels == depth_to_pixels(raw, low=10000, high=30000, palette=custom)
+
+
+def test_the_no_data_checker_alternates_at_the_stated_block_size():
+    pixels = depth_to_pixels(ALL_ZERO_FRAME)
+
+    def at(u: int, v: int) -> bytes:
+        return pixels[v * FRAME_WIDTH + u]
+
+    # Inside one block: identical. One block across, or one block down: the
+    # other colour. Both, back to the first.
+    assert at(0, 0) == at(NO_DATA_BLOCK - 1, NO_DATA_BLOCK - 1)
+    assert at(0, 0) != at(NO_DATA_BLOCK, 0)
+    assert at(0, 0) != at(0, NO_DATA_BLOCK)
+    assert at(0, 0) == at(NO_DATA_BLOCK, NO_DATA_BLOCK)
+
+
+def test_no_data_colours_are_never_colours_the_ramp_itself_produces():
+    """The reserved no-data colours must not double as real readings.
+
+    Sampled finely rather than at a handful of points, because the ramp is
+    interpolated and a collision could sit between two convenient fractions.
+    The structural reason it cannot happen is checked too: both no-data greys
+    are exactly neutral, and every colour on the ramp is strongly tinted.
+    """
+    no_data = (NO_DATA_PRIMARY, NO_DATA_SECONDARY)
+    for grey in no_data:
+        assert max(grey) - min(grey) == 0
+    for step in range(1001):
+        colour = DEFAULT_PALETTE.color_for(step / 1000.0)
+        assert colour not in no_data
+        assert max(colour) - min(colour) >= 30
+    for _position, stop in DEFAULT_PALETTE.stops:
+        assert stop not in no_data
+
+
+def test_a_custom_palette_without_an_alternate_keeps_a_flat_no_data_fill():
+    """A palette written before the checker existed renders exactly as it did."""
+    flat = Palette(no_data=(1, 2, 3), stops=((0.0, (9, 9, 9)), (1.0, (9, 9, 9))))
+    assert flat.no_data_alt is None
+    pixels = depth_to_pixels(ALL_ZERO_FRAME, palette=flat)
+    assert set(pixels) == {bytes((1, 2, 3))}
 
 
 def test_a_single_non_zero_pixel_gets_a_real_colour_not_no_data():
     raw = make_frame({(1, 1): 20000})
     pixels = depth_to_pixels(raw, low=10000, high=30000)
-    assert pixels[1 * FRAME_WIDTH + 1] != bytes(DEFAULT_PALETTE.no_data)
+    assert pixels[1 * FRAME_WIDTH + 1] not in NO_DATA_PIXELS
+
+
+def test_every_valid_sample_keeps_the_colour_it_had_before_the_no_data_change():
+    """Hand-computed against the ramp's own stops: only the ZEROS were changed.
+
+    Each code below sits at a fraction of the explicit 10000-30000 window that
+    the ramp answers exactly, so these are the colours the previous renderer
+    produced for the same inputs, written out rather than re-derived from it.
+    """
+    raw = make_frame({(0, 0): 10000, (1, 0): 20000, (2, 0): 30000, (3, 0): 15000})
+    pixels = depth_to_pixels(raw, low=10000, high=30000)
+    assert pixels[0] == bytes((20, 20, 120))  # fraction 0.0
+    assert pixels[1] == bytes((0, 200, 200))  # fraction 0.5
+    assert pixels[2] == bytes((255, 220, 0))  # fraction 1.0
+    assert pixels[3] == bytes((10, 110, 160))  # fraction 0.25
 
 
 # --- percentile stretch: robust to outliers ----------------------------------
@@ -445,13 +552,14 @@ def test_real_frames_render_and_ppm_round_trips(path: Path):
     pixels = depth_to_pixels(raw)
     assert len(pixels) == FRAME_WIDTH * FRAME_HEIGHT
     samples = struct.unpack(f"<{FRAME_WIDTH * FRAME_HEIGHT}H", raw)
-    no_data_pixel = bytes(DEFAULT_PALETTE.no_data)
     zero_index = next((i for i, s in enumerate(samples) if s == 0), None)
     non_zero_index = next((i for i, s in enumerate(samples) if s != 0), None)
     if zero_index is not None:
-        assert pixels[zero_index] == no_data_pixel
+        assert pixels[zero_index] == no_data_pixel_at(
+            zero_index % FRAME_WIDTH, zero_index // FRAME_WIDTH
+        )
     if non_zero_index is not None:
-        assert pixels[non_zero_index] != no_data_pixel
+        assert pixels[non_zero_index] not in NO_DATA_PIXELS
 
     blob = ppm_bytes(raw)
     width, height, maxval, parsed_pixels = _parse_ppm(blob)
@@ -532,7 +640,19 @@ def test_show_after_close_is_refused(viewer: DepthViewer):
         viewer.show(ALL_ZERO_FRAME)
 
 
-def test_show_drops_frames_pushed_faster_than_the_render_budget(viewer: DepthViewer):
+def test_show_drops_frames_pushed_faster_than_the_render_budget(viewer: DepthViewer, monkeypatch):
+    """Two frames one millisecond apart: the second is dropped, not queued.
+
+    The clock is driven by the test rather than read from the machine. What is
+    being asked is the DROP RULE - a frame arriving inside the budget is
+    counted and discarded - and reading the real clock instead makes the answer
+    depend on how long this machine took to colour 256000 pixels through
+    Python and hand them to Tk. On a slow draw the budget has genuinely already
+    elapsed by the time the second frame arrives, so the viewer redraws, which
+    is correct behaviour and a failure of this test.
+    """
+    clock = iter([100.0, 100.001])
+    monkeypatch.setattr(time, "monotonic", lambda: next(clock))
     viewer.show(ALL_ZERO_FRAME)
     rendered_before = viewer._rendered_count
     viewer.show(ALL_ZERO_FRAME)  # arrives well within MIN_RENDER_INTERVAL
@@ -540,10 +660,12 @@ def test_show_drops_frames_pushed_faster_than_the_render_budget(viewer: DepthVie
     assert viewer._dropped_count >= 1
 
 
-def test_show_renders_again_once_the_render_budget_has_elapsed(viewer: DepthViewer):
+def test_show_renders_again_once_the_render_budget_has_elapsed(viewer: DepthViewer, monkeypatch):
+    """...and one that arrives after the budget is drawn. Same driven clock, same reason."""
+    clock = iter([100.0, 100.0 + MIN_RENDER_INTERVAL * 1.5])
+    monkeypatch.setattr(time, "monotonic", lambda: next(clock))
     viewer.show(ALL_ZERO_FRAME)
     rendered_before = viewer._rendered_count
-    time.sleep(MIN_RENDER_INTERVAL * 1.5)
     viewer.show(ALL_ZERO_FRAME)
     assert viewer._rendered_count == rendered_before + 1
 
@@ -558,6 +680,30 @@ def test_clipping_label_is_set_when_a_frame_clips_and_cleared_when_it_does_not(
     time.sleep(MIN_RENDER_INTERVAL * 1.5)
     viewer.show(ALL_ZERO_FRAME)
     assert viewer._clip_label.cget("text") == ""
+
+
+def test_the_window_shows_the_return_health_verdict_beside_the_image(viewer: DepthViewer):
+    """A frame the sensor returned nothing for says so, loudly, next to the picture."""
+    viewer.show(ALL_ZERO_FRAME)
+    text = viewer._health_label.cget("text")
+    assert NO_RETURNS.upper() in text
+    assert "no depth" in text
+    assert viewer._health_label.cget("bg") == "#8a4b00"
+
+    time.sleep(MIN_RENDER_INTERVAL * 1.5)
+    viewer.show(make_frame({(u, v): 5000 for v in range(200) for u in range(600)}))
+    recovered = viewer._health_label.cget("text")
+    assert NO_RETURNS.upper() not in recovered
+    assert USABLE.upper() in recovered
+    assert viewer._health_label.cget("bg") != "#8a4b00"
+
+
+def test_the_window_forgets_its_return_history_when_it_is_closed(viewer: DepthViewer):
+    viewer.show(ALL_ZERO_FRAME)
+    assert viewer._health.frames == 1
+    viewer.close()
+    assert viewer._health.frames == 0
+    assert viewer._health.baseline is None
 
 
 # --- png_bytes: parses back to the right dimensions and pixel values --------
@@ -615,9 +761,14 @@ def test_png_bytes_pixel_values_match_depth_to_pixels():
     assert _png_pixels(png_bytes(raw)) == [(p[0], p[1], p[2]) for p in expected]
 
 
-def test_png_bytes_all_zero_frame_is_entirely_no_data_colour():
+def test_png_bytes_all_zero_frame_is_entirely_the_no_data_treatment():
     pixels = _png_pixels(png_bytes(ALL_ZERO_FRAME))
-    assert pixels == [DEFAULT_PALETTE.no_data] * (FRAME_WIDTH * FRAME_HEIGHT)
+    expected = [
+        tuple(no_data_pixel_at(index % FRAME_WIDTH, index // FRAME_WIDTH))
+        for index in range(FRAME_WIDTH * FRAME_HEIGHT)
+    ]
+    assert pixels == expected
+    assert (0, 0, 0) not in set(pixels)
 
 
 def test_png_bytes_refuses_wrong_size_and_non_bytes():
@@ -802,6 +953,124 @@ def test_stats_json_fps_is_zero_for_the_first_frame_then_positive(
         conn.close()
 
 
+def test_stats_json_carries_the_same_verdict_advice_and_spatial_evidence(
+    running_server: ViewerServer,
+):
+    """The web view must say what the window says about the same frame.
+
+    One pure implementation behind all three front ends is the requirement;
+    this is the page's end of it, checked against the very functions the Tk
+    window and the Qt appliance call.
+    """
+    raw = make_frame({(u, v): 5000 for v in range(10) for u in range(10)})
+    running_server.show(raw)
+
+    conn = http.client.HTTPConnection(running_server.host, running_server.port, timeout=5)
+    try:
+        conn.request("GET", "/stats.json")
+        payload = json.loads(conn.getresponse().read())
+    finally:
+        conn.close()
+
+    expected = frame_stats(raw)
+    assert payload["stats"]["spatial"] == expected.spatial.as_dict()
+    assert payload["stats"]["spatial"]["returned"] == 100
+    assert payload["stats"]["spatial"]["footprint"] == {
+        "left": 0,
+        "right": 9,
+        "top": 0,
+        "bottom": 9,
+        "width": 10,
+        "height": 10,
+    }
+    # 100 returns out of 256000 is far under the severe floor, so this is a
+    # warning, and the page is handed the same two lines the window shows.
+    assert payload["health"]["verdict"] == SEVERELY_SPARSE
+    assert payload["health"]["warning"] is True
+    assert payload["health_summary"] == health_summary(
+        return_health(expected.yield_fraction), expected.spatial
+    )
+
+
+def test_an_empty_frame_reaches_the_web_view_as_no_returns_not_as_a_black_picture(
+    running_server: ViewerServer,
+):
+    running_server.show(ALL_ZERO_FRAME)
+    conn = http.client.HTTPConnection(running_server.host, running_server.port, timeout=5)
+    try:
+        conn.request("GET", "/stats.json")
+        payload = json.loads(conn.getresponse().read())
+    finally:
+        conn.close()
+    assert payload["health"]["verdict"] == NO_RETURNS
+    assert payload["stats"]["spatial"]["footprint"] is None
+    assert "no returns anywhere" in payload["health_summary"]
+
+
+def test_polling_one_frame_repeatedly_does_not_refill_the_baseline_with_copies_of_it(
+    running_server: ViewerServer,
+):
+    """A browser polls twice a second; frames arrive faster. One frame, one entry.
+
+    Without this the window would fill with copies of whichever frame happened
+    to be current, and the baseline a collapse is measured against would become
+    the collapse itself.
+    """
+    running_server.show(ALL_ZERO_FRAME)
+    conn = http.client.HTTPConnection(running_server.host, running_server.port, timeout=5)
+    try:
+        for _ in range(5):
+            conn.request("GET", "/stats.json")
+            payload = json.loads(conn.getresponse().read())
+            assert payload["health"]["verdict"] == NO_RETURNS
+    finally:
+        conn.close()
+    assert running_server._state.health.frames == 1
+
+
+def test_stopping_and_restarting_the_server_forgets_the_previous_runs_history():
+    server = ViewerServer(port=0)
+    server.start()
+    try:
+        server.show(ALL_ZERO_FRAME)
+        conn = http.client.HTTPConnection(server.host, server.port, timeout=5)
+        try:
+            conn.request("GET", "/stats.json")
+            conn.getresponse().read()
+        finally:
+            conn.close()
+        assert server._state.health.frames == 1
+    finally:
+        server.stop()
+    assert server._state.health.frames == 0
+    server.start()
+    try:
+        assert server._state.health.frames == 0
+    finally:
+        server.stop()
+
+
+def test_show_still_does_no_frame_work_on_the_calling_thread(
+    running_server: ViewerServer, monkeypatch
+):
+    """The capture loop must not pay for statistics, colour or a verdict.
+
+    Every expensive function is replaced with one that fails if it is called,
+    so a future change that moved the return-health update into ``show`` -
+    where the capture loop would wait on it - fails here rather than showing up
+    as dropped frames on a scanner.
+    """
+
+    def refuse(*args: object, **kwargs: object) -> object:
+        raise AssertionError("show() did frame work on the calling thread")
+
+    monkeypatch.setattr(viewer_module, "frame_stats", refuse)
+    monkeypatch.setattr(viewer_module, "render_frame", refuse)
+    monkeypatch.setattr(viewer_module, "png_bytes", refuse)
+    monkeypatch.setattr(viewer_module, "spatial_returns", refuse)
+    running_server.show(ALL_ZERO_FRAME)
+
+
 def test_viewer_server_show_refuses_a_malformed_frame(running_server: ViewerServer):
     with pytest.raises(FrameSizeMismatch):
         running_server.show(b"nope")
@@ -824,3 +1093,316 @@ def test_two_shows_bump_the_frame_number_and_do_not_accumulate_a_buffer(
         assert payload["frame_number"] == 2
     finally:
         conn.close()
+
+
+# --- the health window under overlapping requests -----------------------------
+#
+# The server is threaded, and a request takes its snapshot of the published
+# frame outside every lock. Two requests can therefore reach the judgement with
+# snapshots taken in either order. These ask the judgement itself, with the
+# interleaving written out by hand, rather than starting threads and hoping
+# they collide.
+
+FULL_FRAME = make_frame(fill=5000)
+
+
+def _health_for(state, frame_number: int, raw: bytes):
+    """One request's judgement, exactly as the handler makes it."""
+    return viewer_module._ViewerRequestHandler._health_for(state, frame_number, frame_stats(raw))
+
+
+def test_a_stale_stats_request_cannot_rewind_the_health_window():
+    """A request holding frame 1 that overtakes one holding frame 2.
+
+    Round 1 treated only an EQUAL frame number as a repeat, so the stale
+    request wound ``health_frame`` back to 1 and the next frame-2 poll counted
+    frame 2 into the bounded baseline a second time. History must only ever go
+    forwards.
+    """
+    state = viewer_module._ServerState()
+
+    newer = _health_for(state, 2, ALL_ZERO_FRAME)
+    assert state.health.frames == 1
+    assert state.health_frame == 2
+
+    stale = _health_for(state, 1, FULL_FRAME)
+    # Answered from the record, and the record is untouched: no rewind, and the
+    # older frame was not appended after the newer one.
+    assert stale == newer
+    assert state.health.frames == 1
+    assert state.health_frame == 2
+
+    # ...and the poll that used to double-count frame 2 still does not.
+    assert _health_for(state, 2, ALL_ZERO_FRAME) == newer
+    assert state.health.frames == 1
+
+
+def test_the_health_window_still_advances_for_each_genuinely_new_frame():
+    """The guard must not freeze the window; only a repeat or a stale one is refused."""
+    state = viewer_module._ServerState()
+    for number in (1, 2, 3):
+        _health_for(state, number, FULL_FRAME)
+    assert state.health.frames == 3
+    assert state.health_frame == 3
+
+
+def test_a_restarted_server_reports_no_frame_until_a_new_one_arrives():
+    """Stop/start clears the whole published run, not only its health window.
+
+    Round 1 reset the tracker alone, so the previous run's frame, count and
+    timestamps survived: a poll before the restarted run's first ``show`` was
+    answered with the old frame AND seeded the new run's baseline with it.
+    """
+    server = ViewerServer(port=0)
+    server.start()
+    try:
+        server.show(ALL_ZERO_FRAME)
+        assert _stats_payload(server)["frame_number"] == 1
+    finally:
+        server.stop()
+
+    server.start()
+    try:
+        before = _stats_payload(server)
+        assert before["available"] is False
+        assert before["frame_number"] == 0
+        assert "stats" not in before
+        assert server._state.raw is None
+        assert server._state.health.frames == 0
+
+        # The first frame of the new run is the first entry in its baseline -
+        # not the second, behind a frame belonging to the run before it.
+        server.show(FULL_FRAME)
+        after = _stats_payload(server)
+        assert after["frame_number"] == 1
+        assert after["health"]["baseline_fraction"] is None
+        assert server._state.health.frames == 1
+    finally:
+        server.stop()
+
+
+def _stats_payload(server: ViewerServer) -> dict:
+    conn = http.client.HTTPConnection(server.host, server.port, timeout=5)
+    try:
+        conn.request("GET", "/stats.json")
+        return json.loads(conn.getresponse().read())
+    finally:
+        conn.close()
+
+
+# --- one request, one frame ---------------------------------------------------
+#
+# Round 2 took each request's snapshot outside every lock and then answered a
+# stale one from the health record. The bounded window was safe, but the
+# DOCUMENT was not: it could carry frame 1's spatial evidence beside frame 2's
+# verdict. The snapshot and the judgement now happen together, ordered against
+# the other request workers, and these ask for that directly.
+
+
+def _assert_one_frame(payload: dict) -> None:
+    """Every part of an available answer must describe the same frame."""
+    assert payload["available"] is True
+    stats = payload["stats"]
+    assert payload["health"]["yield_fraction"] == stats["yield_fraction"]
+    spatial = stats["spatial"]
+    assert spatial["yield_fraction"] == stats["yield_fraction"]
+    verdict_line, spatial_line = payload["health_summary"].split("\n")
+    assert verdict_line.startswith(payload["health"]["verdict"].upper() + ":")
+    footprint = spatial["footprint"]
+    if footprint is None:
+        assert spatial_line == (
+            f"no returns anywhere in the frame ({spatial['samples']} samples, "
+            f"{spatial['width']}x{spatial['height']})"
+        )
+    else:
+        assert spatial_line.startswith(f"returns {spatial['returned']} of {spatial['samples']}")
+        assert f"columns {footprint['left']}-{footprint['right']}" in spatial_line
+
+
+def test_a_frame_published_mid_analysis_cannot_change_the_answer_being_built(monkeypatch):
+    """The capture thread shows a new frame while a poll is measuring the old one.
+
+    Nothing about the answer in flight may move: it was asked about frame 1 and
+    must describe frame 1 in every field, rather than pairing frame 1's picture
+    with frame 2's verdict.
+    """
+    state = viewer_module._ServerState()
+    state.publish(ALL_ZERO_FRAME, 1.0)
+    real_stats = viewer_module.frame_stats
+
+    def publish_a_newer_frame_first(raw: bytes):
+        # Exactly what ViewerServer.show does, from the capture thread's side.
+        state.publish(FULL_FRAME, 2.0)
+        return real_stats(raw)
+
+    monkeypatch.setattr(viewer_module, "frame_stats", publish_a_newer_frame_first)
+    payload = viewer_module._ViewerRequestHandler._analysed(state)
+
+    assert payload["frame_number"] == 1
+    assert cast(dict, payload["stats"])["returned"] == 0
+    assert cast(dict, payload["health"])["yield_fraction"] == 0.0
+    _assert_one_frame(payload)
+    # ...and the frame that arrived is judged by the NEXT request, once.
+    later = viewer_module._ViewerRequestHandler._analysed(state)
+    assert later["frame_number"] == 2
+    _assert_one_frame(later)
+    assert state.health.frames == 2
+
+
+def test_two_overlapping_request_workers_each_get_a_self_consistent_answer(monkeypatch):
+    """Two polls in flight at once, with a frame arriving between them.
+
+    The first worker is held inside its measurement while a newer frame is
+    published and a second worker starts. The second cannot take its snapshot
+    until the first has finished - that ordering is what stops one worker's
+    verdict being handed to the other's frame.
+    """
+    state = viewer_module._ServerState()
+    state.publish(ALL_ZERO_FRAME, 1.0)
+    real_stats = viewer_module.frame_stats
+    entered = threading.Event()
+    release = threading.Event()
+    analysed: list[int] = []
+
+    def held(raw: bytes):
+        analysed.append(len(analysed))
+        if not entered.is_set():
+            entered.set()
+            assert release.wait(5.0), "the held worker was never released"
+        return real_stats(raw)
+
+    monkeypatch.setattr(viewer_module, "frame_stats", held)
+    answers: dict[str, dict] = {}
+    first = threading.Thread(
+        target=lambda: answers.__setitem__(
+            "first", viewer_module._ViewerRequestHandler._analysed(state)
+        )
+    )
+    first.start()
+    assert entered.wait(5.0), "the first worker never reached its measurement"
+
+    # A frame arrives while the first worker is still inside its answer.
+    state.publish(FULL_FRAME, 2.0)
+    second = threading.Thread(
+        target=lambda: answers.__setitem__(
+            "second", viewer_module._ViewerRequestHandler._analysed(state)
+        )
+    )
+    second.start()
+    second.join(0.3)
+    assert second.is_alive(), "the second worker analysed while the first still held the order"
+    assert analysed == [0], "the second worker took its snapshot before its turn"
+
+    release.set()
+    first.join(5.0)
+    second.join(5.0)
+    assert not first.is_alive() and not second.is_alive()
+
+    assert answers["first"]["frame_number"] == 1
+    assert answers["first"]["stats"]["returned"] == 0
+    assert answers["second"]["frame_number"] == 2
+    assert answers["second"]["stats"]["returned"] == FRAME_WIDTH * FRAME_HEIGHT
+    _assert_one_frame(answers["first"])
+    _assert_one_frame(answers["second"])
+    # One entry per frame: the overlap neither skipped a frame nor counted one
+    # twice.
+    assert state.health.frames == 2
+    assert state.health_frame == 2
+
+
+def test_polling_the_same_frame_again_is_answered_without_measuring_it_again(
+    running_server: ViewerServer, monkeypatch
+):
+    """A browser polls twice a second; the frame is measured once per frame."""
+    measured: list[int] = []
+    real_stats = viewer_module.frame_stats
+
+    def counted(raw: bytes):
+        measured.append(len(raw))
+        return real_stats(raw)
+
+    monkeypatch.setattr(viewer_module, "frame_stats", counted)
+    running_server.show(ALL_ZERO_FRAME)
+    answers = [_stats_payload(running_server) for _ in range(3)]
+
+    assert len(measured) == 1
+    assert answers[0] == answers[1] == answers[2]
+    _assert_one_frame(answers[0])
+
+
+def test_a_request_in_flight_when_the_server_restarts_cannot_touch_the_new_run(monkeypatch):
+    """The handler is HELD across a stop and a start, then let go.
+
+    Its whole request belongs to the run it arrived in, which is a separate
+    object: the restarted run must still have published nothing, judged
+    nothing, and be free to accept its own first frame as its own baseline.
+    The held request is told its run ended rather than being given the new
+    run's - or the old run's - frame as the current one.
+    """
+    server = ViewerServer(port=0)
+    server.start()
+    host, port = server.host, server.port
+    entered = threading.Event()
+    release = threading.Event()
+    real_stats = viewer_module.frame_stats
+
+    def held(raw: bytes):
+        entered.set()
+        assert release.wait(5.0), "the held handler was never released"
+        return real_stats(raw)
+
+    monkeypatch.setattr(viewer_module, "frame_stats", held)
+    server.show(ALL_ZERO_FRAME)
+    stopped_run = server._state
+    answer: dict[str, dict] = {}
+
+    def poll() -> None:
+        conn = http.client.HTTPConnection(host, port, timeout=10)
+        try:
+            conn.request("GET", "/stats.json")
+            answer["payload"] = json.loads(conn.getresponse().read())
+        finally:
+            conn.close()
+
+    worker = threading.Thread(target=poll)
+    worker.start()
+    try:
+        assert entered.wait(5.0), "the handler never reached its measurement"
+        server.stop()
+        server.start()
+        new_run = server._state
+
+        release.set()
+        worker.join(10.0)
+        assert not worker.is_alive()
+
+        # The restarted run is untouched: no frame, no count, no history, no
+        # seeded baseline.
+        assert new_run.raw is None
+        assert new_run.received_count == 0
+        assert new_run.health.frames == 0
+        assert new_run.health_frame == 0
+        assert new_run.latest_payload is None
+        assert server._state is new_run
+        # Separate objects is HOW that is achieved, asserted after the
+        # behaviour it exists for rather than in place of it.
+        assert new_run is not stopped_run
+
+        # Whatever the held handler did, it did to the run it arrived in...
+        assert stopped_run.health.frames == 1
+        # ...and it does not answer for the server that exists now.
+        assert answer["payload"]["available"] is False
+        assert answer["payload"]["stale_run"] is True
+        assert "stats" not in answer["payload"]
+
+        # The new run's first frame is the first entry in ITS baseline.
+        monkeypatch.setattr(viewer_module, "frame_stats", real_stats)
+        server.show(FULL_FRAME)
+        fresh = _stats_payload(server)
+        assert fresh["frame_number"] == 1
+        assert fresh["health"]["baseline_fraction"] is None
+        assert new_run.health.frames == 1
+    finally:
+        release.set()
+        worker.join(10.0)
+        server.stop()

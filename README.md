@@ -16,15 +16,291 @@ scanner3d reconstruct FRAMES_DIR --backend scipy # register and score it
 
 The window shows three things at once: the colour camera for positioning, the depth camera for
 what is actually being captured, and the accumulated model — orbitable, with under-scanned
-surface in soft red. A live readout says whether your rotation speed is in the band that
-registers well.
+surface in soft red and the frame that has just arrived lifted towards white on top of that. A
+live readout says whether your rotation speed is in the band that registers well.
+
+**A depth frame the sensor returned nothing for no longer looks like a broken panel.** Raw code 0
+means "no depth for this pixel" and is still excluded from the stretch, the statistics, point
+preparation and reconstruction — nothing is filled in, interpolated or smeared. It is now DRAWN as
+a coarse neutral-grey checker instead of flat black, which the depth ramp can never produce, and
+every valid sample keeps exactly the colour it had. Beside the picture, a bounded return-health
+line says which of `no returns`, `severely sparse`, `collapsing` or `usable` this frame is, names
+the emptiest quadrant and the footprint of what is left, and asks you to slow down, re-aim for
+more face-on overlap, or go back to where the surface was still showing. It never names a cause
+the raw bytes cannot support, it is advisory only — it accepts no frame and stops no capture — and
+its history is a fixed 15 frames that resets between runs. The same verdict reaches the standalone
+Tk window and the local HTTP view. On the capture that prompted this, returns fell from 24.02% of
+the frame to 3.60% and collapsed to the left of the sensor; that black region is raw evidence and
+a remaining optical limitation, not a proved defect. See
+[docs/return-health.md](docs/return-health.md).
+
+The model panel draws **the points while the scan is still running**, and offers a lit surface
+beside them as an experimental preview you tick on. Every accepted frame is folded into one voxel
+occupancy grid — a set union, so a frame costs the frame and is then forgotten — and the grid is
+marched every few alignments: measured on this machine at 0.32 s over 254k cells and 1.30 s over
+the 1M cells it is allowed at most, against the ~0.7 s each frame already costs. A refresh that
+expensive is then held off until the stream thread has had three times as long to itself, so the
+capture keeps the thread.
+
+The cell edge is measured from the scan's own point spacing rather than chosen, and the panel says
+what it is. It is never made coarser to keep the picture affordable: an object that outgrows the
+live budget **loses its surface rather than its resolution**, with the cell size, the grid it
+would have needed and the budget said beside the coverage numbers, and the panel falls back to the
+points. A coarser preview is not a cheaper version of the same shape — the occupancy surface
+stands as much as a voxel outside its samples, so doubling the edge doubles that error and
+swallows thin features.
+
+**The points are the view the panel opens on**, and the surface checkbox is off until you ask for
+it. That is a decision from the scans themselves: capture 20260827-152842 held its finest cell
+edge over 116 frames and never coarsened, and the surface still read as lumpy where the dots read
+as clean. An occupancy cell joins the surface when its neighbours are occupied, so what is marched
+is faceted at the cell size, stands as much as a cell outside the samples, and draws a small
+disagreement between two accepted poses as solid shape. The preview stays because it answers
+“what shape has this become” faster than a cloud does, not because it is the more trustworthy
+picture. Its cells were also placed by the poses accepted **as the scan ran**, and no pose
+correction reaches back into them.
+
+**Reconstruct no longer calls that mesher.** It registers every frame, then fuses a *truncated
+signed-distance field* from the raw frames at the corrected poses and marches its zero level set,
+so its surface **passes through** the samples instead of wrapping the cells they filled. Measured
+against a synthetic sphere of known radius, with both methods given the same 1.04 voxel: the fused
+surface sits 0.032 from the true radius where the occupancy boundary sits 0.747 — a 23x smaller
+median error, and 9x smaller in RMS. It also stops where the evidence stops rather than closing
+over a side nobody looked at, so an open mesh there is a report about the capture. That is
+synthetic evidence about the arithmetic, not a measurement of the scanner. The live preview above
+is still the occupancy mesher and still stands outside its samples; the two are no longer the same
+surface, and only the exported one is fitted. Coverage — the red “still needs scanning”
+colouring — is measured on the points, so it is shown there.
+
+**Each preview now says on screen what it is, without being hovered.** Under the depth image, a
+fixed line states that the picture is raw sensor depth codes, that the grey checker is *no
+return* rather than a near or far reading, and that no completion, filling, smoothing or
+carry-over is applied — and it names no distance unit, because the codes establish none. Under the
+model, one line describes whichever picture is actually mounted in the viewer: the dots are
+**measured depth returns** whose placement depends on the calibration and on this scan's pose
+estimates, and whose cloud is sampled and thinned for display — one sentence that is true of the
+live preview and of a completed registered reconstruction alike. The panel has **two** surfaces
+and it no longer describes them with one sentence. While a capture runs, the shell is a **derived
+occupancy surface, not measurement**, with its triangle count and cell edge, marched from the grid
+the poses accepted during capture were folded into. Once Reconstruct has run, the same checkbox
+draws the surface it exported, and the panel says what that is: a **derived signed-distance (TSDF)
+surface, not measurement**, with its own triangle count and voxel size, fused from the captured
+full-resolution frames at the **corrected** poses. Which one it is comes from the producer that
+built the mesh — never from the note beside it, the re-framing, the checkbox or a default — and
+the same value drives the line, the coverage summary and the control's own title and tooltip, so
+they cannot contradict each other. A published surface that does not say which it is is refused
+rather than drawn under a guess. It follows the mounted
+picture rather than the checkbox, so a preference for a surface that cannot be drawn is answered
+with the points and says so; it moves with every toggle, arrival, withdrawal and restoration; a
+new scan never opens on the last scan's triangle count; and a GPU-to-software fallback carries it
+across with the model. The three modules that can invent or weigh invented samples —
+`scanner3d.depth_completion`, `scanner3d.depth_temporal` and `scanner3d.tsdf_input` — remain
+offline evidence and are reached by no GUI, capture, tracker, preview, fusion or export path. See
+[docs/preview-provenance.md](docs/preview-provenance.md).
+
+Every frame is also checked for **isolated points** before it registers. A stray sample — a
+flying pixel at a depth edge, a multipath return — deprojects into a coordinate as confidently as
+real surface does, pulls on the fitted pose, and draws as a dot floating around the object. A
+point is dropped when fewer than three others of its own frame lie in the block of grid cells
+around it, on a grid sized from that frame's own measured spacing. On synthetic frames that
+removes essentially every stray further than two spacings from real surface and costs 1–3% of the
+real points — rims, grazing faces, the last samples before an edge — and it cannot tell the two
+apart. It rejects isolation, not error: a dense cluster of wrong points survives it intact.
+
+**Pause** lets you pick the object up mid-scan and carry on into the same capture. A turntable
+reaches about two thirds of an object; the rest is whatever it is standing on. While paused the
+camera views keep running so you can frame the new position, and nothing at all is recorded — no
+file, no count, no pose, no model update. The button says **Resume** while the capture is
+actually paused, and goes back to saying Pause the moment it is not. Pressing Resume does *not*
+simply carry on: the next few frames are held in memory, out of the scan entirely, while the
+scanner works out where the object has moved to by matching them against surface it has already
+scanned. That decision is a global search followed by named, conservative gates — the coarse
+search separating its best orientation from the runner-up, overlap, residual against the measured
+noise floor, matched and used fractions, a margin over any genuinely different placement, and
+agreement from every held frame rather than a flattering union score — and until all of them
+clear, the held frames stay held and the panel says which gate is failing. The first of those is
+a refusal nothing measured afterwards can overturn: a shape the coarse search cannot tell the
+orientation of is a shape that sits several ways on the model, and refining an ambiguous start
+picks one of those placements rather than distinguishing them. Move back over a part you have
+already scanned — and a part that does not look like every other part of the object — pause and
+reposition again, or Stop; everything written before the pause is safe either way. When the gates do clear, the held frames and a `bridge.json` recording
+the transform, its evidence and every threshold appear together in one `segment-0001/` directory
+in a single atomic rename, and the model updates immediately. Reconstruction — window and CLI
+alike — reads that record and uses the recorded transform at the seam instead of aligning a pair
+that is not a small step apart, says so in the report, and names it in `reconstruction.json`.
+Striding a repositioned capture strides within each segment, so a boundary can never be strided
+away. Captures with no pause in them are read, registered and exported exactly as before.
+
+**Tracking loss** is the other kind of break: the one nobody asked for. On 2026-08-28 a capture
+aligned 51 frames, failed on the 53rd, and then failed on every frame after it for two minutes —
+while the previews kept moving, the counter kept climbing and the model simply stopped changing.
+It wrote 120-odd more frames that looked, on disk, exactly like frames that had aligned. Three
+*consecutive* selected frames that cannot be placed — alignment failed, or the frame yielded no
+usable cloud, or preparing that cloud raised — now end that: the capture says `TRACKING LOST`, names the
+frame the model is frozen at, disables Pause (which places new frames against the accepted model,
+and that is what has broken) and tells you Stop is the safe action. A single success resets the
+streak, so an isolated dropout costs nothing. Nothing further is written, counted, posed or
+drawn; the previews and Stop stay live. Every frame already written stays untouched, and one
+`tracking-loss.json` — written into the run that actually lost tracking — records the last aligned
+frame, the failing frames, the captured failure messages, and that nothing bridges the gap:
+completely or not at all, never overwritten, and never claiming the projector, camera or object
+supplied the verdict. If it cannot be written the capture stops just the same but never claims the
+loss it could not record: it says there is no record in the folder and fails loudly, rather than
+leave an unmarked broken folder.
+
+**Recovery from a loss is automatic, bounded and evidence-gated.** Once the record is durable the
+capture enters `recovering_tracking`: it holds a few frames back in memory — none written, none
+counted, none drawn — and looks for the model it had already accepted, using exactly the pause
+path's strict relocalization, ambiguity margin, overlap, residual and attempt/time/size ceilings.
+Nothing is relaxed to make it succeed. If it clears every gate, one `segment-*` directory appears
+atomically holding the held frames, the bridge and a `recovery` record binding it to that loss by
+the record's own SHA-256 and by each excluded frame's — checked against the record as it stands on
+disk at that moment, never against a stale copy of it; the window says how many frames were left
+out, and scanning carries on. The frames written while tracking was lost stay exactly where they
+are as raw evidence and never rejoin the scan, and the capture's ending counts them apart from the
+frames that are reconstructable. If the bounded search cannot place them — including a search still
+running when its time is up, and one that comes back accepted only after that deadline, both
+abandoned rather than waited for or applied — nothing is written and the loss simply stands. Reconstruction — window and CLI alike, through the one reader —
+hands over a recovered capture with the seam marked as a boundary and the exclusions stated, and
+refuses one whose loss nothing closes: presence, order or a plausible-looking bridge never close a
+loss, and a refusal is better than a guessed pose. See
+[docs/tracking-loss.md](docs/tracking-loss.md).
+
+**A reconstruction that cannot be evidence is refused rather than published.** A lost capture is
+only one of the ways a scan can come out looking exactly like a scan. Forty frames taken from one
+place register perfectly against each other; a million points from one angle know one silhouette;
+a fused surface three truncations away from the points it was built from is topologically
+flawless and opens in any viewer. So the window, `scanner3d reconstruct` and the export function
+itself now share one schema-versioned readiness result that checks four things — the capture's own
+durable tracking state, whether the accepted poses describe a scan, whether the occupied surface
+was seen repeatedly and from a spread of directions, and whether the fused surface agrees, in both
+directions, with a bounded sample of the full-resolution frames the volume was actually fused from
+rather than with the decimated clouds the registration was fitted to — reports *every* failed gate
+with the evidence and one
+actionable sentence each, and refuses before a byte of field is allocated. Legitimate scans stay
+possible: an orbit that returns to its starting view, a scan the operator paused, a validated
+recovery and an open one-sided surface all pass, watertightness is never required, and none of it
+is an accuracy claim. A refusal leaves no cloud, no mesh, no manifest and no staging directory. See
+[docs/reconstruction-readiness.md](docs/reconstruction-readiness.md).
+
+**Every frame is placed by agreement between independent references, not by one alignment
+against its neighbour.** Chaining each frame to the one before it is right for a slowly turning
+object under a fixed scanner and wrong for a scanner carried round a chassis: individual views go
+weak — one flat panel determines no rotation about its own normal, and point-to-plane alignment
+reports that as a small residual for a transform that slid — and nothing corrects the chain, so
+every pairwise error is permanent and invisible from inside it. So each ordinary frame now gets up
+to three independent candidate placements: the previous accepted frame, a keyframe chosen for its
+viewpoint, and a bounded sample of the accepted model in model coordinates. Each is judged on
+finiteness, convergence, residual, matched and used fractions — the same gates and the same
+function the relocalization's own chain uses — plus overlap with the reference it was scored
+against and the distance the placement moves the surface. A pose is taken only where the survivors
+AGREE; where two of them place the frame materially differently the frame is refused rather than
+resolved by picking the smaller residual, and where one reference is all there is, every gate holds
+on its own. Keyframes are chosen from measured motion and novelty, never from frame number, so a
+scanner left pointing at one spot cannot fill the set with twelve copies of one view. Every solve is a refinement from a
+stated starting pose, and the tracker keeps one constant-velocity estimate — the step between the
+last two accepted frames — so that starting pose is where the scanner was *plus how it was moving*
+rather than the assertion that it did not move at all. That prediction seeds the keyframe and model
+solves for free, and buys the previous frame one bounded second attempt where its first produced no
+placement; it widens no gate, and the identity-seeded attempt stays first so the offline
+reconstruction can still pre-fit every adjacent pair across worker processes and reach the identical
+chain. Measured at 30 degrees a frame, well past the speed the capture guidance already calls too
+fast: all 16 frames placed within 2.32 degrees, where the identity seed alone refuses at frame 7.
+Everything is
+bounded — three solves a frame, four where that retry runs, twelve keyframes, eight frames and 1800
+points per model reference, thirty-two clouds retained — so frame 900 costs what frame 9 did. A refused frame appends no pose
+and mutates nothing; live it enters the existing three-frame loss streak with the tracker's own
+account of what each reference said, and `scanner3d reconstruct` refuses the whole sweep by frame
+index rather than skipping the frame or manufacturing a pose for it. Measured on a synthetic
+24-frame walk around an asymmetric object, blind chaining drifts to 1.60 degrees while this holds
+0.58, and the gap grows with the sweep. See [docs/tracking.md](docs/tracking.md).
+
+**Frame spacing can be decided while the capture runs, rather than typed in before it.**
+"Use 1 frame in every N" is the one capture setting whose right value is a property of how fast the
+scanner happens to be moving at that moment, and neither end of a fixed value is harmless: set for a
+brisk sweep it wastes a slow one, where frames a fraction of the noise floor apart measure noise
+rather than motion — the *slowest* row of the measured drift table is among its worst — and set for
+a slow sweep it loses a brisk one outright. Tick "hold spacing" and the number becomes a starting
+point: the capture moves it between 1 and 10 to hold the measured travel inside the same band the
+travel readout already shows, going finer on one over-band frame and on any frame the tracker
+refused, and coarser only after three slow ones in a row. It is deliberately not a fix for tracking
+loss — its whole range is your own setting down to 1, which you can also just set yourself — and it
+is off by default, because a capture spaced by a number you typed is one you can reason about
+afterwards. The stream selects by a countdown of deliveries rather than a modulo of the frame index,
+so a spacing that changes mid-run cannot make the phase jump, and the run's record carries the span
+it actually used rather than one number that was never true throughout. See
+[docs/frame-spacing.md](docs/frame-spacing.md).
+
+**The turntable is removed from every frame before it is registered — and before it is fused.**
+A stationary bed is a
+large, strongly planar patch that pairwise registration is happy to explain the next frame by
+leaving in place — which is why an object can freeze on screen while it is plainly turning, or
+fuse into a bed-shaped blob. One deterministic plane is fitted per frame and only the narrow band
+of points lying in it is removed, and only when every one of a set of independent gates agrees it is a
+surrounding support surface rather than a face of the object. It is not a crop, a half-space, a background
+subtraction or a hand remover, it assumes no direction is up, and a large flat chassis surface is
+deliberately kept whenever the evidence is ambiguous — losing a bed costs one frame, removing a
+panel costs the scan. The window and `scanner3d reconstruct` prepare frames through the same
+function, in the same stated order, and both report how many frames the plane was removed from,
+how many points were kept, and how many frames kept their whole cloud and why.
+
+The exported mesh is fused from the **full-resolution** frames rather than from those clouds, so
+for each frame the filter applied to, the same band is also masked out of an in-memory copy of
+that frame before fusion — otherwise the bed would be gone from the poses and still in the PLY.
+A frame the filter withdrew on is fused exactly as it was captured, and `frame_NNNN.raw` on disk
+is never written to. Nothing is claimed about a physical scan until the owner runs one. See
+[docs/support-plane.md](docs/support-plane.md).
+
+**Reconstruct + export** turns a capture into files. You pick the folder of captured frames to
+read — the input — and every frame in it is registered and then written into a *new* folder
+inside it: `registered_cloud.ply`, `mesh.ply`, `mesh.obj` and a `reconstruction.json` naming all
+three with their byte counts and SHA-256s, the registration result, the mesh's measured
+watertightness, the voxel resolution and how it was derived, the axis convention, and everything
+none of it establishes. The files are staged in a hidden sibling directory, read back and matched
+against their own digests, and only then published under their final name in one atomic rename —
+so a cancelled or failed run leaves no folder that looks like a result, and a second
+reconstruction of the same capture makes a second folder rather than touching the first. The
+model reaches the screen only once the export has succeeded.
+
+Everything shown and everything written is in one right-handed **upright** frame: the depth
+camera's optical frame counts +y down the image, so scanner3d rotates it a half turn about x —
+a proper rotation that changes no length or scale — before showing or exporting it, and states
+that mapping in the record so a consumer can undo it exactly. The model view orbits on an
+accumulated rotation rather than a clamped yaw and pitch, so it turns all the way over and round
+without a pole to stop at; left-drag turns, shift+left-drag rolls, middle-drag pans, the wheel
+zooms.
+
+The model is drawn by the **graphics card**. The points and their colours are uploaded once, when
+the model changes, and turning it costs a 4x4 matrix and one draw call rather than a fresh
+CPU projection, depth sort and full-window raster per mouse event — measured on this host at
+0.114 ms to submit a camera-only frame of 60,000 resident points, against about 8.8 ms of
+GUI-thread projection, sort and canvas for the same cloud before. Repaints are paced to the
+display and rapid mouse events coalesce onto the newest camera state, so a fast pointer drops
+duplicate frames rather than accumulating work behind itself; nothing is lost, because every event
+is applied in full and only the drawing of positions nobody could have seen is skipped. Occlusion
+comes from a depth buffer instead of the sort, and every other meaning — which way up, which face
+is in front, the coverage colours, the newest-frame highlight, the framing rules, the point
+ceiling — is shared with the software renderer rather than restated, and held to it pixel for
+pixel by the tests.
+
+If OpenGL is missing or the context, shader or buffers fail, the viewer **falls back to the
+software renderer in place**, keeping the model it was showing and the pose you dragged to,
+and says why in the log and under the picture. Which renderer is live is always named there —
+with the driver's own vendor and version string, so "is this actually using my card" has an
+answer that is not an assumption.
 
 All three keep moving *during* a capture, not only before one. Colour is pumped alongside the
 depth stream — the RGB camera returns nothing unless depth is already streaming, so it starts on
-the first delivered depth frame and stops with that stream. The accumulated model is rebuilt from
-a fixed number of frames sampled across the whole sweep rather than from every frame so far, so a
-rebuild late in a scan costs what an early one did, and the saved-frame counter beside it always
-describes the model actually on screen. Every one of those views crosses to the window through a
+the first complete depth delivery and stops with that stream. The depth view shows **every**
+complete delivery whatever `decimate` is set to; only the saving, deprojection and alignment are
+thinned, because how often a picture reaches a screen and how often a frame is written are
+different questions. The accumulated model is rebuilt every four successful alignments — about
+2–3 seconds at the measured kept-frame rate — from a fixed number of frames sampled across the
+whole sweep rather than from every frame so far, so a rebuild late in a scan costs what an early
+one did, and the saved-frame counter beside it always describes the model actually on screen.
+The view frames itself only at a boundary — a new capture, a registered reconstruction — so an
+update that adds a frame reads as growth instead of being rescaled back to the same apparent size
+with your own pan and zoom discarded. Every one of those views crosses to the window through a
 one-slot channel that keeps the newest payload and discards superseded ones, so a busy window
 skips rather than falling further behind. None of this touches what is recorded: every frame is
 written to disk whole, and `reconstruct` reads all of them at full fidelity.
@@ -57,6 +333,14 @@ vendor and were established here:
   (−0.51%). Accuracy across the range is **not** established: −0.49% to −2.26%, no correction model.
 - The device **re-enumerates on the USB bus every time a depth stream closes**, disappearing for
   about 0.39 s. Anything reopening immediately sees "no such device".
+- **Coming back is not the same as being usable.** Observed on 2026-08-26: a wait that checked only
+  for enumeration returned in 0.003 s, the open that followed failed `EACCES` on `/dev/video0`, that
+  node had been created in the same second, and inspected afterwards it was `root:video 0660` with a
+  valid per-user ACL — this account is not in `video`, so that ACL is what makes it openable. No
+  access snapshot was taken at the failing open, so "the ACL had not been attached yet" is the
+  inference those observations support, **not** a proven timing. What is fixed does not rest on it:
+  readiness is now "the resolved index-0 depth node exists AND is readable AND is writable", never
+  "a scanner is enumerable" and never a fixed `/dev/videoN`.
 - The **RGB camera delivers nothing on its own** — a lone capture times out — but returns frames
   reliably while a depth stream runs. The vendor's depth-first ordering is a requirement.
 - The full factory calibration set is readable over the vendor's own file-read protocol, including
@@ -84,6 +368,12 @@ capture command would write right now.
 The scanner serial is read from `SCANNER3D_SERIAL`, then the config file (`serial` under
 `[scanner]`), then the single attached device. It refuses to guess when several are attached,
 because several operations here detach kernel drivers.
+
+`SCANNER3D_VIEWER` chooses the 3D renderer: `software` forces the CPU one (the way to find out
+whether a display problem is the driver's or this application's), `opengl` demands the graphics
+card and reports it prominently if it still has to fall back, and anything else — including
+leaving it unset — prefers the card and falls back automatically. It never stops the application
+from opening.
 
 The captures directory is read from `SCANNER3D_CAPTURES_DIR`, then the config file (`directory`
 under `[captures]`):
@@ -184,10 +474,375 @@ Every gate runs offline and needs no hardware.
 | Lint | `.venv/bin/ruff check .` |
 | Types | `.venv/bin/mypy` |
 | Tests | `.venv/bin/pytest` |
+| Reconstruction quality harness | `.venv/bin/python -m tests.quality_harness --out quality-harness-report.json` |
+| Depth-completeness benchmark | `.venv/bin/python -m tests.depth_completeness_harness --out depth-completeness-report.json` |
+| Surface regression oracle | `.venv/bin/python -m tests.surface_oracle_harness --out surface-oracle-report.json` |
 
 `ruff format .` rewrites files in place. The test suite is fixture-driven: it synthesizes fake
 `sysfs`/`dev` trees and replays a recorded byte-for-byte configuration descriptor from the real
 scanner, so it passes with no device attached and never touches hardware.
+
+Every push and pull request runs all of these gates on GitHub-hosted Linux runners, from
+`.github/workflows/ci.yml`, as five parallel jobs: **Static quality** (format, lint, types),
+**Offline test suite** (pytest), and the three named CPU correctness oracles — **Reconstruction
+quality harness**, **Depth-completeness benchmark** and **Surface regression oracle**. The three
+oracles are separate jobs because they measure different evidence and each keeps its own report: a
+geometry regression, a depth-completion regression and a fused-surface regression are different
+facts, and none of them is an ordinary test failure. Ordinary pytest already runs all three
+corpora for real — the surface oracle's twice, once through its harness tests' module-scoped
+report fixture and again through the determinism test that reruns and compares — so the named jobs
+are there for a per-oracle status and a retained report rather than to cover a gap in the suite.
+All three upload their JSON **even when they fail**, under distinct artifact names
+(`quality-harness-report`, `depth-completeness-report` and `surface-oracle-report`). CI reads the
+repository and runs the commands above on the same CPython 3.14 and the same locked environment
+(`uv sync --frozen --extra dev`); it has no scanner attached, publishes nothing outside the run,
+and is CPU-only. Every backend the oracles select is a CPU implementation over committed synthetic
+truth — the pure-Python references throughout, except the surface oracle's one shipped-policy arm,
+whose roughly two-million-voxel field is past the pure-Python ceiling and runs on the numpy CPU
+backend — so no GPU is needed and an accelerator would add a different execution path without
+improving the correctness evidence. Every job is bounded: 60 minutes for the offline suite, which
+measures about 29.5 minutes locally and may be slower on a hosted runner, and 20 minutes for the
+surface oracle, about six times its measured 3:11.
+
+**What pytest already runs** is `tests/`, exactly as configured in `pyproject.toml` — including
+`tests/test_quality.py`, which proves the measurement primitives in Python, and
+`tests/test_quality_harness.py`, which proves the harness below fails when it should, and
+`tests/test_depth_completeness.py` and `tests/test_depth_completeness_harness.py`, which do the
+same for the depth-completeness benchmark, and `tests/test_surface_oracle.py` and
+`tests/test_surface_oracle_harness.py`, which do the same for the surface oracle. Each of those
+`*_harness` modules runs its committed corpus for real, so the ordinary suite exercises all three
+corpora — and the surface one twice, since its determinism test reruns it. pytest does **not**
+collect
+`tests/quality_harness.py`, `tests/quality_replay.py`, `tests/readiness_replay.py`,
+`tests/preview_health_replay.py`, `tests/build_quality_fixtures.py`,
+`tests/depth_completeness.py`, `tests/depth_completeness_harness.py`,
+`tests/build_depth_completeness_fixtures.py`, `tests/surface_oracle.py`,
+`tests/surface_oracle_harness.py`, `tests/build_surface_oracle_fixtures.py`,
+`tests/surface_oracle_replay.py`, `tests/shell_discriminant.py`,
+`tests/shell_discriminant_harness.py`, `tests/build_shell_discriminant_fixtures.py`,
+`tests/shell_discriminant_replay.py` or `tests/tsdf_benchmark.py`: those are commands and
+libraries, not tests.
+
+`tests/test_shell_discriminant.py`, `tests/test_shell_discriminant_harness.py` and
+`tests/test_shell_discriminant_replay.py` do for the observable-shell discriminator what those
+pairs do for the other three corpora: the first holds the fast contract tests and the truth-leakage
+controls and needs no corpus, the second holds sixteen corpus controls, one control over the
+trusted rebuild's cache key, sixty-seven adverse derived-logic controls over a small built report,
+and — after running the committed population once through a module-scoped fixture —
+twenty-three adverse controls that mutate the real published artifact and hand it to the public
+strict reader, and the third holds the read-only contract of the physical replay. That
+fourth corpus is **not** a CI job and none was added — the workflow's five jobs are unchanged — so
+it is exercised only by ordinary pytest, which it makes measurably longer; the handoff report
+records the measured cost.
+
+**What the harness adds** is the fixture corpus itself, run as a command and leaving one artifact.
+It loads `tests/fixtures/quality/cases/` through strict validation, runs the real
+`scanner3d.quality` measurements and the real `scanner3d.reconstruction_readiness` reader over it,
+and writes one strict-JSON report naming every case, every gate and every expected-versus-observed
+outcome. Exit `0` means every case produced exactly the outcome its fixture declares; `1` means at
+least one did not; `2` means the corpus could not be run at all. A case whose measurement raises is
+recorded as malformed and the later cases still run, so the report preserves all of them. The CI
+job prints the whole report to its log and uploads the JSON **even when the harness fails**, which
+is the run whose report matters.
+
+Read a published report back with `tests.quality_harness.read_report`: it parses the text strictly
+— duplicate JSON keys and `NaN`/`Infinity` included — and recomputes every verdict, count and
+mismatch from the evidence beside it rather than trusting what the report says about itself. The
+requested `--out` path is cleared before the run, so a failed invocation leaves no file there
+rather than the previous run's report.
+
+The artifact is at **report schema version 2**. Every embedded measurement is held to the exact
+schema of its own kind, and every gate carries a `gate_bindings` entry naming the measurement and
+path its value came from, which the reader resolves and compares — so a measurement changed while
+its gate was left alone is refused rather than believed.
+
+Deliberately bad fixtures are the load-bearing part: a case declared to fail names *which* gates
+must fail, so an unexpected pass, a missing expected failure and an extra failure are all harness
+failures. "Something failed" is not the expected failure. Two runs over an unchanged corpus produce
+byte-identical JSON, so no duration and no machine identity appears in it.
+
+This is a CPU correctness oracle. The default compute backend is the pure-Python reference and the
+whole corpus takes well under a second, so a GPU runner would change how fast the answer arrives,
+not what the answer is — see [docs/quality-harness.md](docs/quality-harness.md).
+
+### Reconstruction quality
+
+`scanner3d.quality` judges a reconstruction against geometry that is known, rather than against
+whether the dots look right. It measures pose error against exact truth, symmetric
+observed-to-reference *and* reference-to-observed surface agreement, flatness of a region the
+caller names, named dimensions and landmarks against truth the caller supplies, and re-judges a
+recorded relocalization bridge under today's policy. It owns no notion of "good": every threshold
+is passed in at the call site, in the same unit as the measurement, with the action a failure
+implies.
+
+The fast tier is `tests/test_quality.py` — pure CPU, no GPU, no display server, 0.84 s measured —
+together with the shipped fixture corpus the harness above runs. The physical replay tier is opt-in
+and read-only, and stays non-gating until independent truth has been measured:
+
+```bash
+.venv/bin/python -m tests.quality_harness         # the shipped fixture corpus, gating in CI
+.venv/bin/python -m tests.quality_replay          # the shipped turntable fixture, reported not gated
+.venv/bin/python -m tests.build_quality_fixtures  # regenerate the corpus, then read the diff
+```
+
+See [docs/quality-harness.md](docs/quality-harness.md) for what each tier proves, why held-out
+closure and surface agreement answer different questions, and what has to be measured physically
+before the physical tier can gate anything.
+
+### Depth completeness
+
+`tests/depth_completeness.py` and its harness are the oracle for the depth-completion work that
+follows: they implement no completion and exist so that a denser depth result cannot be called an
+improvement if it bridges a depth edge, closes a real gap, moves a dimension, roughens a plane,
+invents geometry in empty space, degrades tracking, or reports a reconstructed sample as a camera
+measurement.
+
+Every sample carries one of exactly four provenance states — `measured`, `spatially_reconstructed`,
+`temporally_reconstructed`, `missing` — with confidence carried separately and named support
+(`frame:<i>:pixel:<u>,<v>`) required for every reconstructed sample and resolved against the input
+frames. Fifteen refusals reject a result whose own account of itself does not hold, and a refused
+result is not scored at all. The strict reader derives which optional measurements a report must
+carry rather than believing it — including whether a completion reports what its run cost, which
+follows from the candidate's own closed identity, so the work block cannot be deleted along with
+its gate to dodge the bar.
+
+```bash
+.venv/bin/python -m tests.depth_completeness_harness          # eight scenes, twenty-one candidates
+.venv/bin/python -m tests.build_depth_completeness_fixtures   # regenerate the corpus, then read the diff
+```
+
+Eight committed scenes — a fronto-parallel plane with and without dropout, an oblique plane, a
+curved surface against empty space, a foreground/background depth step, a narrow slot that must
+stay open, a paired small dropout and true aperture whose local input bytes are identical, and an
+asymmetric multi-view object with exact poses — are run against one set of gates
+by many deliberately bad candidates, including nine corruption controls that must each earn one
+exact refusal. A dense nearest-neighbour fill **passes** on the constant-depth plane, where it is
+right, and fails on every other geometry: the oracle refuses invention, not density. Measurements
+come from the real `scanner3d.quality`, `scanner3d.tsdf`, `scanner3d.tsdf_surface` and
+`scanner3d.tracking`; the fixtures commit the scene and the SHA-256 of every frame it renders
+rather than the frames themselves, and the harness refuses a case whose frames do not hash to what
+its fixture says.
+
+Everything it measures is synthetic truth. See
+[docs/depth-completeness-benchmark.md](docs/depth-completeness-benchmark.md) for what the benchmark
+proves, what the one recorded capture only suggests, and the acceptance gates a completion has to
+meet.
+
+### The raw-points versus fused-surface oracle
+
+A third deterministic corpus — run by ordinary pytest, by the command below, and in CI as its own
+named job — answering why the fused surface looks lumpier and less complete than the measured
+dots:
+
+```bash
+.venv/bin/python -m tests.surface_oracle_harness --out surface-oracle-report.json
+.venv/bin/python -m tests.build_surface_oracle_fixtures   # regenerate the corpus, then read the diff
+.venv/bin/python -m tests.surface_oracle_replay           # the physical companion, strictly read-only
+```
+
+Seven exact-truth multi-view scenes — an exact control plus bounded zero-mean depth noise,
+localized outliers, structured no-return bands, translational and rotational pose error, and all of
+them at once — hand the **same raw frames and the same poses** to the unchanged measured point
+cloud and to the unchanged `scanner3d.tsdf` field meshed by the unchanged
+`scanner3d.tsdf_surface`, at each of six predeclared parameter cells **and at the resolution the
+shipped Reconstruct policy actually chooses** (about 0.035 here, against a finest declared cell of
+0.10). Eight corruption controls run beside them, each earning one named refusal.
+
+Accuracy is measured against the **object**, in closed form, and never against the sensor's own
+returns; proximity to those returns is published separately as measurement support and is never
+called accuracy. The mesh is measured **as a surface** rather than as a point list: a fixed
+equal-area barycentric lattice inside every emitted triangle, plus an edge census, shell
+decomposition and
+Euler characteristic — because vertices and field zero crossings sit on the same grid edges and
+cannot reveal a triangle spanning a gap or a shell sealing an unmeasured region.
+
+**The extractor is not the cause.** The fusion-versus-extraction ablation puts
+`extraction_p95_delta` between −0.027 and +0.009 on every fused arm with no vertex unsupported by
+its own field, and at the shipped resolution the exact control's mesh is inside tolerance of the
+object at every vertex and every triangle interior. Fusion beats the dots on analytic accuracy on
+both cases carrying zero-mean noise. Edge bridging is uniquely a pose failure and vanishes at the
+shipped resolution. What survives there is watertight shells nothing measured — six on the
+combined case, one under outliers — invisible to every distance summary and every point-linkage
+lump count. Scored against the object as well, they do **not** mean the same thing: the six on the
+combined case are analytically correct surface nothing happened to measure (worst 0.125 against a
+0.15 tolerance), and only the outlier case's shell is false (0.303). Support and truth are
+published as separate, joint evidence for exactly this reason.
+
+The recommendation is therefore to **keep delivering the dots** and to make **no product change**.
+An earlier revision's "prune connected shells no view supports" is withdrawn: on the case most like
+a real capture it would delete a hundred faces of correct geometry and remove no false surface at
+all. The offline experiment into whether any *observable* shell property separates the two groups
+has since been run, and it is a negative result — see the next section. Nothing in this corpus is
+routed into the product, and no
+export, preview, GUI, capture, tracker or readiness behaviour was changed to produce it. See
+[docs/surface-oracle.md](docs/surface-oracle.md) for the full tables, the withdrawn earlier
+conclusion and why it was wrong, the tested parameter envelope, the physical replay's registration
+refusals, and the limits of synthetic truth.
+
+### Can an appliance tell a false sealed shell from a correct one?
+
+No. Not on a holdout sealed before it ran, and not well enough to prune anything. A fourth
+deterministic corpus, run by ordinary pytest and by the command below, asks whether a bounded rule
+over evidence the appliance actually has can separate the fused surface's *false* sealed shells
+from the *correct* ones the oracle above found beside them:
+
+```bash
+.venv/bin/python -m tests.shell_discriminant_harness --out shell-discriminant-report.json
+.venv/bin/python -m tests.build_shell_discriminant_fixtures   # regenerate the population, then read the diff
+.venv/bin/python -m tests.shell_discriminant_replay           # the physical companion, strictly read-only
+```
+
+An earlier pass of this experiment inspected its own holdout during development and then widened
+the threshold grid, so its generalization claim was not one. **All nineteen of those members are
+training data now**, and this section publishes only the sealed run. Eight new members — id,
+family, every magnitude and the seed — were declared by the planner and written into the fixture
+recipe *before any builder, fusion or harness run touched a sealed id*, together with the frozen
+candidate-only digest `4fe6627e…`, the appliance selection resolution, the 0.5 material fraction
+and the unchanged 40,000-decision ceiling. None of them was tuned afterwards.
+
+The truth wall is now the derivation's own input type. `ObservableInputs` carries the ordered raw
+frames, the fused poses actually used, the intrinsics, window, depth scale and bounds, the
+extracted mesh, the cell parameters, the backend the arm actually fused on and the field the
+surface came out of — and has nowhere to put a scene, the shapes, the ideal support, a truth frame,
+a true pose, the analytic scoring, the family or the split. A pure function of that value derives
+**every closed shell**; the evaluator attaches labels separately. A test makes every truth and
+true-pose accessor raise and shows the derivation still produces byte-identical output. A
+realization's identity is a digest over all of those inputs, so raw-only, pose-only and
+backend-only changes each give a different identity while an exact clone keeps one.
+
+27 members at 2 resolutions produced **776 closed shells**, of which **140 are unsupported** — 117
+false (2,224 faces) and 23 correct (476 faces). At the shipped **appliance** resolution, which is
+the only one selection and the gates may read, that is 32 training records (712 false / 316 correct
+faces) and 41 sealed holdout records (624 false / 152 correct faces): both classes present, so the
+holdout can measure the damage as well as the gain.
+
+195 predeclared candidates against 140 records is **27,300 rule decisions — one bounded pass, one
+per cell**, against the 40,000 ceiling. Every confusion, all 28 split × family × resolution
+cross-tab cells per candidate — 8 that hold a shell and 20 published as zero cells rather than
+omitted — every aggregate, the ordering, the gates and the recommendation are lookups into that one
+cached matrix, and a test proves the overlapping summaries add zero further invocations. (The
+earlier pass made 89,505 invocations and published 16,380; that claim is withdrawn.)
+
+**None of the 195 candidates was eligible**: none removed at least half the training split's false
+shell faces at appliance resolution while removing none of its correct ones. So no rule is
+selected, no holdout gate was evaluated, no counterfactual ran, and the recommendation is
+`no-pruning-keep-dots-primary`. The truth-fed upper bound the planner predeclared —
+`sealed-outlier-185-p43` at appliance resolution — turned out to produce no closed shell at all
+there, so it is published as **unmeasured** rather than swapped for a member that would have given
+a number. As *development* evidence, a perfect truth-fed prune on the training member
+`outliers-140-p17` removes 3 false shells / 100 faces, leaves both correct unsupported shells and
+their **92 faces before and 92 after**, and buys **+0.2207 percentage points** of vertex accuracy
+across 0.2317 % of the triangles with coverage, protected volume, bridging, edges, dimensions and
+topology unchanged.
+
+So pruning stays rejected and dots stay primary. No physical shell population exists: both named
+read-only replays stop at registration before fusion with their capture fingerprints unchanged, and
+no physical discrimination claim is made. These tests run in the **ordinary pytest job on the
+existing public GitHub-hosted workflow**; `.github/workflows/ci.yml` is unchanged and no
+self-hosted, LAN, heavy-machine or GPU routing was added. See
+[docs/shell-discriminant.md](docs/shell-discriminant.md) for the sealed member table, the
+observable definitions, the full candidate matrix, the strict reader, the adverse controls, the
+computational cost and the one next action.
+
+The standalone strict reader **rebuilds the committed corpus** rather than checking the report
+against its own claims. An earlier pass did the latter, and a review mutated the published artifact
+fifteen ways — coherently, so every derived fraction and total still agreed — and all fifteen were
+accepted. `validate_report`, `loads_report` and `read_report` now take no evidence root at all:
+they load the committed corpus, rebuild every member at every resolution, bind the report's corpus
+block, realizations, populations, closed shells, records, work account and predeclared upper bound
+to that rebuild, and *then* rebuild the typed values and one independent audit decision matrix and
+recompute every derived claim. Each of those fifteen forgeries is now a test over the real
+artifact, and each is refused for its own reason. Binding does not by itself close a type
+confusion — `False == 0` and `True == 1.0` in Python — so a member's whole perturbation and both
+surface accounts of every counterfactual and measured ceiling are typed field by field before they
+are compared, with four more real-artifact controls for that attack.
+
+### Spatial depth completion
+
+`scanner3d.depth_completion` is the first real completion stage: it recovers no-return samples that
+one raw frame supports strongly enough, and leaves the rest missing. Every returned sample comes
+back byte-for-byte as `measured`; every recovered one carries a finite confidence below 1.0 and the
+indices of the **original measurements** it rests on, so no reconstruction is ever evidence for
+another. Holes are grouped into four-connected components first, and one larger or longer than the
+policy allows is refused whole — which is what keeps a silhouette's background, a band of dropout
+along a depth edge, a collapsed column and the gap between two objects out.
+
+Every public type is bound to the raw frame it claims to preserve: `CompletedPatch` carries the
+immutable `DepthPatch` it came from, and each provenance claim is validated against **that** rather
+than against the result's own labels, so a forged label cannot vouch for its own evidence. Every
+bound also has an absolute product ceiling — a finite integer is not a work cap — and a call whose
+worst case exceeds `MAX_WORK_UNITS` is refused by arithmetic on its input before the first
+neighbourhood is scanned.
+
+Against the accepted benchmark it recovers 107 of 230 dropped samples on the fronto-parallel plane
+and 105 of 225 on the oblique one, to within the truth's own one-code quantisation, with zero false
+fill on every geometry the frame can settle, nothing bridged or misplaced at the depth step, the
+protected slot untouched, and the multi-view case returned unchanged so tracking, fusion, poses and
+dimensions are the baseline's exactly. It does **not** yet reach the benchmark's coverage target,
+and each case names the exact holes that remain rather than calling conservative refusal a success.
+
+The `aperture-ambiguity` case is where it loses, on purpose. A small dropout on a plane and a small
+true hole in that plane present **byte-identical** local evidence, and this method fills both: it
+recovers the dropout correctly and invents a surface across the aperture, at high confidence. That
+failure is declared in the fixture rather than tuned away, because it is not a tuning limit — one
+frame does not contain the evidence. Spatial-only estimates of that class must not become tracking
+or fused geometry until an independent view confirms them.
+
+Nothing in the capture, preview, tracking, fusion, mesh or export paths calls it yet, and no
+physical claim is made. See [docs/depth-completion.md](docs/depth-completion.md).
+
+### Pose-compensated temporal completion
+
+`scanner3d.depth_temporal` is the answer to that aperture: a second measurement, taken from
+somewhere else. It carries the **original raw samples of other frames** through the exact poses
+tracking already accepted, projects them into the target camera, and reconstructs a sample the
+target lost only when independent posed measurements from at least two genuinely different
+viewpoints agree about it. Occluded, behind-camera, out-of-frame, disagreeing and
+discontinuity evidence is refused with a named reason, and a same-pixel carry — "use the other
+frame" without the pose between them — is proved wrong on a scene where the camera really moved:
+it is the densest result in that case and it puts backing-plane depth on the box's front face.
+
+Where the single-frame stage proposed a value, the temporal stage publishes whether independent
+evidence confirmed it, contradicted it and published its own measurement instead, or never
+reached it — and an estimate nothing reached stays explicitly spatial, so the aperture ambiguity
+is disclosed rather than laundered.
+
+It is offline and post-tracking by construction, because every transform it uses is built from a
+pose tracking has already accepted. Nothing calls it: no capture, setting, GUI, tracker input,
+TSDF, mesh, export or live preview reads a temporal reconstruction. The benchmark's gated tracking
+evidence is the measured-only route the product actually takes, and the temporal stage leaves it
+exactly the baseline's; beside it an ungated counterfactual replay shows that its reconstructions —
+each within a single raw code of the truth — would still move where the real tracker places a
+frame, which is the measured reason that boundary is there.
+See [docs/depth-temporal.md](docs/depth-temporal.md).
+
+### Provenance-weighted TSDF input
+
+`scanner3d.tsdf_input` is what a completed frame is allowed to be *worth* to fusion.
+`scanner3d.tsdf.TsdfVolume.integrate_weighted` spends it: the same projective arithmetic, with
+the geometric weight multiplied by the sample's own fusion weight. A measured sample weighs
+`1.0`, so a raw frame through the weighted path is byte-for-byte the raw frame integrated. An
+accepted temporal reconstruction weighs `0.5 x` its own accepted confidence — strictly above
+zero, strictly below a measurement, and monotone in the confidence — so two agreeing
+reconstructions still cannot outvote the one measurement they disagree with. A single-frame
+spatial estimate no independent view confirmed weighs exactly **zero** and offers a no-return
+code, which fusion treats as absence: it cannot update a voxel and cannot turn unobserved space
+into observed space. Every provenance claim is derived from an already accepted `CompletedPatch`
+or `TemporalPatch`, never from a caller's labels.
+
+On the benchmark's complementary multi-view case the measured answer is **negative, and it is
+the finding**: 16 independently supported samples make 5953 weighted voxel updates against the
+raw baseline's 5728, and produce the same 3099 observed voxels, the same 333 surface vertices
+and the same truth-referenced surface coverage as fusing those same three raw frames. Fuse the
+target frame alone and the same reconstructions add 225 observed voxels (1949 to 2174) — so the
+geometry is real and is already in the multi-view baseline, because it came out of the frames
+that baseline fuses. No coverage or surface gain is claimed or gated, and the recommendation is
+that the export keeps fusing raw multi-view frames. On the aperture-ambiguity case
+the excluded estimates contribute exactly 0.0 and the weighted field is byte-identical to the
+measurements' own, while fusing the same codes at uniform weight would have observed 12 more
+voxels. That is offline synthetic evidence: no physical improvement is claimed, nothing in
+`scanner3d` calls it, and the reconstruction export still fuses its original raw frames.
+See [docs/weighted-tsdf-input.md](docs/weighted-tsdf-input.md).
 
 ## CLI
 
@@ -471,7 +1126,8 @@ device, and all of it runs on the nine real frames committed under
 | `geometry` | rigid transforms, rotation about an arbitrary axis, Horn's best-fit alignment |
 | `registration` | aligns a turntable sweep and reports **loop-closure error** |
 | `fusion` | merges registered clouds on a voxel grid |
-| `mesh` | marching cubes over the fused occupancy grid, OBJ/PLY export |
+| `denoise` | drops points nothing else in their own frame is near, at a neighbourhood sized from the cloud |
+| `mesh` | marching cubes over the fused occupancy grid, incremental accumulation, OBJ/PLY export |
 | `validation` | fits a sphere or plane and compares it to a **caliper** reading |
 | `simulate` | renders synthetic frames of known shapes, for testing against ground truth |
 

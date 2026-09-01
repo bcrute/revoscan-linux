@@ -1,0 +1,26 @@
+{
+  "decisive_facts": {
+    "accepted": true,
+    "coarse_unambiguous": false,
+    "distinct_candidate_overlap": 0.598,
+    "runner_up_margin": 1.5026462192780772,
+    "winner_overlap": 0.48333333333333334,
+    "winner_residual": 0.5148863692487536
+  },
+  "files": [
+    {
+      "bytes": 13863,
+      "copied_how": "read-only copy; the capture under /home/ben/scans was not modified, and its hash after the copy still matched the hash recorded above",
+      "copied_on": "2026-08-28",
+      "name": "bridge-20260828-062457-segment-0001.json",
+      "sha256": "76007d2a7870cb122859eafcd502b62d97ae166daa2b6fd2cf5087b148277f68",
+      "source": "/home/ben/scans/scan/20260828-062457/segment-0001/bridge.json",
+      "source_sha256": "76007d2a7870cb122859eafcd502b62d97ae166daa2b6fd2cf5087b148277f68"
+    }
+  ],
+  "immutable": "Source evidence. Do not edit, reformat, re-serialise or regenerate this file: the test that consumes it binds the recorded sha256, and a bridge record that has been rewritten is no longer the thing that happened.",
+  "schema_version": 1,
+  "units": "Residuals and overlaps are exactly as the capture wrote them. The residual is in input coordinate units, whose physical meaning is not established; the overlaps and fractions are dimensionless.",
+  "what": "One relocalization bridge record, copied byte-for-byte out of a real capture. It is the recorded false acceptance this repository's current bridge policy exists because of, kept here so the policy can be regression-tested against the exact evidence that was accepted rather than against a reconstruction of it.",
+  "why": "On 2026-08-28 this bridge was accepted with every internal number healthy - residual 0.515, a 1.50x refined runner-up margin, matched fraction 1.00 - and the placement it chose was wrong. Its own record said coarse_unambiguous: false, and a genuinely different refined candidate covered more of the model (0.598) than the winner did (0.483). Current policy refuses an ambiguous coarse search before anything measured afterwards, so re-judging this record today must refuse it."
+}

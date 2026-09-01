@@ -1,0 +1,307 @@
+{
+  "candidates": [
+    {
+      "expectation": {
+        "failed_gates": [
+          "coverage.supported_fraction"
+        ],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "confidence.high_confidence_worst",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst"
+        ],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "baseline",
+      "what": "the unchanged pipeline: no invented geometry, and short of the target"
+    },
+    {
+      "expectation": {
+        "failed_gates": [
+          "confidence.high_confidence_worst",
+          "coverage.false_fill",
+          "dimensions.worst",
+          "landmarks.worst",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst",
+          "surface.observed_to_reference.p95"
+        ],
+        "inapplicable_gates": [
+          "completion_work.within_budget"
+        ],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "dense_nearest",
+      "what": "fills every hole, including the empty background, with its nearest sample"
+    },
+    {
+      "expectation": {
+        "failed_gates": [
+          "confidence.high_confidence_worst",
+          "coverage.false_fill",
+          "landmarks.worst",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst",
+          "surface.observed_to_reference.p95"
+        ],
+        "inapplicable_gates": [
+          "completion_work.within_budget"
+        ],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "broad_interpolation",
+      "what": "averages across the silhouette and into the background"
+    },
+    {
+      "expectation": {
+        "failed_gates": [
+          "confidence.high_confidence_worst",
+          "coverage.supported_fraction",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst"
+        ],
+        "inapplicable_gates": [
+          "completion_work.within_budget"
+        ],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "easy_samples_only",
+      "what": "fills only the easy holes: no invention, and still short of the target"
+    },
+    {
+      "expectation": {
+        "failed_gates": [
+          "coverage.supported_fraction"
+        ],
+        "inapplicable_gates": [
+          "confidence.high_confidence_worst",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst"
+        ],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "spatial_completion",
+      "what": "the product primitive against a silhouette: the background is one connected region far larger than any local evidence spans and is refused whole, and on the sphere itself the plane it would fit misses its own support, so this frame is returned unchanged. Conservative refusal, stated as the failure it is rather than as a success"
+    }
+  ],
+  "case_id": "curved-surface",
+  "gates": [
+    {
+      "comparison": ">=",
+      "context": "the acceptance target: this fraction of the window must end up measured, or reconstructed onto surface that is really there. 0.95 of the surface this scene actually has; the unchanged baseline does not reach it, which is the whole reason this thread exists",
+      "limit": 0.525798,
+      "measurement": "coverage",
+      "name": "coverage.supported_fraction",
+      "path": [
+        "supported_fraction"
+      ],
+      "unit": "fraction of 1"
+    },
+    {
+      "comparison": ">=",
+      "context": "non-inferiority: the raw measurements the sensor did return must all still be there and still be called measurements. A completion that discards awkward samples and interpolates over them is not a completion",
+      "limit": 0.456944,
+      "measurement": "coverage",
+      "name": "coverage.measured_fraction",
+      "path": [
+        "measured_fraction"
+      ],
+      "unit": "fraction of 1"
+    },
+    {
+      "comparison": "<=",
+      "context": "absolute: zero. Space this scene really leaves empty must stay empty. This is the gate a dense fill fails while its aggregate coverage improves",
+      "limit": 0.0,
+      "measurement": "coverage",
+      "name": "coverage.false_fill",
+      "path": [
+        "false_fill"
+      ],
+      "unit": "samples"
+    },
+    {
+      "comparison": "<=",
+      "context": "absolute: 4 raw codes. Error is scored ONLY on samples the candidate reconstructed where truth was held out, so copying the input cannot earn a good score here, and the coverage gates stop a candidate improving this by reconstructing only the easy holes",
+      "limit": 0.03125,
+      "measurement": "reconstructed_depth",
+      "name": "reconstructed_depth.p95",
+      "path": [
+        "absolute",
+        "p95"
+      ],
+      "unit": "synthetic depth units: raw code x depth scale, exact by construction"
+    },
+    {
+      "comparison": "<=",
+      "context": "absolute: 16 raw codes. A single sample placed on the wrong surface is the failure a percentile hides",
+      "limit": 0.125,
+      "measurement": "reconstructed_depth",
+      "name": "reconstructed_depth.worst",
+      "path": [
+        "absolute",
+        "worst"
+      ],
+      "unit": "synthetic depth units: raw code x depth scale, exact by construction"
+    },
+    {
+      "comparison": "<=",
+      "context": "non-inferiority: the baseline's own worst extent error plus 8 raw codes. Smoothing an object smaller is the classic way a denser result looks better and measures worse",
+      "limit": 0.109375,
+      "measurement": "dimensions",
+      "name": "dimensions.worst",
+      "path": [
+        "absolute",
+        "worst"
+      ],
+      "unit": "synthetic depth units: raw code x depth scale, exact by construction"
+    },
+    {
+      "comparison": "<=",
+      "context": "non-inferiority: the baseline's own worst landmark offset plus 8 raw codes. A feature must not move",
+      "limit": 0.784259,
+      "measurement": "landmarks",
+      "name": "landmarks.worst",
+      "path": [
+        "offsets",
+        "worst"
+      ],
+      "unit": "synthetic depth units: raw code x depth scale, exact by construction"
+    },
+    {
+      "comparison": "<=",
+      "context": "non-inferiority: the baseline's own agreement plus 8 raw codes, measured observed-to-reference, which is the direction that notices geometry that is there and should not be",
+      "limit": 0.0625,
+      "measurement": "surface",
+      "name": "surface.observed_to_reference.p95",
+      "path": [
+        "observed_to_reference",
+        "distances",
+        "p95"
+      ],
+      "unit": "synthetic depth units: raw code x depth scale, exact by construction"
+    },
+    {
+      "comparison": "<=",
+      "context": "non-inferiority: the baseline's own agreement plus 8 raw codes, measured reference-to-observed, which is the direction that notices surface that is missing. Both directions, because neither alone is agreement",
+      "limit": 0.574046,
+      "measurement": "surface",
+      "name": "surface.reference_to_observed.p95",
+      "path": [
+        "reference_to_observed",
+        "distances",
+        "p95"
+      ],
+      "unit": "synthetic depth units: raw code x depth scale, exact by construction"
+    },
+    {
+      "comparison": "<=",
+      "context": "absolute: 16 raw codes, the same worst-sample tolerance the held-out error gate uses, applied only to reconstructions the candidate itself published at confidence 0.5 or above. A completion is free to be unsure; what it may not do is be sure and wrong. Lowering its own confidence is the only way to leave this gate, and that lowering is visible in the same measurement",
+      "limit": 0.125,
+      "measurement": "confidence",
+      "name": "confidence.high_confidence_worst",
+      "path": [
+        "high_confidence_worst"
+      ],
+      "unit": "synthetic depth units: raw code x depth scale, exact by construction"
+    },
+    {
+      "comparison": "is",
+      "context": "the work a completion spent must be inside the budget derivable from its input before it ran - one neighbourhood scan per hole at its published radius. A bound by construction rather than a wall-clock assertion, which would measure the machine. Candidates that report no work record leave this gate inapplicable, and each case declares exactly which ones those are",
+      "limit": true,
+      "measurement": "completion_work",
+      "name": "completion_work.within_budget",
+      "path": [
+        "within_budget"
+      ]
+    }
+  ],
+  "kind": "scanner3d.depth-completeness-case",
+  "notes": [
+    "Most of this window is empty: the sphere subtends only part of it, and every sample outside the silhouette is truth zero - nothing there to measure, and nothing there to reconstruct.",
+    "Missing coverage and empty space are different facts and are counted against different denominators. A completion is not asked to fill the background."
+  ],
+  "regions": {
+    "dimensions": true,
+    "foreground_below": null,
+    "fusion": null,
+    "landmarks": true,
+    "plane": false,
+    "slot_columns": [],
+    "surface_tolerance": 0.1,
+    "tracking": false,
+    "weighted_fusion": null
+  },
+  "scene": {
+    "depth_scale": 0.0078125,
+    "frames": [
+      {
+        "index": 0,
+        "input_returned": 658,
+        "input_sha256": "8ed0e091cb936c1aa8a17e2c045a285061dae203157998f6af4547b4fbbdf07a",
+        "masks": [
+          {
+            "fraction": 0.12,
+            "kind": "speckle"
+          },
+          {
+            "column": 18,
+            "kind": "blob",
+            "radius": 3.5,
+            "row": 18
+          }
+        ],
+        "pose": {
+          "axis": [
+            0.0,
+            1.0,
+            0.0
+          ],
+          "degrees": 0.0,
+          "through": [
+            0.0,
+            0.0,
+            100.0
+          ]
+        },
+        "truth_returned": 797,
+        "truth_sha256": "a2d2c92b93d20ac3305e588b4882a90abaa2624d7a2ae37982c6d0d7d23f039f"
+      }
+    ],
+    "intrinsics": {
+      "cx": 320.0,
+      "cy": 200.0,
+      "fx": 400.0,
+      "fy": 400.0,
+      "height": 400,
+      "width": 640
+    },
+    "seed": "depth-completeness-028:curved-surface",
+    "shapes": [
+      {
+        "centre": [
+          0.0,
+          0.0,
+          150.0
+        ],
+        "kind": "sphere",
+        "radius": 6.0
+      }
+    ],
+    "window": {
+      "height": 36,
+      "sample_count": 1440,
+      "u0": 300,
+      "v0": 182,
+      "width": 40
+    }
+  },
+  "schema_version": 1,
+  "what": "A sphere against empty space, with speckle and a connected hole.",
+  "why": "Two failures at once that a plane cannot show: a smooth curved surface a staircase fill roughens, and real empty space around the silhouette that a dense fill paints with whatever was nearest. False fill is gated at exactly zero here."
+}

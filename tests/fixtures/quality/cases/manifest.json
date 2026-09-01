@@ -1,0 +1,70 @@
+{
+  "files": [
+    {
+      "bytes": 13502,
+      "case_id": "clean-panel",
+      "name": "clean-panel.json",
+      "sha256": "6d0acae815091067adaa54e08cae66ec0ea6fb1de04ab36b3458aa32f1a76598"
+    },
+    {
+      "bytes": 21930,
+      "case_id": "clean-surface",
+      "name": "clean-surface.json",
+      "sha256": "930d64888579acf661b5fd3ba4296278c2b0f832e2766de245ea441b5e2928b1"
+    },
+    {
+      "bytes": 13468,
+      "case_id": "lumpy-panel",
+      "name": "lumpy-panel.json",
+      "sha256": "01bf634bb0b5d282b37cc98235e16f63d61def4f15524307b213dfda53b4c98a"
+    },
+    {
+      "bytes": 19254,
+      "case_id": "missing-surface",
+      "name": "missing-surface.json",
+      "sha256": "a14e36f29909e002ba4540553a876f249268ed4b8ad38ec4317b01cd6e2ebfa5"
+    },
+    {
+      "bytes": 8946,
+      "case_id": "readiness-coverage-one-sided",
+      "name": "readiness-coverage-one-sided.json",
+      "sha256": "eaa3f0aa1b488555fcdfca394852268028f939ccbc4cb5f4605c08c2cf1be261"
+    },
+    {
+      "bytes": 9791,
+      "case_id": "readiness-poses-stationary",
+      "name": "readiness-poses-stationary.json",
+      "sha256": "e2be36ad6bd28dbe288acc5cfdfc3808ca7b86f0d10b88691fd39eb9f4bc1b04"
+    },
+    {
+      "bytes": 10002,
+      "case_id": "readiness-surface-displaced",
+      "name": "readiness-surface-displaced.json",
+      "sha256": "4bb3c021b4283b11589373ba47917df901156dd3ca84f7c9ea80fd4421fe9552"
+    },
+    {
+      "bytes": 9845,
+      "case_id": "readiness-valid-orbit",
+      "name": "readiness-valid-orbit.json",
+      "sha256": "330d4033932a533abeb53237537888caeb6bcc9da49be328d83f5225aad44ada"
+    },
+    {
+      "bytes": 31962,
+      "case_id": "spurious-geometry",
+      "name": "spurious-geometry.json",
+      "sha256": "fd7779fcb41e575b9182b95b07e80f292b68289c9cab7ba315c38fbcdedee53e"
+    },
+    {
+      "bytes": 3414,
+      "case_id": "uniform-scale",
+      "name": "uniform-scale.json",
+      "sha256": "1fba1d14c8116b8e1a50ab17f753bc3a6c3c8a0bf6f62b121c759583a09fbcea"
+    }
+  ],
+  "generated_by": "tests/build_quality_fixtures.py",
+  "kind": "scanner3d.quality-harness-corpus",
+  "schema_version": 1,
+  "units": "Every synthetic length is in the constructed truth's own units and is exact by construction. Nothing here is a physical measurement and no case makes a dimensional-accuracy claim. The readiness records are in the capture's depth units.",
+  "what": "Deterministic synthetic reconstruction-quality cases and frozen readiness records, read by tests/quality_harness.py.",
+  "why": "Known geometry, portable as data rather than as Python helpers, so a change that makes a reconstruction worse fails a named gate in a named case instead of being noticed on a scan."
+}

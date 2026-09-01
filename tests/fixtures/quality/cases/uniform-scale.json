@@ -1,0 +1,113 @@
+{
+  "case_id": "uniform-scale",
+  "expectation": {
+    "failed_gates": [
+      "dimensions.absolute.worst",
+      "landmarks.offsets.worst"
+    ],
+    "outcome": "fail"
+  },
+  "gates": [
+    {
+      "comparison": "<=",
+      "context": "a named length is wrong; suspect the depth scale before the geometry",
+      "limit": 0.1,
+      "measurement": "dimensions",
+      "name": "dimensions.absolute.worst",
+      "path": [
+        "absolute",
+        "worst"
+      ],
+      "unit": "synthetic units of the constructed truth, exact by construction"
+    },
+    {
+      "comparison": "<=",
+      "context": "stated beside the absolute gate on purpose: at two percent this one still passes, so a case cannot be satisfied by failing every gate it names",
+      "limit": 0.05,
+      "measurement": "dimensions",
+      "name": "dimensions.relative.worst",
+      "path": [
+        "relative",
+        "worst"
+      ],
+      "unit": "fraction of 1"
+    },
+    {
+      "comparison": "<=",
+      "context": "a named feature is not where it belongs; check scale and placement",
+      "limit": 0.1,
+      "measurement": "landmarks",
+      "name": "landmarks.offsets.worst",
+      "path": [
+        "offsets",
+        "worst"
+      ],
+      "unit": "synthetic units of the constructed truth, exact by construction"
+    }
+  ],
+  "kind": "scanner3d.quality-harness-case",
+  "measurements": [
+    {
+      "kind": "dimension_errors",
+      "measured": {
+        "height": 28.56,
+        "length": 40.8,
+        "width": 34.68
+      },
+      "name": "dimensions",
+      "truth": {
+        "height": 28.0,
+        "length": 40.0,
+        "width": 34.0
+      },
+      "truth_source": "constructed exactly by tests/build_quality_fixtures.py; this is synthetic truth and makes no claim about any physical object",
+      "unit": "synthetic units of the constructed truth, exact by construction"
+    },
+    {
+      "kind": "landmark_offsets",
+      "measured": {
+        "lobe apex": [
+          13.464,
+          0.0,
+          17.952
+        ],
+        "north pole": [
+          0.0,
+          14.28,
+          0.0
+        ],
+        "south pole": [
+          0.0,
+          -14.28,
+          0.0
+        ]
+      },
+      "name": "landmarks",
+      "truth": {
+        "lobe apex": [
+          13.2,
+          0.0,
+          17.6
+        ],
+        "north pole": [
+          0.0,
+          14.0,
+          0.0
+        ],
+        "south pole": [
+          0.0,
+          -14.0,
+          0.0
+        ]
+      },
+      "truth_source": "constructed exactly by tests/build_quality_fixtures.py; this is synthetic truth and makes no claim about any physical object",
+      "unit": "synthetic units of the constructed truth, exact by construction"
+    }
+  ],
+  "notes": [
+    "This case deliberately runs no cloud_agreement. A dense reference surface in the same frame would see the scale too; the point being made is that the sparse named check catches it when no such surface exists, which is the situation this repository is actually in."
+  ],
+  "schema_version": 1,
+  "what": "Named lengths and landmarks of a reconstruction 2% larger than the truth.",
+  "why": "A uniform scale is invisible to held-out closure, to plane roughness and to every other check computed inside the reconstruction's own coordinate system, because a larger world is perfectly self-consistent in it. Sparse named truth from outside that system is what catches it."
+}

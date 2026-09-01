@@ -2607,11 +2607,30 @@ def _cmd_sweep(args: argparse.Namespace) -> int:
 
 def _cmd_reconstruct(args: argparse.Namespace) -> int:
     """Register a captured sweep offline and report what the evidence says."""
-    from scanner3d.depth_metric import DepthUnitAssumption, deproject_depth_frame
+    from scanner3d.capture_sequence import CaptureSequenceUnreadable, read_capture_sequence
     from scanner3d.pipeline import reconstruct_sweep
-    from scanner3d.simulate import FACTORY_INTRINSICS
+    from scanner3d.preparation import (
+        PREPARATION_ORDER,
+        RECONSTRUCT_POINTS,
+        PreparationSummary,
+        PreparedCloud,
+        filter_statement,
+        prepare_frame,
+    )
+    from scanner3d.reconstruction_readiness import ReconstructionRefused, evaluate_readiness
 
-    paths = sorted(args.frames.glob("frame_*.raw"))[:: max(1, args.stride)]
+    # One reader, shared with the window. A capture that was repositioned
+    # mid-sweep keeps its later frames in the boundary directories and carries a
+    # recorded transform for each seam; a glob of the root would silently
+    # register only the first half of such a capture, and striding it uniformly
+    # would silently drop a boundary and align across the reposition instead.
+    try:
+        sequence = read_capture_sequence(args.frames).strided(max(1, args.stride))
+    except CaptureSequenceUnreadable as exc:
+        print(f"{args.frames} cannot be read as a capture: {exc}", file=sys.stderr)
+        return EXIT_CODES[getattr(exc, "status", DoctorStatus.INTERNAL_ERROR)]
+    paths = sequence.paths
+    boundaries = sequence.boundaries()
     if len(paths) < 3:
         print(
             f"{args.frames} holds {len(paths)} usable frames at stride {args.stride}; "
@@ -2620,25 +2639,36 @@ def _cmd_reconstruct(args: argparse.Namespace) -> int:
         )
         return EXIT_CODES[DoctorStatus.INTERNAL_ERROR]
 
-    unit = DepthUnitAssumption(
-        label="mm",
-        stated_by="caliper measurement recorded in docs/metric-validation.md",
-        basis="a 58.0 mm can measured 57.705 mm at about 122.7 mm standoff",
-    )
-    clouds: list[tuple[tuple[float, float, float], ...]] = []
+    # The same function the window calls, at the same target, so the same
+    # capture reconstructs into the same clouds from either entry point. The
+    # order the steps run in, and why, is stated once in
+    # scanner3d.preparation rather than restated here.
+    prepared: list[PreparedCloud] = []
     for path in paths:
-        conversion = deproject_depth_frame(
-            path.read_bytes(),
-            intrinsics=FACTORY_INTRINSICS,
-            depth_scale=DEPTH_SCALE_METRES,
-            unit=unit,
-        )
-        points = [(p.x, p.y, p.z) for p in conversion.points if 60.0 < p.z < 300.0]
-        step = max(1, len(points) // 2200)
-        clouds.append(tuple(points[::step]))
+        prepared.append(prepare_frame(path.read_bytes(), target_points=RECONSTRUCT_POINTS))
+    clouds: list[tuple[tuple[float, float, float], ...]] = [frame.points for frame in prepared]
+    summary = PreparationSummary.of(prepared)
 
     if not args.json:
         print(f"{len(clouds)} frames, about {len(clouds[0])} points each", flush=True)
+        print(
+            f"preparation: {' -> '.join(PREPARATION_ORDER)}",
+            flush=True,
+        )
+        print(
+            f"{summary.speckle_removed_points} isolated points rejected across the sweep by "
+            "scanner3d.denoise.strip_speckle; some of them were sparsely sampled surface and "
+            "this cannot say which",
+            flush=True,
+        )
+        print(summary.summary_line(), flush=True)
+        if boundaries:
+            print(
+                f"{len(boundaries)} recorded relocalization bridge(s): "
+                f"{', '.join(b.source for b in boundaries)}. Those pairs are placed from the "
+                "evidence saved during the capture rather than aligned here.",
+                flush=True,
+            )
 
     def progress(message: str) -> None:
         if not args.json:
@@ -2651,11 +2681,38 @@ def _cmd_reconstruct(args: argparse.Namespace) -> int:
             workers=args.workers,
             point_to_plane=not args.point_to_point,
             robust=not args.no_robust,
+            bridges=boundaries,
             on_progress=progress,
         )
     except ScannerError as exc:
         print(f"reconstruction refused: {exc}", file=sys.stderr)
         return EXIT_CODES[getattr(exc, "status", DoctorStatus.INTERNAL_ERROR)]
+
+    # The same gates, the same policy and the same words the window and the
+    # export boundary use. This command writes no cloud and no mesh, so nothing
+    # here can leave a plausible artifact behind - but it does print numbers an
+    # operator reads as "the scan worked", and a held-out closure error is
+    # perfectly happy about a sequence of forty identical poses.
+    #
+    # Ahead of --poses-out deliberately: a refused reconstruction produces no
+    # file of any kind, so there is nothing on disk afterwards that a later
+    # reader could mistake for an accepted trajectory.
+    readiness = evaluate_readiness(args.frames, clouds, result.poses)
+    if not readiness.ready:
+        print(readiness.refusal_text(), file=sys.stderr)
+        _emit(
+            {
+                "readiness": readiness.as_dict(),
+                "command": {
+                    "name": RECONSTRUCT_COMMAND,
+                    "frames_directory": str(args.frames),
+                    "exported": False,
+                    "refused": True,
+                },
+            },
+            args,
+        )
+        return EXIT_CODES[ReconstructionRefused.status]
 
     if args.poses_out is not None:
         args.poses_out.write_text(
@@ -2665,12 +2722,40 @@ def _cmd_reconstruct(args: argparse.Namespace) -> int:
 
     payload: dict[str, object] = {
         **result.as_dict(),
+        # Beside the scores rather than instead of them. A ready result is the
+        # evidence that these numbers describe a scan and not forty views of
+        # one place, and it states the policy it was judged under.
+        "readiness": readiness.as_dict(),
         "command": {
             "name": RECONSTRUCT_COMMAND,
             "frames_directory": str(args.frames),
             "stride": args.stride,
             "backend": args.backend,
             "workers": args.workers,
+            "per_frame_filter": {
+                "module": "scanner3d.denoise",
+                "function": "strip_speckle",
+                "settings": "defaults",
+                "points_rejected": summary.speckle_removed_points,
+                "means": (
+                    "points dropped for having too few others of their own frame nearby, after "
+                    f"the decimation to about {RECONSTRUCT_POINTS} points per frame and before "
+                    "registration. Some proportion of them was sparsely sampled surface and "
+                    "this cannot say which; see scanner3d.denoise for the measured exchange "
+                    "rate"
+                ),
+            },
+            # The whole preparation path, not just its second filter. Written by
+            # the same function the window's exported record carries, so a
+            # capture reconstructed from either entry point reports the same
+            # policy versions and the same per-frame evidence.
+            #
+            # With no fusion summary, because this command does not fuse one:
+            # it registers and reports, and writes no mesh. The record then
+            # says so explicitly rather than omitting the block, which a reader
+            # would take for "the masking ran and found nothing".
+            "preparation": summary.as_dict(),
+            "preparation_statement": filter_statement(summary),
             "offline": (
                 "this command resolved no scanner and opened no device node; every "
                 "input came from files on disk"
@@ -2678,6 +2763,20 @@ def _cmd_reconstruct(args: argparse.Namespace) -> int:
             "dimensional_accuracy_claimed": False,
         },
     }
+    if boundaries:
+        # Only when there were any, so an ordinary capture emits byte for byte
+        # the payload it always did.
+        command = payload["command"]
+        assert isinstance(command, dict)
+        command["relocalization_bridges"] = [
+            {
+                "segment": boundary.source,
+                "position": boundary.position,
+                "transform": boundary.transform.as_dict(),
+                "limitations": list(boundary.limitations),
+            }
+            for boundary in boundaries
+        ]
     if not args.json:
         _render_reconstruction(result, sys.stdout)
     _emit(payload, args)
@@ -3561,7 +3660,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     recon.add_argument("frames", type=Path, help="directory of raw depth frames")
-    recon.add_argument("--stride", type=int, default=1, help="use one frame in N (default 1)")
+    recon.add_argument(
+        "--stride",
+        type=int,
+        default=1,
+        help="use one frame in N (default 1). On a capture that was paused and repositioned, "
+        "the stride is applied within each segment separately and every frame a recorded "
+        "relocalization bridge relates is kept, so a boundary can never be strided away",
+    )
     recon.add_argument(
         "--backend",
         default="auto",

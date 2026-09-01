@@ -1,0 +1,800 @@
+{
+  "candidates": [
+    {
+      "expectation": {
+        "failed_gates": [
+          "body_count",
+          "dimension_error",
+          "no_isolated_lumps",
+          "supported_surface"
+        ],
+        "inapplicable_gates": [
+          "manifold_surface",
+          "no_bridging_triangles",
+          "no_false_closed_shells",
+          "triangle_interior_accuracy_p95",
+          "within_budget"
+        ],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "raw_points",
+      "what": "The measured dots, unchanged and clipped to the shared volume. The arm the user says already looks right."
+    },
+    {
+      "expectation": {
+        "failed_gates": [
+          "dimension_error",
+          "no_isolated_lumps",
+          "plane_roughness_p95",
+          "supported_surface"
+        ],
+        "inapplicable_gates": [],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "fused:v15-t3-w1-uniform",
+      "what": "The unchanged raw TSDF and the unchanged extractor at v15-t3-w1-uniform: voxel 0.15, truncation 3.0 voxels, minimum weight 1.0, uniform weighting."
+    },
+    {
+      "expectation": {
+        "failed_gates": [
+          "dimension_error",
+          "plane_roughness_p95",
+          "supported_surface"
+        ],
+        "inapplicable_gates": [],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "fused:v15-t3-w2-uniform",
+      "what": "The unchanged raw TSDF and the unchanged extractor at v15-t3-w2-uniform: voxel 0.15, truncation 3.0 voxels, minimum weight 2.0, uniform weighting."
+    },
+    {
+      "expectation": {
+        "failed_gates": [
+          "dimension_error",
+          "no_isolated_lumps",
+          "plane_roughness_p95",
+          "supported_surface"
+        ],
+        "inapplicable_gates": [],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "fused:v15-t2-w1-uniform",
+      "what": "The unchanged raw TSDF and the unchanged extractor at v15-t2-w1-uniform: voxel 0.15, truncation 2.0 voxels, minimum weight 1.0, uniform weighting."
+    },
+    {
+      "expectation": {
+        "failed_gates": [
+          "dimension_error",
+          "plane_roughness_p95",
+          "supported_surface"
+        ],
+        "inapplicable_gates": [],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "fused:v15-t3-w1-ramped",
+      "what": "The unchanged raw TSDF and the unchanged extractor at v15-t3-w1-ramped: voxel 0.15, truncation 3.0 voxels, minimum weight 1.0, ramped_behind weighting."
+    },
+    {
+      "expectation": {
+        "failed_gates": [
+          "analytic_accuracy_p95",
+          "dimension_error",
+          "supported_surface",
+          "triangle_interior_accuracy_p95"
+        ],
+        "inapplicable_gates": [],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "fused:v25-t3-w1-uniform",
+      "what": "The unchanged raw TSDF and the unchanged extractor at v25-t3-w1-uniform: voxel 0.25, truncation 3.0 voxels, minimum weight 1.0, uniform weighting."
+    },
+    {
+      "expectation": {
+        "failed_gates": [
+          "no_false_closed_shells",
+          "plane_roughness_p95",
+          "supported_surface"
+        ],
+        "inapplicable_gates": [],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "fused:v10-t4-w1-uniform",
+      "what": "The unchanged raw TSDF and the unchanged extractor at v10-t4-w1-uniform: voxel 0.1, truncation 4.0 voxels, minimum weight 1.0, uniform weighting."
+    },
+    {
+      "expectation": {
+        "failed_gates": [
+          "no_false_closed_shells",
+          "plane_roughness_p95",
+          "supported_surface"
+        ],
+        "inapplicable_gates": [],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "fused_at_appliance_resolution",
+      "what": "The same two modules at the resolution the SHIPPED export policy chooses for this scene: choose_tsdf_resolution over this case's own measured points at the desktop Reconstruct action's voxel budget, with the truncation ratio, minimum weight and weight policy scanner3d.reconstruction_export exports. Several times finer than the finest declared cell, and the only arm bound to the mesh an owner actually gets."
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "analytic_accuracy_p95",
+          "analytic_surface_coverage",
+          "body_count",
+          "dimension_error",
+          "edge_retained",
+          "manifold_surface",
+          "no_bridging_triangles",
+          "no_edge_bridging",
+          "no_false_closed_shells",
+          "no_isolated_lumps",
+          "plane_roughness_p95",
+          "points_inside_volume",
+          "support_coverage",
+          "supported_surface",
+          "thin_feature_retained",
+          "triangle_interior_accuracy_p95",
+          "within_budget"
+        ],
+        "outcome": "refused",
+        "refusal": "raw_frame_edited"
+      },
+      "name": "fused_from_truth_frames:v15-t3-w1-uniform",
+      "what": "Fuses the exact truth frames and presents the surface as the measured one. Its geometry really is better than any honest cell's, which is why an oracle that read only the numbers would report it as the fix."
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "analytic_accuracy_p95",
+          "analytic_surface_coverage",
+          "body_count",
+          "dimension_error",
+          "edge_retained",
+          "manifold_surface",
+          "no_bridging_triangles",
+          "no_edge_bridging",
+          "no_false_closed_shells",
+          "no_isolated_lumps",
+          "plane_roughness_p95",
+          "points_inside_volume",
+          "support_coverage",
+          "supported_surface",
+          "thin_feature_retained",
+          "triangle_interior_accuracy_p95",
+          "within_budget"
+        ],
+        "outcome": "refused",
+        "refusal": "views_omitted"
+      },
+      "name": "fused_dropping_a_view:v15-t3-w1-uniform",
+      "what": "Leaves out the last view. Dropping the frame that disagrees removes the disagreement, and removes what that frame alone saw with it."
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "analytic_accuracy_p95",
+          "analytic_surface_coverage",
+          "body_count",
+          "dimension_error",
+          "edge_retained",
+          "manifold_surface",
+          "no_bridging_triangles",
+          "no_edge_bridging",
+          "no_false_closed_shells",
+          "no_isolated_lumps",
+          "plane_roughness_p95",
+          "points_inside_volume",
+          "support_coverage",
+          "supported_surface",
+          "thin_feature_retained",
+          "triangle_interior_accuracy_p95",
+          "within_budget"
+        ],
+        "outcome": "refused",
+        "refusal": "surface_not_derived"
+      },
+      "name": "fused_with_edited_surface:v15-t3-w1-uniform",
+      "what": "Fuses honestly and then deletes the vertices standing in free space, or - when the honest surface put none there - the last vertex the extractor emitted. The most plausible forgery here, because it is exactly what somebody would do by hand after looking at the mesh."
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "analytic_accuracy_p95",
+          "analytic_surface_coverage",
+          "body_count",
+          "dimension_error",
+          "edge_retained",
+          "manifold_surface",
+          "no_bridging_triangles",
+          "no_edge_bridging",
+          "no_false_closed_shells",
+          "no_isolated_lumps",
+          "plane_roughness_p95",
+          "points_inside_volume",
+          "support_coverage",
+          "supported_surface",
+          "thin_feature_retained",
+          "triangle_interior_accuracy_p95",
+          "within_budget"
+        ],
+        "outcome": "refused",
+        "refusal": "surface_not_derived"
+      },
+      "name": "fused_with_bridging_triangle:v15-t3-w1-uniform",
+      "what": "Keeps every honest vertex exactly where the extractor put it and adds ONE triangle spanning the protected volume. The point list is byte-identical to the honest arm's, so every vertex-based measurement in this corpus agrees with it to the last bit; only the faces differ. It is the reason the surface is measured as a surface."
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "analytic_accuracy_p95",
+          "analytic_surface_coverage",
+          "body_count",
+          "dimension_error",
+          "edge_retained",
+          "manifold_surface",
+          "no_bridging_triangles",
+          "no_edge_bridging",
+          "no_false_closed_shells",
+          "no_isolated_lumps",
+          "plane_roughness_p95",
+          "points_inside_volume",
+          "support_coverage",
+          "supported_surface",
+          "thin_feature_retained",
+          "triangle_interior_accuracy_p95",
+          "within_budget"
+        ],
+        "outcome": "refused",
+        "refusal": "sample_count_mismatch"
+      },
+      "name": "raw_points_dropping_hard_samples",
+      "what": "The raw arm's own way of cheating: drop the measurements at the depth step, where the dots are noisiest, and report a cleaner cloud over a smaller denominator."
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "analytic_accuracy_p95",
+          "analytic_surface_coverage",
+          "body_count",
+          "dimension_error",
+          "edge_retained",
+          "manifold_surface",
+          "no_bridging_triangles",
+          "no_edge_bridging",
+          "no_false_closed_shells",
+          "no_isolated_lumps",
+          "plane_roughness_p95",
+          "points_inside_volume",
+          "support_coverage",
+          "supported_surface",
+          "thin_feature_retained",
+          "triangle_interior_accuracy_p95",
+          "within_budget"
+        ],
+        "outcome": "refused",
+        "refusal": "claim_not_supported"
+      },
+      "name": "fused_overclaiming_work:v15-t3-w1-uniform",
+      "what": "An honest surface with half its voxel-view spend declared. The accounting is how a coarse grid would be sold as a cheap one."
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "analytic_accuracy_p95",
+          "analytic_surface_coverage",
+          "body_count",
+          "dimension_error",
+          "edge_retained",
+          "manifold_surface",
+          "no_bridging_triangles",
+          "no_edge_bridging",
+          "no_false_closed_shells",
+          "no_isolated_lumps",
+          "plane_roughness_p95",
+          "points_inside_volume",
+          "support_coverage",
+          "supported_surface",
+          "thin_feature_retained",
+          "triangle_interior_accuracy_p95",
+          "within_budget"
+        ],
+        "outcome": "refused",
+        "refusal": "claim_unknown"
+      },
+      "name": "fused_claiming_the_unmeasurable:v15-t3-w1-uniform",
+      "what": "An honest surface that publishes a 'surface_accuracy_target' of its own. A candidate that can author a bar is not being measured by this corpus."
+    }
+  ],
+  "case_id": "depth-outliers",
+  "control_case": "exact-control",
+  "gates": [
+    {
+      "comparison": "<=",
+      "context": "Nineteen points in twenty must sit within one coverage tolerance of the OBJECT, in closed form. This is the accuracy gate, and it is deliberately not measured against the sensor's own returns: a vertex correctly interpolated between two camera rays is on the object and scores zero here, which round two of this corpus reported as an extraction defect because its reference was the rays.",
+      "limit": 0.15,
+      "measurement": "analytic",
+      "name": "analytic_accuracy_p95",
+      "path": [
+        "distances",
+        "p95"
+      ],
+      "unit": "synthetic depth units"
+    },
+    {
+      "comparison": ">=",
+      "context": "Four fifths of a dense exact sampling of the object's own surface must have geometry within the coverage tolerance. Coverage bought by inventing surface fails the bridging, topology and bounds gates beside this one.",
+      "limit": 0.8,
+      "measurement": "analytic",
+      "name": "analytic_surface_coverage",
+      "path": [
+        "reference_coverage_fraction"
+      ],
+      "unit": "fraction of 1"
+    },
+    {
+      "comparison": ">=",
+      "context": "The same question against MEASUREMENT SUPPORT rather than truth: four fifths of the ideal returns the five views produced must have geometry near them. It is not an accuracy gate and is never read as one.",
+      "limit": 0.8,
+      "measurement": "support",
+      "name": "support_coverage",
+      "path": [
+        "reference_to_observed",
+        "coverage_fraction"
+      ],
+      "unit": "fraction of 1"
+    },
+    {
+      "comparison": ">=",
+      "context": "The other direction of the same agreement, and the one that catches surface no measurement supports: at most one point in twenty may sit further than the coverage tolerance from an ideal return. It says where the sensor SAMPLED, not where the object is: a point on a face no view could see fails this and passes analytic_accuracy_p95, and both of those are true at once.",
+      "limit": 0.95,
+      "measurement": "support",
+      "name": "supported_surface",
+      "path": [
+        "observed_to_reference",
+        "coverage_fraction"
+      ],
+      "unit": "fraction of 1"
+    },
+    {
+      "comparison": "<=",
+      "context": "The same closed-form accuracy, taken INSIDE the emitted triangles rather than at their corners. Marching-cubes vertices sit on the field's own zero crossings, so a vertex-only accuracy gate cannot see a triangle whose corners are fine and whose middle is not. Inapplicable to the raw-points arm, which has no faces.",
+      "limit": 0.15,
+      "measurement": "surface_samples",
+      "name": "triangle_interior_accuracy_p95",
+      "path": [
+        "distances",
+        "p95"
+      ],
+      "unit": "synthetic depth units"
+    },
+    {
+      "comparison": "<=",
+      "context": "The protected volume beside the depth step is empty in the scene, and this counts the emitted TRIANGLES whose interiors enter it. It is strictly stronger than no_edge_bridging beside it, which counts only vertices there: a triangle can span the whole gap with all three of its corners outside.",
+      "limit": 0.0,
+      "measurement": "surface_samples",
+      "name": "no_bridging_triangles",
+      "path": [
+        "bridging_faces"
+      ],
+      "unit": "points"
+    },
+    {
+      "comparison": "<=",
+      "context": "A shell every edge of which is used exactly twice - a sealed, watertight blob - with no ideal return within the coverage tolerance of any of its vertices AND no part of it - corner or sampled triangle interior - within that tolerance of the object itself. Both halves are required. Unsupported alone is not a defect: a sealed shell on a face no view could see is unsupported measurement and correct geometry at once, and this corpus measures six of exactly those. What this gate counts is false surface, and neither a distance summary nor a point-linkage component count can distinguish it from a legitimately separate body.",
+      "limit": 0.0,
+      "measurement": "topology",
+      "name": "no_false_closed_shells",
+      "path": [
+        "unsupported_inaccurate_closed_shells"
+      ],
+      "unit": "components"
+    },
+    {
+      "comparison": "<=",
+      "context": "An edge used by three or more faces. The shipped extractor documents that it emits shared vertices and paired edges, so this is a check on that promise rather than a tolerance - and a mesh that failed it would make every closure count below it meaningless.",
+      "limit": 0.0,
+      "measurement": "topology",
+      "name": "manifold_surface",
+      "path": [
+        "nonmanifold_edge_count"
+      ],
+      "unit": "components"
+    },
+    {
+      "comparison": "<=",
+      "context": "The backing plane really is flat. A residual above 0.06 units - under half a 0.15 voxel - is the reconstruction's own lumpiness on a surface with none.",
+      "limit": 0.06,
+      "measurement": "plane",
+      "name": "plane_roughness_p95",
+      "path": [
+        "residuals",
+        "p95"
+      ],
+      "unit": "synthetic depth units"
+    },
+    {
+      "comparison": "<=",
+      "context": "The protected volume beside the depth step is empty in the scene. Any geometry there is a surface that bridged an edge that is really there, and the limit is absolute rather than a tolerance.",
+      "limit": 0.0,
+      "measurement": "edge",
+      "name": "no_edge_bridging",
+      "path": [
+        "bridged_points"
+      ],
+      "unit": "points"
+    },
+    {
+      "comparison": ">=",
+      "context": "The opposite failure to bridging: a truncation or a minimum weight that refuses to commit at the step erodes it. Both gates are on, so neither can be traded for the other.",
+      "limit": 0.85,
+      "measurement": "edge",
+      "name": "edge_retained",
+      "path": [
+        "edge_coverage"
+      ],
+      "unit": "fraction of 1"
+    },
+    {
+      "comparison": ">=",
+      "context": "Half of the pillar has to survive. This is the gate that stops a coarse voxel passing by erasing the geometry it could not represent, which would otherwise read as a smoother, cleaner surface.",
+      "limit": 0.5,
+      "measurement": "edge",
+      "name": "thin_feature_retained",
+      "path": [
+        "thin_feature_coverage"
+      ],
+      "unit": "fraction of 1"
+    },
+    {
+      "comparison": "<=",
+      "context": "The object's three named extents against the exact truth's. An arm that shrank the object inward while smoothing it moves this and nothing else.",
+      "limit": 0.2,
+      "measurement": "dimensions",
+      "name": "dimension_error",
+      "path": [
+        "absolute",
+        "worst"
+      ],
+      "unit": "synthetic depth units"
+    },
+    {
+      "comparison": "<=",
+      "context": "A component of at most eight points, standing apart from the body at the linkage radius, is a blob. This is the measurement the original complaint is actually about, and every distance summary can stay respectable while it fails.",
+      "limit": 0.0,
+      "measurement": "components",
+      "name": "no_isolated_lumps",
+      "path": [
+        "isolated_components"
+      ],
+      "unit": "components"
+    },
+    {
+      "comparison": "<=",
+      "context": "The scene genuinely contains separate bodies - the backing plane, the sphere, the box and the pillar - so the bar is not one connected surface but SIX, which is one more than the exact control's own five. A reconstruction that shattered into more pieces than the scene has is lumpy however accurate each piece is.",
+      "limit": 6.0,
+      "measurement": "components",
+      "name": "body_count",
+      "path": [
+        "component_count"
+      ],
+      "unit": "components"
+    },
+    {
+      "comparison": "is",
+      "context": "The voxel-view spend against the ceiling the corpus manifest owns. Inapplicable to the raw-points arm, which allocates no volume - recorded as inapplicable rather than as passing.",
+      "limit": true,
+      "measurement": "field",
+      "name": "within_budget",
+      "path": [
+        "within_budget"
+      ]
+    },
+    {
+      "comparison": "<=",
+      "context": "Observed space is the fixed volume both arms share. Geometry outside it was never measured by anything.",
+      "limit": 0.0,
+      "measurement": "geometry",
+      "name": "points_inside_volume",
+      "path": [
+        "outside_volume"
+      ],
+      "unit": "points"
+    }
+  ],
+  "kind": "scanner3d.surface-oracle-case",
+  "notes": [
+    "Synthetic. scanner3d.simulate is not a sensor model, and no conclusion about the device follows from this case.",
+    "Both arms are given byte-identical frames and identical poses. The only thing that differs between them is what is done with those frames.",
+    "The perturbation is applied by tests/surface_oracle.py from this fixture's own declaration, never by a candidate."
+  ],
+  "perturbation": {
+    "band_period": 0,
+    "band_shift": 0,
+    "band_width": 0,
+    "depth_noise_codes": 0,
+    "label": "depth-outliers",
+    "outlier_codes": 60,
+    "outlier_period": 37,
+    "rotation_axis": [
+      0.0,
+      1.0,
+      0.0
+    ],
+    "rotation_bias_degrees": 0.0,
+    "rotation_jitter_degrees": 0.0,
+    "translation_bias": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "translation_jitter": 0.0
+  },
+  "regions": {
+    "analytic_supersample": 2,
+    "bounds_margin": 0.05,
+    "coverage_tolerance": 0.15,
+    "edge_band": {
+      "maximum": [
+        2.15,
+        1.0,
+        10.2
+      ],
+      "minimum": [
+        1.7,
+        -1.0,
+        7.8
+      ]
+    },
+    "isolated_max_points": 8,
+    "linkage_radius": 0.3,
+    "max_triangle_samples": 1000000,
+    "object_region": {
+      "maximum": [
+        2.6,
+        1.7,
+        11.0
+      ],
+      "minimum": [
+        -2.6,
+        -1.7,
+        7.6
+      ]
+    },
+    "plane": {
+      "maximum": [
+        2.4,
+        1.5,
+        12.4
+      ],
+      "minimum": [
+        -2.4,
+        -1.5,
+        11.6
+      ]
+    },
+    "protected": {
+      "maximum": [
+        2.5,
+        0.9,
+        11.5
+      ],
+      "minimum": [
+        2.25,
+        -0.9,
+        8.3
+      ]
+    },
+    "thin_feature": {
+      "maximum": [
+        0.3,
+        1.1,
+        8.75
+      ],
+      "minimum": [
+        -0.3,
+        -1.1,
+        8.35
+      ]
+    },
+    "triangle_sample_order": 3,
+    "truth_pitch": 0.12
+  },
+  "scene": {
+    "depth_scale": 0.005,
+    "intrinsics": {
+      "cx": 320.0,
+      "cy": 200.0,
+      "fx": 120.0,
+      "fy": 120.0,
+      "height": 400,
+      "width": 640
+    },
+    "seed": "surface-oracle:depth-outliers",
+    "shapes": [
+      {
+        "kind": "plane",
+        "normal": [
+          0.0,
+          0.0,
+          -1.0
+        ],
+        "offset": -12.0
+      },
+      {
+        "centre": [
+          -1.2,
+          0.0,
+          9.2
+        ],
+        "kind": "sphere",
+        "radius": 0.9
+      },
+      {
+        "half_extents": [
+          0.8,
+          1.0,
+          1.0
+        ],
+        "kind": "box",
+        "translation": [
+          1.3,
+          0.0,
+          9.0
+        ]
+      },
+      {
+        "half_extents": [
+          0.1,
+          1.0,
+          0.1
+        ],
+        "kind": "box",
+        "translation": [
+          0.0,
+          0.0,
+          8.6
+        ]
+      }
+    ],
+    "views": [
+      {
+        "index": 0,
+        "pose": {
+          "axis": [
+            0.0,
+            1.0,
+            0.0
+          ],
+          "degrees": -12.0,
+          "through": [
+            0.0,
+            0.0,
+            9.3
+          ]
+        },
+        "raw_returned": 2560,
+        "raw_sha256": "ff178f6fc825e3544b7bc4b0534d71ea0b8e22e2e7c26eda9bf111be7d213e4f",
+        "truth_returned": 2560,
+        "truth_sha256": "f03fd41067fba7a1b09c7ffbdb639a861e7421360e7baf89aaf30be05a081538"
+      },
+      {
+        "index": 1,
+        "pose": {
+          "axis": [
+            0.0,
+            1.0,
+            0.0
+          ],
+          "degrees": -6.0,
+          "through": [
+            0.0,
+            0.0,
+            9.3
+          ]
+        },
+        "raw_returned": 2560,
+        "raw_sha256": "6473d27a19e1c5607763d3b3d08c0d781d83f1c406e84cc45c97e025987aa70d",
+        "truth_returned": 2560,
+        "truth_sha256": "f1ee5d2f08fdcf2ba50c9434a10d218899f217b1e846ae3634d93fc512a6296e"
+      },
+      {
+        "index": 2,
+        "pose": {
+          "axis": [
+            0.0,
+            1.0,
+            0.0
+          ],
+          "degrees": 0.0,
+          "through": [
+            0.0,
+            0.0,
+            9.3
+          ]
+        },
+        "raw_returned": 2560,
+        "raw_sha256": "d64eade429e765ad59fca2bce8929a7569c71f28b330218e63a1d6993abd42f4",
+        "truth_returned": 2560,
+        "truth_sha256": "c700e8d86ac41f1eedd03fe365eba512081bb6c610752f105bcebf49928bba0d"
+      },
+      {
+        "index": 3,
+        "pose": {
+          "axis": [
+            0.0,
+            1.0,
+            0.0
+          ],
+          "degrees": 6.0,
+          "through": [
+            0.0,
+            0.0,
+            9.3
+          ]
+        },
+        "raw_returned": 2560,
+        "raw_sha256": "c01c83073076eeb971d3332ed103d75245808ba3f510f33f143c8c4833a3177d",
+        "truth_returned": 2560,
+        "truth_sha256": "db28e216809452045c4fa96ea7418941155e7729b11c9fe5136ac666e6e7c71a"
+      },
+      {
+        "index": 4,
+        "pose": {
+          "axis": [
+            0.0,
+            1.0,
+            0.0
+          ],
+          "degrees": 12.0,
+          "through": [
+            0.0,
+            0.0,
+            9.3
+          ]
+        },
+        "raw_returned": 2560,
+        "raw_sha256": "5fbb0b8d82987a8c22beafe24619fd4ce8ab65a40538df4d5a8d233cadc4343f",
+        "truth_returned": 2560,
+        "truth_sha256": "3a933f0ba649a3ab0588ad8c19e310cc76c0e8ff1bee6817f9da29dfeb400aad"
+      }
+    ],
+    "volume": {
+      "max_depth": 16.0,
+      "maximum": [
+        2.6,
+        1.7,
+        12.5
+      ],
+      "min_depth": 4.0,
+      "minimum": [
+        -2.6,
+        -1.7,
+        7.6
+      ]
+    },
+    "window": {
+      "height": 40,
+      "sample_count": 2560,
+      "u0": 288,
+      "v0": 180,
+      "width": 64
+    }
+  },
+  "schema_version": 1,
+  "what": "a localized outlier of plus or minus 60 codes (0.3 units) on every 37th return",
+  "why": "The noise a running weighted mean is NOT good at. An outlier is not cancelled by averaging; it drags the zero crossing of every voxel it touches, and the isolated lumps that result are what a person calls blobby."
+}

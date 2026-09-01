@@ -249,10 +249,10 @@ three or four steps.
 
 ## Capture 3 — the turntable sweep, for registration
 
-**Object: NOT the calibration target.** This is the easiest mistake to make
-here, and it applies to a cylinder just as much as to a sphere. A sphere looks
-identical from every angle. An upright cylinder standing on the turntable's own
-axis *also* looks identical from every angle, for the same reason — it is
+**Object: NOT the symmetric sphere/cylinder scale target above.** This is the
+easiest mistake to make here. A sphere looks identical from every angle. An
+upright cylinder standing on the turntable's own axis *also* looks identical
+from every angle, for the same reason — it is
 rotationally symmetric about the very axis you are turning it around. Either one
 carries no information about how far it rotated, and registration would report a
 perfect, meaningless alignment. (Re-confirmed synthetically: a cylinder
@@ -260,6 +260,11 @@ centred on the rotation axis returned exactly 0.0° of recovered rotation.)
 
 Use something clearly **asymmetric**: a small figurine, a bracket, a crumpled
 shape, a 3D print with distinct features. It must look different from every side.
+The purpose-built
+[`reconstruction-target-v1`](../reference/targets/reconstruction_v1/) is now the
+preferred object: its ramp, pocket, bump, unequal steps and offset rails were
+laid out to remove the rotational ambiguity, and its CAD supplies the dense
+surface truth the improvised objects do not.
 
 Being asymmetric to the eye is not quite enough — it has to be asymmetric *about
 the rotation axis in use*. A rectangular block whose width and depth are equal
@@ -338,10 +343,14 @@ back around to somewhere it has already been, not just to close a single loop.
 
 ## Capture 4 — fusion and mesh, free
 
-No extra work. Capture 3's frames feed fusion and meshing directly. The only
-thing worth adding is one sweep of an object with a **known simple dimension**
-(a cube with caliper-measured edges), so the final mesh can be checked against a
-real number end to end rather than only at the point-cloud stage.
+No extra work. Capture 3's frames feed fusion and meshing directly. When capture
+3 uses `reconstruction-target-v1`, the same sweep already carries known
+dimensions, predeclared planar regions and a dense CAD reference. Measure the
+individual print as its README requires; the nominal STL alone is not a tighter
+physical reference than the printer that made it. For an improvised asymmetric
+object, still add a sweep of an object with a known simple dimension (a cube
+with caliper-measured edges), so the final mesh can be checked against a real
+number end to end rather than only at the point-cloud stage.
 
 ## If the object must be captured in two orientations
 

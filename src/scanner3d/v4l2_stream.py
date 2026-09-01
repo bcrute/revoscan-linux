@@ -61,15 +61,23 @@ import os
 import struct
 import time
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from pathlib import Path
 from types import MappingProxyType
 from typing import Final
 
 from scanner3d.config import resolve_serial
-from scanner3d.discovery import find_scanners
+from scanner3d.discovery import (
+    DEFAULT_DEV_ROOT,
+    DEFAULT_SYSFS_ROOT,
+    AccessCheck,
+    ScannerDevice,
+    find_scanners,
+)
 from scanner3d.errors import DoctorStatus, ScannerError
 from scanner3d.v4l2_capture import (
     AUTHORIZED_SERIAL,
+    DEPTH_PROFILE,
     EXPECTED_FRAME_BYTES,
     REQUESTED_BUFFERS,
     VIDIOC_DQBUF,
@@ -79,6 +87,7 @@ from scanner3d.v4l2_capture import (
     VIDIOC_S_FMT,
     VIDIOC_STREAMOFF,
     VIDIOC_STREAMON,
+    CaptureProfile,
     NodeSnapshot,
     pack_buf_type,
     pack_buffer,
@@ -88,6 +97,11 @@ from scanner3d.v4l2_capture import (
 )
 
 SCHEMA_VERSION: Final = 1
+
+#: A caller that decides the decimation while the run is going, rather than
+#: before it. Asked once per delivery, after the buffer has been re-queued, and
+#: never trusted to be answerable - see :func:`_resolve_decimate`.
+Cadence = Callable[[], int]
 
 #: Byte offsets into ``struct v4l2_buffer``, derived from
 #: :data:`~scanner3d.v4l2_capture.BUFFER_FORMAT` rather than counted by hand.
@@ -142,6 +156,22 @@ class StreamDeviceUnusable(StreamNotAllowed):
     """The device could not be negotiated into the one mode this module streams."""
 
     status = DoctorStatus.NO_FRAMES
+
+
+class StreamDeviceNotReady(StreamNotAllowed):
+    """The depth capture node never became both resolvable and usable in time.
+
+    Raised INSTEAD of opening anything, so a run refused here has touched no
+    descriptor. It covers two quite different problems - the scanner never came
+    back on the bus, and it came back but this process may not use its node -
+    which is why the status is carried per instance rather than fixed by the
+    class: a caller that reports statuses must not be told "permission" about a
+    scanner that is simply unplugged.
+    """
+
+    def __init__(self, message: str, *, status: DoctorStatus = DoctorStatus.DEVICE_ABSENT) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 class StreamStalled(StreamNotAllowed):
@@ -213,6 +243,12 @@ class StreamResult:
     requested: int
     delivered: int
     kept: int
+    #: The decimation the run STARTED at. Equal to ``decimate_lowest`` and
+    #: ``decimate_highest`` for the ordinary fixed-cadence run; for a controlled
+    #: one it is where the operator set the control, and the two bounds are what
+    #: actually happened. A single number was the whole record before a cadence
+    #: could vary, and left alone it would now describe a spacing that was never
+    #: true for the whole run.
     decimate: int
     first_frame_ms: float | None
     gaps_ms: tuple[float, ...]
@@ -221,6 +257,21 @@ class StreamResult:
     stopped_early: bool
     stop_reason: str
     records: tuple[FrameRecord, ...] = field(repr=False, default=())
+    #: The narrowest and widest spacing any kept frame of this run was taken at.
+    #: Both equal :attr:`decimate` unless a controller moved it.
+    decimate_lowest: int = 0
+    decimate_highest: int = 0
+    #: Times the controller was asked for a cadence and could not usably answer,
+    #: so the previous value stood. Counted rather than raised, because raising
+    #: inside the streaming loop is the one thing this module must never do -
+    #: and reported rather than swallowed, because a cadence that silently
+    #: stopped responding is a run whose spacing does not mean what it says.
+    decimate_refusals: int = 0
+
+    @property
+    def decimate_varied(self) -> bool:
+        """Whether the spacing between kept frames changed during the run."""
+        return bool(self.decimate_lowest) and self.decimate_lowest != self.decimate_highest
 
     @property
     def median_gap_ms(self) -> float | None:
@@ -266,6 +317,10 @@ class StreamResult:
             "delivered": self.delivered,
             "kept": self.kept,
             "decimate": self.decimate,
+            "decimate_lowest": self.decimate_lowest or self.decimate,
+            "decimate_highest": self.decimate_highest or self.decimate,
+            "decimate_varied": self.decimate_varied,
+            "decimate_refusals": self.decimate_refusals,
             "first_frame_ms": self.first_frame_ms,
             "median_gap_ms": self.median_gap_ms,
             "mean_gap_ms": self.mean_gap_ms,
@@ -290,17 +345,78 @@ class StreamResult:
         }
 
 
-def ensure_request(frames: int, decimate: int, duration_s: float) -> None:
-    """Refuse an out-of-bound run before any device is opened."""
+def ensure_request(frames: int, decimate: int | Cadence, duration_s: float) -> int:
+    """Refuse an out-of-bound run before any device is opened.
+
+    Returns the decimation the run starts at, which for a controller means the
+    one answer it gave here. A callable is checked by CALLING it once, at this
+    point, where a bad answer can still be an exception - nothing about a
+    callable can be validated from its type, and the alternative is discovering
+    mid-stream that it returns zero, which is the one place this module must not
+    raise from: a callback that raises between DQBUF and QBUF leaves userspace
+    owning a buffer, and this hardware answers that by re-enumerating. See
+    :func:`_resolve_decimate`.
+
+    Returning the value rather than asking again is what keeps a controller
+    called exactly once per decision. Asking twice before the first delivery
+    would make "one call per delivery" untrue at the only point a controller
+    has no measurements to answer from.
+    """
     if not 1 <= frames <= MAX_FRAMES:
         raise StreamRequestUnusable(
             f"{frames} frames is outside [1, {MAX_FRAMES}]; the ceiling is a runaway "
             "guard, not a performance limit"
         )
-    if decimate < 1:
-        raise StreamRequestUnusable(f"decimate must be at least 1, got {decimate}")
+    if callable(decimate):
+        try:
+            first = decimate()
+        except Exception as exc:  # reported as a refusal, never propagated as itself
+            raise StreamRequestUnusable(
+                f"the decimation controller raised {type(exc).__name__} the first time it was "
+                f"asked: {exc}. A controller that cannot answer before the device is opened "
+                "cannot be asked once a buffer is in flight."
+            ) from exc
+        started = _ensure_decimate(first)
+    else:
+        started = _ensure_decimate(decimate)
     if not 0.0 < duration_s <= MAX_DURATION_S:
         raise StreamRequestUnusable(f"duration {duration_s} s is outside (0, {MAX_DURATION_S}]")
+    return started
+
+
+def _ensure_decimate(value: object) -> int:
+    """One decimation, checked. Raises rather than clamping, before streaming."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise StreamRequestUnusable(
+            f"decimate must be a whole number of delivered frames, got {value!r}"
+        )
+    if value < 1:
+        raise StreamRequestUnusable(f"decimate must be at least 1, got {value}")
+    return value
+
+
+def _resolve_decimate(decimate: int | Cadence, current: int) -> tuple[int, bool]:
+    """The decimation now, and whether the controller had to be ignored.
+
+    NEVER raises, and that is the whole reason it exists. This is called inside
+    the streaming loop, and the module's contract is that nothing in that loop
+    may propagate: an exception there skips the ``VIDIOC_QBUF`` for the buffer
+    in flight, cleanup then runs with userspace still owning it, and on this
+    hardware the device re-enumerates - which to a caller looks exactly like the
+    scanner being unplugged.
+
+    So a controller that raises, or answers with something that is not a usable
+    decimation, is not obeyed and is not fatal either: the last good value
+    stands, the run counts it, and :attr:`StreamResult.decimate_refusals` says
+    it happened. A cadence that silently stopped changing is a capture whose
+    frame spacing does not mean what its record says.
+    """
+    if not callable(decimate):
+        return current, False
+    try:
+        return _ensure_decimate(decimate()), False
+    except Exception:  # the loop must not propagate; see the docstring above
+        return current, True
 
 
 def _dropped_frames(sequences: tuple[int, ...]) -> int:
@@ -351,20 +467,33 @@ def _field(buf: bytes, name: str) -> int:
 REENUMERATION_TIMEOUT_S: Final = 6.0
 
 
+#: How often readiness is re-checked while waiting.
+#:
+#: The window being waited through is measured in tenths of a second, so a
+#: slower poll would spend most of it asleep and a faster one would spin a core
+#: stat'ing a node for no extra resolution.
+READINESS_POLL_S: Final = 0.05
+
+
 def wait_for_scanner(
     serial: str | None = None, *, timeout_s: float = REENUMERATION_TIMEOUT_S
 ) -> bool:
-    """Block until the scanner is enumerable again, or the timeout expires.
+    """Block until the scanner is ENUMERABLE again, or the timeout expires.
 
-    Returns whether it came back. Callers that open a stream shortly after
-    closing one should call this first - see :data:`REENUMERATION_TIMEOUT_S` for
-    why the device is absent at all.
+    Returns whether it came back. See :data:`REENUMERATION_TIMEOUT_S` for why
+    the device is absent at all.
 
-    ``serial`` of None waits for ANY scanner, which is what a caller almost
-    always means: it has just closed a stream on the device it already resolved
-    and wants that same device back. Matching against a configured-but-absent
-    serial would wait the full timeout every time and then proceed anyway - a
-    silent six-second tax that this function existed to avoid.
+    ``serial`` of None waits for ANY scanner. Matching against a
+    configured-but-absent serial would wait the full timeout every time and then
+    proceed anyway - a silent six-second tax that this function existed to
+    avoid.
+
+    Enumerable is NOT the same question as usable, and callers that are about to
+    open the node want :func:`wait_for_capture_access` instead: a node is
+    registered by the kernel before this account necessarily has access to it,
+    and this function returns the moment sysfs lists the device. Retained as
+    part of the public surface for callers that genuinely only want to know
+    whether the device is back on the bus; the GUI no longer uses it.
     """
     deadline = time.monotonic() + timeout_s
     wanted = serial.strip() if serial and serial.strip() else None
@@ -380,13 +509,309 @@ def wait_for_scanner(
         time.sleep(0.05)
 
 
+@dataclass(frozen=True, slots=True)
+class CaptureReadiness:
+    """Whether the profile's capture node may be opened - decided without opening it.
+
+    ``ready`` is the whole answer for a caller that only wants to know whether
+    to proceed. Everything else exists so a wait that did NOT succeed can say
+    which of several quite different things it was, in words the person looking
+    at the window can act on.
+
+    ``access`` is the last :class:`~scanner3d.discovery.AccessCheck` taken of the
+    resolved node, and it is ``None`` whenever the wait never got as far as
+    having a node to check - which is exactly what separates "the scanner is not
+    there" from "it is there and this account may not use it".
+    """
+
+    ready: bool
+    reason: str
+    serial: str | None = None
+    node_path: str | None = None
+    access: AccessCheck | None = None
+    #: True when readiness deliberately declined to NAME a node: several
+    #: scanners are attached and no serial was asked for, so choosing one would
+    #: be a guess. Ready, but not on the strength of any node - see
+    #: :func:`wait_for_capture_access`.
+    deferred: bool = False
+    timed_out: bool = False
+    polls: int = 0
+    waited_s: float = 0.0
+
+    @property
+    def status(self) -> DoctorStatus:
+        """Which kind of problem this was, for a caller that reports statuses.
+
+        Read from what was observed rather than assumed: a node that exists and
+        is not readable and writable is a permission problem, and everything
+        else that stopped the wait is the device not being there in the shape
+        this profile needs.
+        """
+        if self.ready:
+            return DoctorStatus.OK
+        if self.access is not None and self.access.exists:
+            return DoctorStatus.PERMISSION_DENIED
+        return DoctorStatus.DEVICE_ABSENT
+
+    def failure_text(self) -> str:
+        """The operator-facing explanation of a wait that ended not ready.
+
+        Says what was LAST observed rather than what is usually wrong: the same
+        timeout covers a scanner that never came back and one that came back
+        with a node this account may not use, and those two have no advice in
+        common. The permission paragraph is therefore attached only when a node
+        really was seen and really was not usable.
+        """
+        head = (
+            f"The {DEPTH_PROFILE.role} capture node was still not usable after "
+            f"{self.waited_s:.2f} s and {self.polls} checks, none of which opened a "
+            f"device node: {self.reason}"
+        )
+        if self.status is not DoctorStatus.PERMISSION_DENIED:
+            return head
+        return (
+            f"{head}\n\n"
+            "A node that exists but is not readable and writable by this process is a "
+            "permission problem, not a scanner fault. On this host access comes from a "
+            "per-seat ACL rather than group membership, and such an ACL is normally "
+            "attached shortly AFTER the device enumerates - a brief window where it is "
+            "missing is expected, and absorbing that window is what this wait is for. "
+            "A window that never closes needs the account granted access - membership of "
+            "the group owning the node, or a udev rule that tags it for this seat - and "
+            "retrying will not substitute for it."
+        )
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "ready": self.ready,
+            "reason": self.reason,
+            "status": str(self.status),
+            "serial": self.serial,
+            "node_path": self.node_path,
+            "access": self.access.as_dict() if self.access is not None else None,
+            "deferred_to_resolver": self.deferred,
+            "timed_out": self.timed_out,
+            "polls": self.polls,
+            "waited_s": round(self.waited_s, 3),
+        }
+
+
+def _node_readiness(device: ScannerDevice, profile: CaptureProfile) -> CaptureReadiness:
+    """Readiness of one identified device's capture node for ``profile``.
+
+    The role comes from the profile and the node from the USB interface string
+    descriptor plus the V4L2 index, exactly as
+    :func:`~scanner3d.v4l2_capture.resolve_capture_node` does it. No ``videoN``
+    number is consulted, so a scanner whose depth camera lands on ``video7``
+    this boot is answered about ``video7``.
+    """
+    serial = device.serial
+    function = device.function(profile.role)
+    if function is None:
+        return CaptureReadiness(
+            ready=False,
+            serial=serial,
+            reason=(
+                f"{device.usb_path} exposes no {profile.role!r} camera function yet; the "
+                "interface string descriptors do not name one"
+            ),
+        )
+    nodes = function.capture_nodes
+    if not nodes:
+        present = ", ".join(f"{n.name} (index {n.index})" for n in function.video_nodes) or "none"
+        return CaptureReadiness(
+            ready=False,
+            serial=serial,
+            reason=(
+                f"the {profile.role} function exposes no V4L2 {profile.node_kind} node yet "
+                f"(nodes registered: {present})"
+            ),
+        )
+    if len(nodes) > 1:
+        names = ", ".join(node.name for node in nodes)
+        return CaptureReadiness(
+            ready=False,
+            serial=serial,
+            reason=(
+                f"the {profile.role} function exposes {len(nodes)} {profile.node_kind} nodes "
+                f"({names}); refusing to choose between them"
+            ),
+        )
+    node = nodes[0]
+    # Already taken by discovery on THIS poll, from stat() and os.access(). No
+    # descriptor is opened to answer this, which is the point: opening the node
+    # to find out whether it can be opened is the race being waited out.
+    access = node.access
+    if not access.exists:
+        return CaptureReadiness(
+            ready=False,
+            serial=serial,
+            node_path=node.device_path,
+            access=access,
+            reason=f"{node.device_path} has not appeared yet",
+        )
+    if not (access.readable and access.writable):
+        missing = " and ".join(
+            name
+            for name, granted in (("readable", access.readable), ("writable", access.writable))
+            if not granted
+        )
+        return CaptureReadiness(
+            ready=False,
+            serial=serial,
+            node_path=node.device_path,
+            access=access,
+            reason=(
+                f"{node.device_path} exists but is not {missing} by this process "
+                f"(mode {access.mode}, owner uid {access.owner_uid}, group gid "
+                f"{access.group_gid})"
+            ),
+        )
+    return CaptureReadiness(
+        ready=True,
+        serial=serial,
+        node_path=node.device_path,
+        access=access,
+        reason=(
+            f"{node.device_path} is the sole {profile.node_kind} node of the "
+            f"{profile.role} function on interface {function.interface_number} and is "
+            "readable and writable by this process"
+        ),
+    )
+
+
+def _readiness_now(
+    serial: str | None,
+    profile: CaptureProfile,
+    sysfs_root: Path,
+    dev_root: Path,
+) -> CaptureReadiness:
+    """One poll: resolve identity and role from scratch, then check access.
+
+    Nothing is carried over from the previous poll. The device re-enumerates
+    between them - a new bus address, a new sysfs path, potentially a new
+    ``videoN`` - so a cached node is a node that may no longer exist.
+    """
+    try:
+        devices = find_scanners(sysfs_root=sysfs_root, dev_root=dev_root)
+    except ScannerError as exc:
+        return CaptureReadiness(ready=False, reason=f"could not enumerate: {exc}")
+    # Deliberately NOT falling back to configured_serial(): ``None`` here means
+    # "any scanner", which is the meaning the wait this replaced had, and the
+    # caller that knows which scanner it wants passes it. Reading configuration
+    # behind the caller's back would make ``None`` mean two different things
+    # depending on a file the caller never mentioned.
+    wanted = serial.strip() if serial and serial.strip() else None
+
+    if wanted:
+        matches = tuple(device for device in devices if device.serial == wanted)
+        if not matches:
+            return CaptureReadiness(
+                ready=False,
+                serial=wanted,
+                reason=f"no 2207:110c scanner with serial {wanted!r} is attached",
+            )
+        if len(matches) > 1:
+            return CaptureReadiness(
+                ready=False,
+                serial=wanted,
+                reason=(
+                    f"{len(matches)} attached devices report serial {wanted!r}; refusing "
+                    "to choose between them"
+                ),
+            )
+        return _node_readiness(matches[0], profile)
+
+    if not devices:
+        return CaptureReadiness(ready=False, reason="no 2207:110c scanner is attached")
+    if len(devices) > 1:
+        attached = ", ".join(sorted(str(device.serial) for device in devices))
+        return CaptureReadiness(
+            ready=True,
+            deferred=True,
+            reason=(
+                f"{len(devices)} scanners are attached ({attached}) and no serial was asked "
+                "for, so there is no one node to wait on without guessing; the wait ends "
+                "here and the stream's own resolver refuses or chooses in its own words"
+            ),
+        )
+    return _node_readiness(devices[0], profile)
+
+
+def wait_for_capture_access(
+    serial: str | None = None,
+    *,
+    timeout_s: float = REENUMERATION_TIMEOUT_S,
+    profile: CaptureProfile = DEPTH_PROFILE,
+    sysfs_root: Path = DEFAULT_SYSFS_ROOT,
+    dev_root: Path = DEFAULT_DEV_ROOT,
+    poll_s: float = READINESS_POLL_S,
+) -> CaptureReadiness:
+    """Block until the profile's capture node is USABLE, or the timeout expires.
+
+    Callers that open a stream shortly after closing one must call this first -
+    see :data:`REENUMERATION_TIMEOUT_S` for why the device is absent at all.
+
+    Enumerability is not the question this answers, and answering only that was
+    a real defect. What was OBSERVED on 2026-08-26: the GUI's enumeration-only
+    wait returned in 0.003 s, the very next open failed with ``EACCES`` on
+    ``/dev/video0``, that node had been created in the same second, and when it
+    was inspected afterwards it was ``root:video 0660`` with a valid per-user
+    ACL for this account. No access snapshot was taken at the instant of the
+    failing open, so the ACL not yet being attached at that moment is an
+    INFERENCE - a strongly consistent one, and the only mechanism proposed that
+    fits all four observations - rather than something the run proved.
+
+    What is fixed here does not depend on that inference being right. A node the
+    kernel has registered is not necessarily a node this process may open, for
+    whatever reason it may not; so readiness means the sole index-0 node of the
+    profile's role exists AND is readable AND is writable, checked until it is
+    or the ceiling expires - never that a fixed ``/dev/videoN`` is present and
+    never that some scanner is merely enumerable.
+
+    Identity and role are resolved on EVERY poll rather than once, because the
+    device re-enumerates: the sysfs path, the bus address and the node number
+    can all differ between one poll and the next.
+
+    ``serial`` names the exact scanner to wait for. ``None`` means ANY scanner,
+    which is the meaning the enumeration-only :func:`wait_for_scanner` had and
+    is preserved deliberately: no configuration is read here, so a caller that
+    wants the configured device resolves it and passes it - the GUI does
+    exactly that, which is what keeps one run's colour, depth and readiness
+    aimed at one identity. With ``None`` and several attached, this returns
+    ready WITHOUT a node: choosing between them would be a guess, the stream's
+    own resolver is the authority on that ambiguity, and blocking for the full
+    timeout before letting it say so would just be a silent tax.
+    :attr:`CaptureReadiness.deferred` records that it happened.
+
+    Nothing here opens a device node. The result is decided from sysfs and
+    ``stat``, which is what lets it be asked repeatedly without disturbing a
+    device that answers an ill-timed open by re-enumerating.
+    """
+    started = time.monotonic()
+    deadline = started + timeout_s
+    polls = 0
+    while True:
+        polls += 1
+        state = _readiness_now(serial, profile, sysfs_root, dev_root)
+        now = time.monotonic()
+        state = replace(state, polls=polls, waited_s=now - started)
+        if state.ready:
+            return state
+        if now >= deadline:
+            return replace(state, timed_out=True)
+        time.sleep(poll_s)
+
+
 def stream_frames(
     serial: str = AUTHORIZED_SERIAL,
     *,
     frames: int,
     on_frame: Callable[[bytes, FrameRecord], None] | None = None,
+    after_frame: Callable[[bytes, FrameRecord], None] | None = None,
+    on_delivery: Callable[[bytes, FrameRecord], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
-    decimate: int = 1,
+    decimate: int | Cadence = 1,
     duration_s: float = MAX_DURATION_S,
     buffers: int = REQUESTED_BUFFERS,
 ) -> StreamResult:
@@ -402,6 +827,43 @@ def stream_frames(
     that wants a 3-degree angular step should not have to buffer everything to
     get it.
 
+    ``decimate`` may instead be a CALLABLE, asked once per delivery for the
+    spacing to use from the next kept frame onwards. That is how a caller holds
+    a measured frame spacing on a capture whose speed varies - see
+    :mod:`scanner3d.cadence` - and it changes nothing for a caller that passes a
+    number, which every existing one does. Two properties are worth stating
+    because they are the ones a varying cadence could plausibly get wrong:
+
+    - **A change takes effect at the next kept frame, not retroactively.** The
+      selection is a countdown of deliveries between keeps rather than a modulo
+      of the delivered index, because changing the modulus mid-run makes the
+      phase jump - two keeps back to back, or a skip run longer than either the
+      old value or the new one. The one exception is a change to a FINER
+      cadence, which shortens the skip run already in progress: that can only
+      bring a keep forward, and a controller only ever asks for a finer cadence
+      because the current one was already too coarse.
+    - **The controller is never allowed to end the run.** It is asked only after
+      the buffer has been re-queued, and if it raises or answers with something
+      that is not a usable decimation, the previous value stands and
+      :attr:`StreamResult.decimate_refusals` counts it. Raising out of the
+      streaming loop is the one failure this module must not have; see
+      ``should_stop`` below for what a userspace-owned buffer does to this
+      hardware.
+
+    ``on_delivery`` receives EVERY complete delivery, whether or not decimation
+    selected it. It exists because how often a picture should reach a screen and
+    how often a frame should be written, deprojected and aligned are two
+    different questions with two different right answers: at ``decimate=3`` the
+    operator watched a depth view that moved at a third of the rate the scanner
+    was actually delivering, while the expensive work stayed correctly thinned.
+    A caller that passes only ``on_frame`` is unaffected, and every existing one
+    does exactly that.
+
+    When one complete delivery is both previewed and kept, the payload is copied
+    ONCE and handed to both callbacks. A second copy per frame would be half a
+    megabyte of pointless memory traffic at the measured 4.6 fps, and the bytes
+    are immutable, so there is nothing for the two consumers to do to each other.
+
     A buffer whose ``bytesused`` is not exactly
     :data:`~scanner3d.v4l2_capture.EXPECTED_FRAME_BYTES` is recorded, counted in
     ``short_frames``, re-queued and then dropped. It never reaches the callback,
@@ -414,6 +876,20 @@ def stream_frames(
     buffer is re-queued. That copy is not optional: the kernel may refill the
     mapping the moment it is queued again, so a caller holding a view would see
     it change underneath them.
+
+    ``after_frame`` receives the same ``(raw_bytes, record)`` as ``on_frame``,
+    for the same frames, but AFTER the buffer has been re-queued. That is the
+    difference the whole parameter exists for: work done in ``on_frame`` sits
+    between ``VIDIOC_DQBUF`` and ``VIDIOC_QBUF``, so it holds a driver buffer
+    for its whole duration and stalls both the depth deliveries behind it and
+    anything the caller draws from them. Work that is expensive and does not
+    have to happen before the buffer goes back - deprojecting a frame the caller
+    is holding in memory, a global search against a model - belongs here, where
+    it costs the device nothing and a slow one leaves every buffer queued.
+
+    The payload handed to it is the same copy ``on_frame`` was given, taken from
+    the mmap before the re-queue, so it is not affected by the buffer being
+    refilled.
 
     ``should_stop`` is polled after each buffer has been RE-QUEUED, and ending
     the stream there is the only safe place to end it early. A callback that
@@ -433,7 +909,7 @@ def stream_frames(
     callback that raises still leaves the device closed rather than held, but
     "closed" and "healthy" are not the same thing and only the flag gives both.
     """
-    ensure_request(frames, decimate, duration_s)
+    started_decimate = ensure_request(frames, decimate, duration_s)
 
     # Resolved here rather than baked into the default, so an installation that
     # configured nothing still works when exactly one scanner is attached, and
@@ -451,6 +927,21 @@ def stream_frames(
     first_ms: float | None = None
     stopped_early = False
     reason = "requested frame count reached"
+
+    # ``spacing`` is the decimation in force; ``pending`` is how many more
+    # deliveries have to arrive before the next keep slot. Zero to start, so the
+    # FIRST delivery is a keep - which is what ``index % decimate == 0`` did and
+    # what a caller asking for one frame in three has always got.
+    #
+    # From ``ensure_request``, which already called a controller once and
+    # refused the run if it could not answer - so this first value is a checked
+    # one, the loop never starts on a guess, and the controller is asked exactly
+    # once per decision rather than twice before the first delivery.
+    spacing = started_decimate
+    started_at = spacing
+    pending = 0
+    lowest = highest = spacing
+    decimate_refusals = 0
 
     fd = os.open(path, os.O_RDWR | os.O_CLOEXEC | os.O_NONBLOCK)
     maps: list[mmap.mmap] = []
@@ -554,17 +1045,51 @@ def stream_frames(
             # from what did arrive would be a fabrication with a plausible size.
             #
             # ``kept`` therefore counts only complete deliveries. Decimation
-            # still selects on the DELIVERED index, so a short frame consumes
-            # its slot rather than shifting the next one into it: the selection
-            # stays a property of arrival order, not of which frames happened to
-            # be usable.
-            if complete and index % decimate == 0:
+            # still selects on ARRIVAL, so a short frame consumes its slot
+            # rather than shifting the next one into it: the selection stays a
+            # property of arrival order, not of which frames happened to be
+            # usable.
+            #
+            # A COUNTDOWN rather than ``index % decimate``, and that is what
+            # makes a varying cadence expressible at all. The modulo is a phase
+            # function of the delivered index: change the modulus half way
+            # through and the phase jumps, so two keeps can land back to back or
+            # a skip run can stretch well past either the old value or the new
+            # one - neither of which is a spacing anybody asked for. A countdown
+            # has one meaning under change and it is the meaning the name has
+            # always had: this many deliveries between keeps. For a fixed
+            # ``decimate`` it selects the identical frames the modulo did, 0, 3,
+            # 6 at three, which is what keeps every existing run unchanged.
+            selected = complete and pending == 0
+            if pending == 0:
+                # Refilled from the value in force AT THE KEEP, so a cadence
+                # that changed mid-skip takes effect at the next kept frame
+                # rather than retroactively. The one exception is a change
+                # DOWNWARDS, clamped below where it is resolved: that can only
+                # bring a keep forward, never push one back.
+                pending = spacing - 1
+            else:
+                pending -= 1
+            if selected:
                 kept += 1
-                if on_frame is not None:
-                    # Copy before re-queueing: the kernel may refill this mapping
-                    # the instant it is queued, so a view handed out here would
-                    # mutate.
-                    on_frame(bytes(maps[buffer_index][:used]), record)
+            wanted = on_delivery is not None or (
+                selected and (on_frame is not None or after_frame is not None)
+            )
+            if complete and wanted:
+                # Copy before re-queueing: the kernel may refill this mapping
+                # the instant it is queued, so a view handed out here would
+                # mutate. One copy for both consumers.
+                payload = bytes(maps[buffer_index][:used])
+                # Display first, and the keep second, because the keep is the
+                # expensive one: writing the frame, deprojecting it and aligning
+                # it all happen inside ``on_frame``, and a picture that waits
+                # behind them arrives late for no reason. A short delivery
+                # reaches NEITHER - it is not a frame, and previewing 70% of one
+                # would put a torn picture on the screen and call it the scanner.
+                if on_delivery is not None:
+                    on_delivery(payload, record)
+                if selected and on_frame is not None:
+                    on_frame(payload, record)
 
             # Unconditional, and reached by a short delivery on exactly the same
             # path as a complete one: the buffer is the driver's either way, and
@@ -572,11 +1097,33 @@ def stream_frames(
             # teardown - which this hardware answers by re-enumerating.
             fcntl.ioctl(fd, VIDIOC_QBUF, buf, True)
 
-            # Polled here, AFTER re-queueing, so the driver owns every buffer
-            # again before the finally block tears the mapping down.
+            # The buffer is the driver's again, so this is the first instant at
+            # which a caller may take as long as it likes. ``payload`` is the
+            # copy taken above - which is why the guard that makes it includes
+            # this callback - so it is unaffected by the re-queue.
+            if complete and wanted and selected and after_frame is not None:
+                after_frame(payload, record)
+
+            # Both of these are polled here, AFTER re-queueing, so the driver
+            # owns every buffer again before either one can end the run or take
+            # any time.
             if should_stop is not None and should_stop():
                 stopped_early, reason = True, CALLER_STOP_REASON
                 break
+
+            spacing, unanswered = _resolve_decimate(decimate, spacing)
+            if unanswered:
+                decimate_refusals += 1
+            lowest = min(lowest, spacing)
+            highest = max(highest, spacing)
+            # A cadence that just went FINER shortens the skip run already in
+            # progress instead of waiting it out. At the widest setting that
+            # wait is nine more deliveries - about two seconds at the measured
+            # rate - and the reason a controller asks for a finer cadence is
+            # always that the last one was already too coarse. Clamping can only
+            # bring the next keep forward, so a coarser answer still takes
+            # effect at the next keep and never extends the current run.
+            pending = min(pending, spacing - 1)
     finally:
         # Each step is suppressed on its own: a failure in one must not skip the
         # rest, or a run that died mid-stream would leave the device held open.
@@ -599,7 +1146,10 @@ def stream_frames(
         requested=frames,
         delivered=len(records),
         kept=kept,
-        decimate=decimate,
+        decimate=started_at,
+        decimate_lowest=lowest,
+        decimate_highest=highest,
+        decimate_refusals=decimate_refusals,
         first_frame_ms=first_ms,
         gaps_ms=tuple(gaps),
         dropped_by_sequence=dropped,

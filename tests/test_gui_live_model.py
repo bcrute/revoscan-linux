@@ -28,6 +28,7 @@ own correctness lives in ``test_icp_plane.py`` and ``test_coverage.py``.
 from __future__ import annotations
 
 import logging
+from itertools import pairwise
 from pathlib import Path
 from typing import cast
 
@@ -274,6 +275,100 @@ def test_one_frame_that_will_not_align_no_longer_costs_a_whole_refresh(
     assert _notes(window)[1] == (f"preview after {total - 1} aligned frames of {total} saved -")
 
 
+def test_the_refresh_indices_across_a_long_capture_are_exactly_the_schedule(
+    stream_kernel, capture_dir: Path, live
+) -> None:
+    """Every refresh of a thirty-frame sweep, named, including two failures.
+
+    The owner's 15:50:53 run measured what the old interval cost: eight models
+    over the whole sweep, at 3, 15, 27, 39, 51, 63, 75 and 87 aligned frames -
+    every one of them applied, none superseded, none dropped, and each one built
+    in between 0.008 s and 0.175 s. Nothing was struggling. The picture simply
+    changed once every 8-9 seconds, which over four minutes is a view the
+    operator cannot tell from a stalled one.
+
+    So the interval is four alignments, and this states the whole resulting
+    series rather than a property of it. Two frames are deliberately unhealthy:
+    one alignment fails, and one model build fails. Neither is allowed to cost a
+    refresh - the first slips the schedule by one frame because the schedule
+    counts ALIGNMENTS, and the second is retried on the very next one.
+    """
+    total = 30
+    stream_kernel(frames(total))
+    window = CaptureWindow(frames=total)
+    # Attempt 9 aligns saved frame 10; build attempt 3 is the refresh due at 11
+    # aligned frames.
+    aligned, built = live(failed_alignments={9}, failed_models={3})
+
+    start_capture(window)
+
+    assert len(aligned) == total - 1
+    assert len(built) == 8
+    # Aligned frames at each SUCCESSFUL refresh: three to start, then the series
+    # the interval produces. The failed alignment at frame 10 slips every later
+    # entry by one saved frame without costing a refresh, because the schedule
+    # counts alignments; the failed build at 11 aligned frames costs nothing at
+    # all, because the mark only moves on success.
+    series = [
+        cast(gui.ModelSnapshot, snapshot).aligned for (snapshot,) in window.worker.coverage.emitted
+    ]
+    assert series == [3, 7, 12, 16, 20, 24, 28]
+    # Four alignments apart everywhere except across the failed build, where the
+    # retry landed on the very next alignment rather than waiting for the next
+    # multiple - which is five, and is the failure mode being bounded, not an
+    # interval of five.
+    assert [later - earlier for earlier, later in pairwise(series)] == [
+        COVERAGE_EVERY,
+        COVERAGE_EVERY + 1,
+        COVERAGE_EVERY,
+        COVERAGE_EVERY,
+        COVERAGE_EVERY,
+        COVERAGE_EVERY,
+    ]
+    assert len(window.frames_on_disk()) == total
+
+
+def test_the_first_model_of_a_capture_frames_the_view_and_the_rest_do_not(
+    stream_kernel, capture_dir: Path, live
+) -> None:
+    """One fit at the start of a capture; every later refresh leaves it alone.
+
+    Re-centring and re-zooming on every snapshot is what made a growing model
+    look like a still one: the object was normalised back to the same apparent
+    size each time, and whatever the operator had panned or zoomed to was thrown
+    away with it. The first model of a capture has no such pose to preserve -
+    the previous one described a different object - so it is the boundary.
+    """
+    total = MIN_COVERAGE_CLOUDS + 2 * COVERAGE_EVERY
+    stream_kernel(frames(total))
+    window = CaptureWindow(frames=total)
+    live()
+
+    start_capture(window)
+
+    assert window._cloud.fits == [True, False, False]
+
+
+def test_a_first_model_that_fails_to_build_leaves_the_fit_to_its_successor(
+    stream_kernel, capture_dir: Path, live
+) -> None:
+    """The boundary belongs to the first model DRAWN, not the first attempted.
+
+    A build that raised put nothing on the screen, so the framing it would have
+    carried has not happened yet and still has to. Marking the boundary spent on
+    an attempt would leave the first visible model of a capture drawn through
+    the previous capture's camera.
+    """
+    stream_kernel(frames(5))
+    window = CaptureWindow(frames=5)
+    _aligned, built = live(failed_models={1})
+
+    start_capture(window)
+
+    assert len(built) == 2
+    assert window._cloud.fits == [True]
+
+
 def test_a_failed_model_build_is_retried_on_the_very_next_alignment(
     stream_kernel, capture_dir: Path, live
 ) -> None:
@@ -325,18 +420,22 @@ def test_a_stage_that_fails_on_every_frame_does_not_flood_the_log(
     At the measured 4.6 fps a per-frame warning is thousands of identical lines
     in a file whose only purpose is being read after the fact, so the first few
     carry the reason and the rest are summarised.
+
+    Asked of the MODEL stage rather than the alignment stage, which is the one
+    that can still fail on every frame: three consecutive alignment failures now
+    end the capture as a tracking loss (see ``test_gui_tracking_loss.py``), so
+    alignment can no longer produce a flood for this to throttle. The throttle
+    itself is one shared helper and is unchanged.
     """
-    stream_kernel(frames(6))
-    window = CaptureWindow(frames=6)
-    live(failed_alignments=set(range(1, 7)))
+    stream_kernel(frames(8))
+    window = CaptureWindow(frames=8)
+    live(failed_models=set(range(1, 9)))
 
     with caplog.at_level(logging.WARNING, logger="scanner3d.gui"):
         start_capture(window)
 
-    warnings = [
-        record for record in caplog.records if "live alignment failed" in record.getMessage()
-    ]
+    warnings = [record for record in caplog.records if "live model failed" in record.getMessage()]
     assert len(warnings) == gui.FAILURES_REPORTED
     assert window.worker.coverage.emitted == []
     # And the capture itself was untouched by any of it.
-    assert len(window.frames_on_disk()) == 6
+    assert len(window.frames_on_disk()) == 8

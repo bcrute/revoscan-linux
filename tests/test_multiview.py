@@ -73,6 +73,7 @@ import pytest
 
 from scanner3d.errors import DoctorStatus
 from scanner3d.geometry import (
+    IDENTITY_MATRIX,
     Point,
     Rigid,
     determinant,
@@ -85,7 +86,11 @@ from scanner3d.geometry import (
 from scanner3d.multiview import (
     AMBIGUITY_MARGIN,
     MIN_ALIGN_POINTS,
+    PRIOR_ORIGIN,
     SCHEMA_VERSION,
+    SCORE_CELL_FRACTION,
+    SCORE_MISS_CELLS,
+    SCORE_NEIGHBOUR_REACH,
     CloudDegenerate,
     CloudTooSmall,
     CoarseAlignment,
@@ -363,11 +368,284 @@ def test_coarse_align_reports_ambiguous_for_a_genuinely_symmetric_cloud():
 
     assert result.unambiguous is False
     assert result.margin < AMBIGUITY_MARGIN
+    # Ambiguous because a genuinely DIFFERENT placement ties with the best one,
+    # not because the search never found an alternative to compare against - the
+    # two are opposite pieces of evidence and only one of them is symmetry.
+    assert result.rival_index is not None
     assert result.source_principal_degenerate is True
     assert result.target_principal_degenerate is True
     joined = " ".join(result.limitations)
     assert "does not clearly distinguish" in joined
     assert "near-equal principal extents" in joined
+
+
+# --------------------------------------------------------------------------
+# Coarse alignment: what the ranking is measured on
+# --------------------------------------------------------------------------
+
+
+def _by_transform(result: CoarseAlignment, transform: Rigid):
+    """The one ranked candidate that is exactly ``transform``, or a failure."""
+    matches = [candidate for candidate in result.candidates if candidate.transform == transform]
+    assert len(matches) == 1, f"expected exactly one candidate at {transform}, got {len(matches)}"
+    return matches[0]
+
+
+def _mean_displacement(points: Sequence[Point], a: Rigid, b: Rigid) -> float:
+    """How far apart two transforms put the same cloud, averaged over it."""
+    return sum(
+        distance(first, second)
+        for first, second in zip(a.apply_all(points), b.apply_all(points), strict=True)
+    ) / len(points)
+
+
+#: Distance between the repeated blocks of :func:`_repeated_blocks`, chosen so
+#: that a block slid onto the next one lands EXACTLY on it while the block slid
+#: off the end lands nowhere near anything: far beyond both the miss cost and
+#: the reach of the scoring pass's own neighbour search, so a miss is a miss
+#: rather than a distant partner found and charged its true distance.
+_BLOCK_PERIOD = 100.0
+
+
+def _repeated_blocks() -> tuple[Point, ...]:
+    """Four identical small blocks in a row, one :data:`_BLOCK_PERIOD` apart.
+
+    Built for one property: sliding this cloud by a whole number of periods
+    puts some of its blocks EXACTLY onto the others and the rest of them into
+    empty space. There is no third case - no point lands near a target point
+    without landing on it - which is what lets the score below be an exact
+    number rather than an approximation of one.
+    """
+    return tuple(
+        (b * _BLOCK_PERIOD + i, float(j), float(k))
+        for b in range(4)
+        for i in range(4)
+        for j in range(3)
+        for k in range(2)
+    )
+
+
+def _coarse_cell(target: Sequence[Point]) -> float:
+    """The scoring grid's cell for ``target``, at :func:`coarse_align`'s own scale.
+
+    The LARGEST SINGLE-AXIS span, not the bounding-box diagonal
+    :func:`~scanner3d.registration.cloud_extent` reports - those are different
+    numbers on any cloud that is not a line, and it is the axis span the coarse
+    grid is built from. Written out here rather than imported because a test
+    that asserts an exact score has to state the arithmetic it expects rather
+    than borrow it from the code under test.
+    """
+    return max(
+        max(max(p[axis] for p in target) - min(p[axis] for p in target) for axis in range(3))
+        * SCORE_CELL_FRACTION,
+        1e-6,
+    )
+
+
+def test_unmatched_geometry_lowers_a_coarse_score():
+    """The defect the tracking recovery was refused by, pinned at its source.
+
+    Three placements of the same cloud on the same target, sliding it one, two
+    and three block periods along. Every point that matches, matches EXACTLY,
+    and every point that does not is in empty space; only HOW MANY match
+    differs - three quarters, then half, then a quarter.
+
+    A mean taken over MATCHED points only scores all three of these 0.0. They
+    tie, exactly, and the ranking cannot tell a nearly complete fit from a
+    mostly-missing one. That is what this module used to do, and downstream it
+    meant a tracking recovery was refused as ambiguous while the geometry
+    distinguished the placements clearly. The score is a TRUNCATED mean over ALL
+    of the sampled points now: a point with no partner costs
+    :data:`~scanner3d.multiview.SCORE_MISS_CELLS` cells, so each placement costs
+    exactly the fraction of itself it left off the target.
+    """
+    blocks = _repeated_blocks()
+    slides = {
+        periods: Rigid.of(IDENTITY_MATRIX, (_BLOCK_PERIOD * periods, 0.0, 0.0))
+        for periods in (1, 2, 3)
+    }
+
+    # ``sample`` at the cloud's own size so nothing is decimated away and the
+    # matched counts below are out of the whole cloud rather than a subset.
+    result = coarse_align(
+        blocks,
+        blocks,
+        sample=len(blocks),
+        priors=tuple(slides.values()),
+        include_octahedral=False,
+    )
+
+    miss = SCORE_MISS_CELLS * _coarse_cell(blocks)
+    scored = {periods: _by_transform(result, slide) for periods, slide in slides.items()}
+    for periods, candidate in scored.items():
+        # Exactly the blocks that landed on another block matched, and every one
+        # of them matched perfectly - so the whole of the score is the miss cost.
+        assert candidate.matched == len(blocks) * (4 - periods) // 4, periods
+        missed = 1.0 - candidate.matched / len(blocks)
+        assert candidate.score == pytest.approx(missed * miss, rel=1e-9), periods
+
+    # The property, stated without the arithmetic: unmatched geometry costs, and
+    # more of it costs more. Under a matched-only mean all three would be 0.0.
+    assert scored[1].score < scored[2].score < scored[3].score
+    positions = [result.candidates.index(scored[periods]) for periods in (1, 2, 3)]
+    assert positions == sorted(positions)
+    # And it costs a BOUNDED amount, which is what keeps a partial view rankable
+    # at all rather than ranked entirely on how much of it overlaps.
+    assert scored[3].score < miss
+
+
+def test_a_caller_prior_is_ranked_by_the_same_measurement_as_a_generated_orientation():
+    """A prior earns its rank on the shared pass or it does not get one.
+
+    The reference here holds geometry the source never saw - a second copy of
+    the object off to one side, which is what a recovery reference built from
+    several accepted frames actually looks like. That pulls the target's
+    centroid and principal axes away from the source's, so every orientation the
+    search generates for ITSELF is offset and none of them is the truth. The
+    caller's prior is, so it wins - and it is a genuinely different candidate
+    from all of them rather than one of them spelled twice.
+
+    What the assertions are about is that it won on the SAME measurement: it
+    carries the prior origin, it is counted in ``priors_ranked``, the
+    limitations say so in words, and its margin is a margin over everything that
+    was offered.
+    """
+    src = _asymmetric_box()
+    truth = rotation_about_axis((0.2, 1.0, -0.15), math.radians(37.0))
+    body = tuple(truth.apply_all(src))
+    unseen = max(p[0] for p in body) + 100.0
+    target = body + tuple((x + unseen, y, z) for x, y, z in body[::3])
+
+    result = coarse_align(src, target, sample=150, priors=(truth,))
+
+    assert result.priors_ranked == 1
+    assert result.best is not None
+    assert result.best.origin == PRIOR_ORIGIN
+    assert result.best.transform == truth
+    assert any("came from the caller as priors" in note for note in result.limitations)
+    # It is not privileged: the score it won on is the score the generated
+    # orientations lost on, on the same decimated pass.
+    assert all(
+        candidate.score >= result.best.score
+        for candidate in result.candidates
+        if candidate.origin != PRIOR_ORIGIN
+    )
+
+
+def test_a_prior_that_repeats_a_generated_orientation_is_not_ranked_twice():
+    """One placement offered twice is one candidate, and it is not a prior.
+
+    On a target the search recovers exactly, a prior at the truth IS the
+    orientation the principal candidate already generated. Ranking it a second
+    time would put the same placement in the shortlist twice, and - because the
+    margin is measured against the best genuinely different candidate - a
+    duplicate that the deduplication missed would show up as a rival to itself.
+    So the transform is kept once, under the origin that produced it first, and
+    ``priors_ranked`` counts what actually earned a rank rather than what was
+    offered.
+    """
+    src = _asymmetric_box()
+    truth = rotation_about_axis((0.2, 1.0, -0.15), math.radians(37.0))
+    target = tuple(truth.apply_all(src))
+
+    with_prior = coarse_align(src, target, sample=150, priors=(truth,))
+    without = coarse_align(src, target, sample=150)
+
+    assert with_prior.priors_ranked == 0
+    assert not any(candidate.origin == PRIOR_ORIGIN for candidate in with_prior.candidates)
+    assert len(with_prior.candidates) == len(without.candidates)
+    assert [candidate.transform for candidate in with_prior.candidates] == [
+        candidate.transform for candidate in without.candidates
+    ]
+    assert not any("came from the caller as priors" in note for note in with_prior.limitations)
+
+
+def test_a_prior_that_fits_worse_than_a_generated_orientation_ranks_below_it():
+    """The other half of the same claim, which is the half that could be wrong.
+
+    A prior that wins proves nothing about privilege on its own - the truth
+    would win from anywhere. So a deliberately bad prior is offered here as
+    well, on a target the generated orientations do recover exactly, and it has
+    to rank below them.
+    """
+    src = _asymmetric_box()
+    truth = rotation_about_axis((0.0, 0.0, 1.0), math.pi / 2.0)
+    target = tuple(truth.apply_all(src))
+    nonsense = Rigid.of(
+        rotation_about_axis((1.0, 0.0, 0.0), math.radians(80.0)).rotation, (400.0, -250.0, 90.0)
+    )
+
+    result = coarse_align(src, target, sample=150, priors=(nonsense,))
+
+    assert result.priors_ranked <= 1
+    assert result.best is not None
+    assert result.best.origin != PRIOR_ORIGIN
+    assert pose_difference(truth, result.best.transform).rotation_angle < 1e-6
+    offered = [c for c in result.candidates if c.transform == nonsense]
+    if offered:
+        assert offered[0].score > result.best.score
+
+
+def test_the_margin_skips_a_near_duplicate_and_measures_a_genuinely_different_rival():
+    """A candidate that agrees with the best is not an alternative to it.
+
+    The prior offered here is the best placement nudged by a fraction of one
+    scoring cell - the same placement spelled twice. It scores within a hair of
+    the best, so ``candidates[1]`` is it, and a margin taken there would be
+    arithmetic noise reported as an ambiguity. The runner-up the margin is
+    actually measured against has to be a candidate that puts the source
+    SOMEWHERE ELSE, and the record has to say how many near-duplicates were
+    stepped over to reach it.
+    """
+    src = _asymmetric_box()
+    truth = rotation_about_axis((0.2, 1.0, -0.15), math.radians(37.0))
+    target = tuple(truth.apply_all(src))
+    cell = _coarse_cell(target)
+    shift = cell * 0.05
+    x, y, z = truth.translation
+    nudge = Rigid.of(truth.rotation, (x + shift, y + shift, z + shift))
+
+    result = coarse_align(src, target, sample=150, priors=(truth, nudge))
+
+    assert result.best is not None
+    assert result.duplicates_skipped >= 1
+    assert result.rival_index is not None and result.rival_index > 1
+    rival = result.candidates[result.rival_index]
+    reach = cell * SCORE_NEIGHBOUR_REACH
+    # The skipped one really is the same placement, and the rival really is not.
+    for skipped in result.candidates[1 : result.rival_index]:
+        assert _mean_displacement(src, result.best.transform, skipped.transform) <= reach
+    assert _mean_displacement(src, result.best.transform, rival.transform) > reach
+    assert result.margin == pytest.approx(rival.score / result.best.score)
+    assert any("spelled more than once" in note for note in result.limitations)
+
+
+def test_an_asymmetric_cloud_has_a_genuinely_different_rival_and_still_beats_it():
+    """Unambiguous has to mean "beat a real alternative", not "found none".
+
+    An infinite margin is what a search reports when every candidate landed in
+    the same place, and that is a different and weaker piece of evidence than
+    beating something. On an asymmetric box the search does generate genuinely
+    different placements - flips and quarter turns of it - so the verdict here
+    is the strong one, and the test says which.
+    """
+    src = _asymmetric_box()
+    truth = rotation_about_axis((0.37, -0.61, 0.7), math.radians(53.0))
+    target = tuple(truth.apply_all(src))
+
+    result = coarse_align(src, target, sample=150)
+
+    assert result.best is not None
+    assert result.rival_index is not None, "a real alternative was found and beaten"
+    assert result.margin >= AMBIGUITY_MARGIN
+    assert result.margin != math.inf
+    assert result.unambiguous is True
+    cell = _coarse_cell(target)
+    rival = result.candidates[result.rival_index]
+    assert (
+        _mean_displacement(src, result.best.transform, rival.transform)
+        > cell * SCORE_NEIGHBOUR_REACH
+    )
 
 
 # --------------------------------------------------------------------------
@@ -397,12 +675,13 @@ def test_overlap_fraction_of_a_partial_overlap_lands_between_the_extremes():
 def test_a_low_overlap_with_a_locally_perfect_match_is_reported_as_low():
     """The property the module's scoring docstring warns about, checked on its own.
 
-    The coarse scorer excludes points with no partner rather than penalising
-    them, so a candidate that only covers one corner of the cloud can still
-    show a near-zero residual on the points it did match - a good-looking
-    number that describes a corner, not the object. ``overlap_fraction`` is
-    what a caller reads alongside that residual to catch it: it is computed
-    over the WHOLE source cloud, so a corner cannot pass itself off as a fit.
+    The coarse scorer charges a point with no partner a BOUNDED miss cost, so a
+    candidate that covers one corner of the cloud is penalised but not ruled
+    out, and a score in the middle of the range cannot on its own say whether
+    it came from a mediocre fit over everything or a perfect fit over a little.
+    ``overlap_fraction`` is what a caller reads alongside it to tell those
+    apart: it is computed over the WHOLE source cloud at the caller's own
+    tolerance, so a corner cannot pass itself off as a fit.
     """
     corner = tuple(p for p in _OVERLAP_GRID if p[0] >= 9.0)
     assert len(corner) < len(_OVERLAP_GRID) / 5, "the fixture must actually be a small corner"

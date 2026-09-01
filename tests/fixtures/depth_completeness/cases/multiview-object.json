@@ -1,0 +1,718 @@
+{
+  "candidates": [
+    {
+      "expectation": {
+        "failed_gates": [
+          "coverage.supported_fraction",
+          "coverage.temporal_recovery"
+        ],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "reconstructed_depth.p95",
+          "temporal_work.within_budget"
+        ],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "baseline",
+      "what": "the unchanged pipeline over three frames of complementary loss. It is also the raw route into weighted fusion and the reference every weighted gate is stated against, so its weighted field is that reference and every weighted non-inferiority bar is met exactly. It still misses the coverage the corpus asks for, which is what this case is about"
+    },
+    {
+      "expectation": {
+        "failed_gates": [
+          "coverage.false_fill_fraction",
+          "coverage.temporal_recovery",
+          "fusion_surface.observed_to_reference.p95",
+          "reconstructed_depth.p95"
+        ],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "temporal_work.within_budget",
+          "weighted_fusion.contribution",
+          "weighted_fusion.observed_voxel_gain",
+          "weighted_fusion.observed_voxels",
+          "weighted_fusion.spatially_excluded_contribution",
+          "weighted_fusion.surface_coverage_gain",
+          "weighted_fusion.surface_extracted",
+          "weighted_fusion.surface_vertex_gain",
+          "weighted_fusion_surface.observed_to_reference.p95"
+        ],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "dense_nearest",
+      "what": "fills every hole in every frame from within that frame. The measured-only tracking record is the baseline's, because the tracker never sees what it invented; the counterfactual completed-cloud replay is where the invention moves the poses"
+    },
+    {
+      "expectation": {
+        "failed_gates": [
+          "coverage.supported_fraction",
+          "fusion_surface.observed_to_reference.p95",
+          "reconstructed_depth.p95"
+        ],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "temporal_work.within_budget",
+          "weighted_fusion.contribution",
+          "weighted_fusion.observed_voxel_gain",
+          "weighted_fusion.observed_voxels",
+          "weighted_fusion.spatially_excluded_contribution",
+          "weighted_fusion.surface_coverage_gain",
+          "weighted_fusion.surface_extracted",
+          "weighted_fusion.surface_vertex_gain",
+          "weighted_fusion_surface.observed_to_reference.p95"
+        ],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "naive_temporal_carry",
+      "what": "carries the other frames' samples at the SAME pixel, ignoring the motion. It puts depth on the wrong surface, which the error and fused-surface gates catch, and in the counterfactual replay it degrades placement further than the dense in-frame fill does"
+    },
+    {
+      "expectation": {
+        "failed_gates": [
+          "coverage.supported_fraction"
+        ],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "temporal_work.within_budget",
+          "weighted_fusion.contribution",
+          "weighted_fusion.observed_voxel_gain",
+          "weighted_fusion.observed_voxels",
+          "weighted_fusion.spatially_excluded_contribution",
+          "weighted_fusion.surface_coverage_gain",
+          "weighted_fusion.surface_extracted",
+          "weighted_fusion.surface_vertex_gain",
+          "weighted_fusion_surface.observed_to_reference.p95"
+        ],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "posed_temporal_carry",
+      "what": "carries the other frames' samples THROUGH the exact poses: accurate, and still short of the acceptance target because the never-return columns are in no frame. It carries no accepted product result, so it has no route into the weighted volume at all - which is the point: a self-declared provenance is not evidence"
+    },
+    {
+      "expectation": {
+        "failed_gates": [
+          "coverage.supported_fraction",
+          "coverage.temporal_recovery"
+        ],
+        "inapplicable_gates": [
+          "reconstructed_depth.p95",
+          "temporal_work.within_budget"
+        ],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "spatial_completion",
+      "what": "the product primitive on each frame independently. Every hole here is a whole column, dropped top to bottom, and no support inside one frame spans it - so it recovers nothing and returns each frame unchanged. That is the point of running it here: the tracking, pose, fused-surface, dimension and false-fill records are the baseline's exactly, so single-frame completion is shown to cost the multi-view pipeline nothing. Recovering what another view saw belongs to the temporal task and is not claimed here. Its weighted field is byte-identical to the baseline's for the same reason, so it reaches no more of the volume and changes no output measure at all"
+    },
+    {
+      "expectation": {
+        "failed_gates": [
+          "coverage.supported_fraction"
+        ],
+        "inapplicable_gates": [
+          "completion_work.within_budget"
+        ],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "temporal_completion",
+      "what": "the product primitive on the three posed frames. It recovers exactly the samples another posed view really measured - every one of them within a single raw code of the truth - and invents nothing. Its measured-only tracking record is the baseline's exactly, which is the acceptance condition: the tracker consumes measured geometry only and this stage does not feed it. The counterfactual completed-cloud replay is where the cost of feeding it shows, and it is why temporal output enters no tracker in this task. It reaches a fused volume only through the provenance-weighted route beside it, at a weight derived from its own accepted confidence and never as a measurement"
+    },
+    {
+      "expectation": {
+        "failed_gates": [
+          "coverage.supported_fraction"
+        ],
+        "inapplicable_gates": [
+          "completion_work.within_budget"
+        ],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "spatial_then_temporal_completion",
+      "what": "the two product stages in order. Single-frame completion recovers nothing here - every hole is a whole column - so this is the temporal result with an empty spatial stage in front of it, and it behaves identically"
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "coverage.false_fill_fraction",
+          "coverage.measured_fraction",
+          "coverage.supported_fraction",
+          "coverage.temporal_recovery",
+          "dimensions.worst",
+          "fusion.surface_extracted",
+          "fusion_surface.observed_to_reference.p95",
+          "reconstructed_depth.p95",
+          "temporal_work.within_budget",
+          "tracking.accepted_all",
+          "tracking.frames_accepted",
+          "tracking_pose.rotation.worst",
+          "tracking_pose.translation.worst",
+          "weighted_fusion.contribution",
+          "weighted_fusion.observed_voxel_gain",
+          "weighted_fusion.observed_voxels",
+          "weighted_fusion.spatially_excluded_contribution",
+          "weighted_fusion.surface_coverage_gain",
+          "weighted_fusion.surface_extracted",
+          "weighted_fusion.surface_vertex_gain",
+          "weighted_fusion_surface.observed_to_reference.p95"
+        ],
+        "outcome": "refused",
+        "refusal": "raw_frame_mutated"
+      },
+      "name": "mutated_raw_frame",
+      "what": "returns raw bytes that are not the ones it was given"
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "coverage.false_fill_fraction",
+          "coverage.measured_fraction",
+          "coverage.supported_fraction",
+          "coverage.temporal_recovery",
+          "dimensions.worst",
+          "fusion.surface_extracted",
+          "fusion_surface.observed_to_reference.p95",
+          "reconstructed_depth.p95",
+          "temporal_work.within_budget",
+          "tracking.accepted_all",
+          "tracking.frames_accepted",
+          "tracking_pose.rotation.worst",
+          "tracking_pose.translation.worst",
+          "weighted_fusion.contribution",
+          "weighted_fusion.observed_voxel_gain",
+          "weighted_fusion.observed_voxels",
+          "weighted_fusion.spatially_excluded_contribution",
+          "weighted_fusion.surface_coverage_gain",
+          "weighted_fusion.surface_extracted",
+          "weighted_fusion.surface_vertex_gain",
+          "weighted_fusion_surface.observed_to_reference.p95"
+        ],
+        "outcome": "refused",
+        "refusal": "work_counts_inconsistent"
+      },
+      "name": "temporal_completion_forged_work",
+      "what": "reports a temporal run that refused one hole fewer than it did"
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "coverage.false_fill_fraction",
+          "coverage.measured_fraction",
+          "coverage.supported_fraction",
+          "coverage.temporal_recovery",
+          "dimensions.worst",
+          "fusion.surface_extracted",
+          "fusion_surface.observed_to_reference.p95",
+          "reconstructed_depth.p95",
+          "temporal_work.within_budget",
+          "tracking.accepted_all",
+          "tracking.frames_accepted",
+          "tracking_pose.rotation.worst",
+          "tracking_pose.translation.worst",
+          "weighted_fusion.contribution",
+          "weighted_fusion.observed_voxel_gain",
+          "weighted_fusion.observed_voxels",
+          "weighted_fusion.spatially_excluded_contribution",
+          "weighted_fusion.surface_coverage_gain",
+          "weighted_fusion.surface_extracted",
+          "weighted_fusion.surface_vertex_gain",
+          "weighted_fusion_surface.observed_to_reference.p95"
+        ],
+        "outcome": "refused",
+        "refusal": "temporal_support_not_another_frame"
+      },
+      "name": "temporal_completion_self_support",
+      "what": "cites the target frame's own measured sample as temporal evidence about itself"
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "coverage.false_fill_fraction",
+          "coverage.measured_fraction",
+          "coverage.supported_fraction",
+          "coverage.temporal_recovery",
+          "dimensions.worst",
+          "fusion.surface_extracted",
+          "fusion_surface.observed_to_reference.p95",
+          "reconstructed_depth.p95",
+          "temporal_work.within_budget",
+          "tracking.accepted_all",
+          "tracking.frames_accepted",
+          "tracking_pose.rotation.worst",
+          "tracking_pose.translation.worst",
+          "weighted_fusion.contribution",
+          "weighted_fusion.observed_voxel_gain",
+          "weighted_fusion.observed_voxels",
+          "weighted_fusion.spatially_excluded_contribution",
+          "weighted_fusion.surface_coverage_gain",
+          "weighted_fusion.surface_extracted",
+          "weighted_fusion.surface_vertex_gain",
+          "weighted_fusion_surface.observed_to_reference.p95"
+        ],
+        "outcome": "refused",
+        "refusal": "support_not_measured"
+      },
+      "name": "temporal_completion_unmeasured_support",
+      "what": "cites another frame's NO-RETURN sample as temporal evidence"
+    }
+  ],
+  "case_id": "multiview-object",
+  "gates": [
+    {
+      "comparison": ">=",
+      "context": "the acceptance target: this fraction of the window must end up measured, or reconstructed onto surface that is really there. 0.95 of the surface this scene actually has; the unchanged baseline does not reach it, which is the whole reason this thread exists",
+      "limit": 0.814427,
+      "measurement": "coverage",
+      "name": "coverage.supported_fraction",
+      "path": [
+        "supported_fraction"
+      ],
+      "unit": "fraction of 1"
+    },
+    {
+      "comparison": ">=",
+      "context": "non-inferiority: the raw measurements the sensor did return must all still be there and still be called measurements. A completion that discards awkward samples and interpolates over them is not a completion",
+      "limit": 0.507291,
+      "measurement": "coverage",
+      "name": "coverage.measured_fraction",
+      "path": [
+        "measured_fraction"
+      ],
+      "unit": "fraction of 1"
+    },
+    {
+      "comparison": "<=",
+      "context": "a stated allowance, and the only one in this corpus: reprojecting a real sample through exact poses rounds it one pixel outside the silhouette. The curved single-view case gates false fill at exactly zero and is where invention is refused outright",
+      "limit": 0.1,
+      "measurement": "coverage",
+      "name": "coverage.false_fill_fraction",
+      "path": [
+        "false_fill_fraction"
+      ],
+      "unit": "fraction of 1"
+    },
+    {
+      "comparison": "<=",
+      "context": "absolute: 4 raw codes. Error is scored ONLY on samples the candidate reconstructed where truth was held out, so copying the input cannot earn a good score here, and the coverage gates stop a candidate improving this by reconstructing only the easy holes",
+      "limit": 0.03125,
+      "measurement": "reconstructed_depth",
+      "name": "reconstructed_depth.p95",
+      "path": [
+        "absolute",
+        "p95"
+      ],
+      "unit": "synthetic depth units: raw code x depth scale, exact by construction"
+    },
+    {
+      "comparison": "<=",
+      "context": "non-inferiority: the baseline's own worst extent error plus 8 raw codes. Smoothing an object smaller is the classic way a denser result looks better and measures worse",
+      "limit": 1.867188,
+      "measurement": "dimensions",
+      "name": "dimensions.worst",
+      "path": [
+        "absolute",
+        "worst"
+      ],
+      "unit": "synthetic depth units: raw code x depth scale, exact by construction"
+    },
+    {
+      "comparison": "is",
+      "context": "the unchanged TSDF and its unchanged surface extraction must still produce a surface from these frames; a completion that breaks fusion has not helped",
+      "limit": true,
+      "measurement": "fusion",
+      "name": "fusion.surface_extracted",
+      "path": [
+        "surface_extracted"
+      ]
+    },
+    {
+      "comparison": "<=",
+      "context": "non-inferiority: the baseline's own fused-surface agreement plus 8 raw codes. Measured on the surface the real scanner3d.tsdf_surface extractor pulled out of the real scanner3d.tsdf field",
+      "limit": 0.581772,
+      "measurement": "fusion_surface",
+      "name": "fusion_surface.observed_to_reference.p95",
+      "path": [
+        "observed_to_reference",
+        "distances",
+        "p95"
+      ],
+      "unit": "synthetic depth units: raw code x depth scale, exact by construction"
+    },
+    {
+      "comparison": "<=",
+      "context": "non-inferiority: the baseline's own worst placement error plus 0.25 degrees - a sixteenth of the rotation between adjacent frames in this scene - measured by scanner3d.quality.pose_sequence_error against the scene's exact poses. Where the frames were placed, not merely whether they were",
+      "limit": 1.343805,
+      "measurement": "tracking_pose",
+      "name": "tracking_pose.rotation.worst",
+      "path": [
+        "rotation",
+        "worst"
+      ],
+      "unit": "degrees"
+    },
+    {
+      "comparison": "<=",
+      "context": "non-inferiority: the baseline's own worst placement offset plus 8 raw codes, against the scene's exact poses",
+      "limit": 0.21767,
+      "measurement": "tracking_pose",
+      "name": "tracking_pose.translation.worst",
+      "path": [
+        "translation",
+        "worst"
+      ],
+      "unit": "synthetic depth units: raw code x depth scale, exact by construction"
+    },
+    {
+      "comparison": "is",
+      "context": "the real tracker placed every frame of this scene from its measured samples alone, and a completion may not cost that",
+      "limit": true,
+      "measurement": "tracking",
+      "name": "tracking.accepted_all",
+      "path": [
+        "accepted_all"
+      ]
+    },
+    {
+      "comparison": ">=",
+      "context": "non-inferiority: the baseline placed 3 frame(s). This task records that baseline; it does not claim any candidate improved tracking",
+      "limit": 3.0,
+      "measurement": "tracking",
+      "name": "tracking.frames_accepted",
+      "path": [
+        "frames_accepted"
+      ],
+      "unit": "samples"
+    },
+    {
+      "comparison": ">=",
+      "context": "a strict gain, stated by this scene and not by any candidate: 16 dropped sample(s) of these frames, away from any foreground boundary the scene declares, were measured by at least two OTHER posed frames, at the sample and the depth the truth puts them at, with the correspondence holding in both directions. A pose-compensated method must put at least that many back, as temporally reconstructed samples standing on surface the truth really has. Only recovered depth pays this gate: a refusal, a contradicted spatial estimate and a single-frame fill are each evidence about a sample rather than a sample put back. The unchanged baseline and the single-frame spatial primitive recover none of them",
+      "limit": 16.0,
+      "measurement": "coverage",
+      "name": "coverage.temporal_recovery",
+      "path": [
+        "temporally_reconstructed_on_surface"
+      ],
+      "unit": "samples"
+    },
+    {
+      "comparison": ">=",
+      "context": "non-inferiority against the SAME raw multi-view field - same frames, same poses, same volume, same extractor. This corpus measures exactly zero here: what the accepted temporal result recovers, the supporting views already put in this volume. No gain is claimed and none is gated; what is gated is that none is lost",
+      "limit": 0.0,
+      "measurement": "weighted_fusion",
+      "name": "weighted_fusion.observed_voxel_gain",
+      "path": [
+        "observed_voxel_gain"
+      ],
+      "unit": "samples"
+    },
+    {
+      "comparison": ">=",
+      "context": "non-inferiority: the surface the unchanged extractor pulls out of the weighted field may not have fewer vertices than the one it pulls out of the same raw multi-view field. Measured at zero on this corpus",
+      "limit": 0.0,
+      "measurement": "weighted_fusion",
+      "name": "weighted_fusion.surface_vertex_gain",
+      "path": [
+        "surface_vertex_gain"
+      ],
+      "unit": "samples"
+    },
+    {
+      "comparison": ">=",
+      "context": "non-inferiority on the output-facing measure: the fraction of the truth model covered by the extracted surface, minus the same fraction for the raw multi-view baseline. This is where a real geometric gain would appear, and on this corpus it is exactly zero",
+      "limit": 0.0,
+      "measurement": "weighted_fusion",
+      "name": "weighted_fusion.surface_coverage_gain",
+      "path": [
+        "surface_coverage_gain"
+      ],
+      "unit": "fraction of 1"
+    },
+    {
+      "comparison": ">=",
+      "context": "non-inferiority: the total fusion weight the baseline's own measurements put into this volume. A weighting that let a reconstruction displace evidence rather than add to it would lower this",
+      "limit": 5728.0,
+      "measurement": "weighted_fusion",
+      "name": "weighted_fusion.contribution",
+      "path": [
+        "contribution"
+      ],
+      "unit": "samples"
+    },
+    {
+      "comparison": ">=",
+      "context": "non-inferiority: the baseline's own observed space. This corpus's recovered samples fall on voxels other views already saw, so no gain is claimed here and none is gated - what is gated is that none is lost",
+      "limit": 3099.0,
+      "measurement": "weighted_fusion",
+      "name": "weighted_fusion.observed_voxels",
+      "path": [
+        "observed_voxels"
+      ],
+      "unit": "samples"
+    },
+    {
+      "comparison": "is",
+      "context": "the unchanged scanner3d.tsdf_surface extractor must still pull a surface out of the weighted field; a weighting that breaks extraction has not helped",
+      "limit": true,
+      "measurement": "weighted_fusion",
+      "name": "weighted_fusion.surface_extracted",
+      "path": [
+        "surface_extracted"
+      ]
+    },
+    {
+      "comparison": "<=",
+      "context": "non-inferiority: the baseline's own weighted-fusion surface agreement plus 8 raw codes. Measured on the surface the real scanner3d.tsdf_surface extractor pulled out of the real weighted field",
+      "limit": 0.581772,
+      "measurement": "weighted_fusion_surface",
+      "name": "weighted_fusion_surface.observed_to_reference.p95",
+      "path": [
+        "observed_to_reference",
+        "distances",
+        "p95"
+      ],
+      "unit": "synthetic depth units: raw code x depth scale, exact by construction"
+    },
+    {
+      "comparison": "<=",
+      "context": "absolute: every accepted single-frame spatial estimate that no independent view confirmed contributes exactly zero to the field. Not a low weight - zero, which scanner3d.tsdf treats as absence",
+      "limit": 0.0,
+      "measurement": "weighted_fusion",
+      "name": "weighted_fusion.spatially_excluded_contribution",
+      "path": [
+        "spatially_excluded_contribution"
+      ],
+      "unit": "samples"
+    },
+    {
+      "comparison": "is",
+      "context": "the work a completion spent must be inside the budget derivable from its input before it ran - one neighbourhood scan per hole at its published radius. A bound by construction rather than a wall-clock assertion, which would measure the machine. Candidates that report no work record leave this gate inapplicable, and each case declares exactly which ones those are",
+      "limit": true,
+      "measurement": "completion_work",
+      "name": "completion_work.within_budget",
+      "path": [
+        "within_budget"
+      ]
+    },
+    {
+      "comparison": "is",
+      "context": "the projection and comparison work a temporal completion spent must be inside the budget derivable from its input before it ran - one projection per eligible source sample into its published footprint, and one bounded comparison per hole. A bound by construction rather than a wall-clock assertion, which would measure the machine. Candidates that report no temporal run leave this gate inapplicable",
+      "limit": true,
+      "measurement": "temporal_work",
+      "name": "temporal_work.within_budget",
+      "path": [
+        "within_budget"
+      ]
+    }
+  ],
+  "kind": "scanner3d.depth-completeness-case",
+  "notes": [
+    "The complementary masks drop a different third of the columns in each frame, so the union of the three frames sees more than any one of them - the opportunity a temporal method exists to take.",
+    "One block of columns is dropped in EVERY frame. No temporal method can recover it, which is why the exact-pose control still misses the acceptance target and is declared to fail it rather than being called a success.",
+    "The poses are the scene's own, exact. A real capture does not have them for free, so what this case measures is available evidence and not achievable performance.",
+    "There are two tracking replays here and they are not the same evidence. The gated one - 'tracking' and 'tracking_pose' - offers the tracker each frame's own measured samples and nothing a completion added, which is the only route this project's tracker has; every candidate that preserved its measurements therefore reproduces the baseline's record exactly, and the strict reader refuses a report in which two candidates disagree about it.",
+    "'tracking_completed_cloud' and 'tracking_completed_cloud_pose' are the counterfactual: the same tracker over the candidate's COMPLETED cloud. They carry no gate and are not an acceptance route. They are published because the answer is unfavourable and is the measured reason this task keeps completion output out of the tracker: dense in-frame fill, naive same-pixel carry and the real pose-compensated stage all move where that tracker places frame 2, the last of them by 1.09 to 2.38 degrees even though every one of its reconstructions is within a single raw code of the truth. tests/test_depth_completeness.py asserts that degradation directly.",
+    "The weighted-fusion records carry this task's NEGATIVE result, and it is the measurement rather than an admission. Fusing the accepted temporal result through the provenance-weighted contract puts 225 more voxel observations into the volume than the raw baseline does - 5953 against 5728 - and produces the same 3099 observed voxels, the same 333 surface vertices and the same truth-referenced coverage of 0.9647630619684082. The gain is exactly zero on every output-facing measure. Withhold the supporting views and the same reconstructions look load-bearing: fusing the single frame carrying the most reconstructions on its own observes 1949 voxels raw and 2174 weighted. That is the whole finding - what the temporal stage recovers is what the support frames measured, so once those frames are themselves fused there is nothing left for it to add. No gain is gated here; the three '*_gain' fields are gated for non-inferiority and publish the zero.",
+    "The worst-case error gate is deliberately absent here: reprojecting a real sample through exact poses rounds it across the silhouette by one pixel, and a worst-sample gate would refuse the honest control for a rounding artefact. The single-view cases gate the worst sample."
+  ],
+  "regions": {
+    "dimensions": true,
+    "foreground_below": null,
+    "fusion": {
+      "coverage_tolerance": 0.5,
+      "max_depth": 200.0,
+      "maximum": [
+        3.5,
+        4.5,
+        103.0
+      ],
+      "min_depth": 50.0,
+      "min_weight": 1.0,
+      "minimum": [
+        -3.5,
+        -4.5,
+        95.0
+      ],
+      "truncation": 0.75,
+      "voxel_size": 0.25
+    },
+    "landmarks": false,
+    "plane": false,
+    "slot_columns": [],
+    "surface_tolerance": null,
+    "tracking": true,
+    "weighted_fusion": {
+      "coverage_tolerance": 0.5,
+      "max_depth": 200.0,
+      "maximum": [
+        3.5,
+        4.5,
+        103.0
+      ],
+      "min_depth": 50.0,
+      "min_weight": 1.0,
+      "minimum": [
+        -3.5,
+        -4.5,
+        95.0
+      ],
+      "truncation": 0.75,
+      "voxel_size": 0.25
+    }
+  },
+  "scene": {
+    "depth_scale": 0.0078125,
+    "frames": [
+      {
+        "index": 0,
+        "input_returned": 165,
+        "input_sha256": "cded55167f85b48a24b8328dadaa702d123fc63f5f169ea1d2585f4e128df182",
+        "masks": [
+          {
+            "kind": "complementary",
+            "period": 3,
+            "phase": 0
+          },
+          {
+            "first_column": 2,
+            "kind": "never_return",
+            "last_column": 3
+          }
+        ],
+        "pose": {
+          "axis": [
+            0.0,
+            1.0,
+            0.0
+          ],
+          "degrees": -4.0,
+          "through": [
+            0.0,
+            0.0,
+            100.0
+          ]
+        },
+        "truth_returned": 277,
+        "truth_sha256": "b828c76174ba5e9d53b8bae742a01c8d87c79d6389ec1fb0fc607b7ea8171a14"
+      },
+      {
+        "index": 1,
+        "input_returned": 162,
+        "input_sha256": "5c9f9151a07db3dbde7704f65c0128170aba6fd3e30f2670c5b66f03a26234e7",
+        "masks": [
+          {
+            "kind": "complementary",
+            "period": 3,
+            "phase": 1
+          },
+          {
+            "first_column": 2,
+            "kind": "never_return",
+            "last_column": 3
+          }
+        ],
+        "pose": {
+          "axis": [
+            0.0,
+            1.0,
+            0.0
+          ],
+          "degrees": 0.0,
+          "through": [
+            0.0,
+            0.0,
+            100.0
+          ]
+        },
+        "truth_returned": 274,
+        "truth_sha256": "2ecd32fdc7e0aa79244ef8d557ac2ab926190c653e7e5c0968ef053bfce57161"
+      },
+      {
+        "index": 2,
+        "input_returned": 160,
+        "input_sha256": "ba6972849b669244c11be97f7a95e768b27cdfa120e07b38d1e12701c06e8836",
+        "masks": [
+          {
+            "kind": "complementary",
+            "period": 3,
+            "phase": 2
+          },
+          {
+            "first_column": 2,
+            "kind": "never_return",
+            "last_column": 3
+          }
+        ],
+        "pose": {
+          "axis": [
+            0.0,
+            1.0,
+            0.0
+          ],
+          "degrees": 4.0,
+          "through": [
+            0.0,
+            0.0,
+            100.0
+          ]
+        },
+        "truth_returned": 272,
+        "truth_sha256": "9b48cc8079db7899976397e08aefa561aae4d8112c7dace43b862611be7fcc66"
+      }
+    ],
+    "intrinsics": {
+      "cx": 320.0,
+      "cy": 200.0,
+      "fx": 400.0,
+      "fy": 400.0,
+      "height": 400,
+      "width": 640
+    },
+    "seed": "depth-completeness-028:multiview-object",
+    "shapes": [
+      {
+        "half_extents": [
+          2.0,
+          3.0,
+          2.0
+        ],
+        "kind": "box",
+        "translation": [
+          0.0,
+          0.0,
+          100.0
+        ]
+      },
+      {
+        "centre": [
+          1.0,
+          -2.0,
+          97.0
+        ],
+        "kind": "sphere",
+        "radius": 1.2
+      }
+    ],
+    "window": {
+      "height": 16,
+      "sample_count": 320,
+      "u0": 310,
+      "v0": 190,
+      "width": 20
+    }
+  },
+  "schema_version": 1,
+  "what": "An asymmetric object from three exact poses, with complementary intermittent loss.",
+  "why": "Temporal completion's whole claim is that another frame saw what this one missed. That is true only after the pose between them is applied, and this case is where carrying the same pixel across motion is proved to fail while carrying it through the exact poses does not."
+}

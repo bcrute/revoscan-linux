@@ -1,0 +1,751 @@
+{
+  "candidates": [
+    {
+      "expectation": {
+        "failed_gates": [
+          "coverage.supported_fraction",
+          "coverage.temporal_recovery",
+          "edge_step_column.worst"
+        ],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "confidence.high_confidence_worst",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst",
+          "temporal_work.within_budget"
+        ],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "baseline",
+      "what": "the unchanged pipeline: three strips and the speckle stay holes, and the box's step column cannot be located in frame 0 because its strip removed it"
+    },
+    {
+      "expectation": {
+        "failed_gates": [
+          "coverage.temporal_recovery",
+          "edge.misplaced",
+          "reconstructed_depth.worst"
+        ],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "temporal_work.within_budget"
+        ],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "dense_nearest",
+      "what": "fills every hole from the nearest sample in the same frame, which puts box depth across the silhouette and settles none of the complementary evidence"
+    },
+    {
+      "expectation": {
+        "failed_gates": [
+          "confidence.high_confidence_worst",
+          "coverage.temporal_recovery",
+          "edge.bridging",
+          "edge.misplaced",
+          "edge_step_column.worst",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst"
+        ],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "temporal_work.within_budget"
+        ],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "broad_interpolation",
+      "what": "averages across the strip, bridging the step into the empty band between the two surfaces"
+    },
+    {
+      "expectation": {
+        "failed_gates": [
+          "confidence.high_confidence_worst",
+          "edge.misplaced",
+          "edge_step_column.worst",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst"
+        ],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "temporal_work.within_budget"
+        ],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "naive_temporal_carry",
+      "what": "carries the other frames' samples at the SAME pixel. It is the densest result in this case and it is wrong about which surface a sample is on: at five pixels of motion the box silhouette has moved, so backing-plane codes land on box front face. Denser, and refused by the error, edge and step-column gates"
+    },
+    {
+      "expectation": {
+        "failed_gates": [
+          "confidence.high_confidence_worst",
+          "reconstructed_depth.worst"
+        ],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "temporal_work.within_budget"
+        ],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "posed_temporal_carry",
+      "what": "carries the same raw samples THROUGH the exact poses, with no visibility rule and no agreement test. Accurate in the middle of a surface and still wrong at the worst sample, where a projection rounds across the silhouette - which is what the product primitive's footprint and edge rules exist to refuse"
+    },
+    {
+      "expectation": {
+        "failed_gates": [
+          "coverage.supported_fraction",
+          "coverage.temporal_recovery",
+          "edge_step_column.worst"
+        ],
+        "inapplicable_gates": [
+          "temporal_work.within_budget"
+        ],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "spatial_completion",
+      "what": "the accepted single-frame primitive. It recovers isolated speckle and cannot cross a five-column strip, so it settles none of the complementary evidence and still cannot place the step column in frame 0"
+    },
+    {
+      "expectation": {
+        "failed_gates": [
+          "coverage.supported_fraction"
+        ],
+        "inapplicable_gates": [
+          "completion_work.within_budget"
+        ],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "temporal_completion",
+      "what": "the product primitive on the raw frames and the exact poses. It recovers the complementary evidence the scene contains, restores the step column the strip removed, and passes every error, edge, dimension, confidence and work gate. It remains below the supported-coverage target because the speckle holes that are in every frame are in no other view either"
+    },
+    {
+      "expectation": {
+        "failed_gates": [
+          "coverage.supported_fraction"
+        ],
+        "inapplicable_gates": [
+          "completion_work.within_budget"
+        ],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "spatial_then_temporal_completion",
+      "what": "the two product stages in the order a pipeline would run them. Independent posed evidence confirms most of the single-frame estimates and never observes the rest, which keep their spatial provenance; the coverage is the union and every downstream gate still holds"
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "confidence.high_confidence_worst",
+          "coverage.measured_fraction",
+          "coverage.supported_fraction",
+          "coverage.temporal_recovery",
+          "dimensions.worst",
+          "edge.bridging",
+          "edge.misplaced",
+          "edge_step_column.worst",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst",
+          "temporal_work.within_budget"
+        ],
+        "outcome": "refused",
+        "refusal": "measured_value_changed"
+      },
+      "name": "forged_measured_states",
+      "what": "reports every reconstructed sample as a camera measurement"
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "confidence.high_confidence_worst",
+          "coverage.measured_fraction",
+          "coverage.supported_fraction",
+          "coverage.temporal_recovery",
+          "dimensions.worst",
+          "edge.bridging",
+          "edge.misplaced",
+          "edge_step_column.worst",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst",
+          "temporal_work.within_budget"
+        ],
+        "outcome": "refused",
+        "refusal": "raw_frame_mutated"
+      },
+      "name": "mutated_raw_frame",
+      "what": "returns raw bytes that are not the ones it was given"
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "confidence.high_confidence_worst",
+          "coverage.measured_fraction",
+          "coverage.supported_fraction",
+          "coverage.temporal_recovery",
+          "dimensions.worst",
+          "edge.bridging",
+          "edge.misplaced",
+          "edge_step_column.worst",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst",
+          "temporal_work.within_budget"
+        ],
+        "outcome": "refused",
+        "refusal": "unsupported_reconstruction"
+      },
+      "name": "unsupported_fill",
+      "what": "reconstructs without naming any support"
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "confidence.high_confidence_worst",
+          "coverage.measured_fraction",
+          "coverage.supported_fraction",
+          "coverage.temporal_recovery",
+          "dimensions.worst",
+          "edge.bridging",
+          "edge.misplaced",
+          "edge_step_column.worst",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst",
+          "temporal_work.within_budget"
+        ],
+        "outcome": "refused",
+        "refusal": "confidence_out_of_range"
+      },
+      "name": "forged_confidence",
+      "what": "claims a confidence outside the fraction it is declared to be"
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "confidence.high_confidence_worst",
+          "coverage.measured_fraction",
+          "coverage.supported_fraction",
+          "coverage.temporal_recovery",
+          "dimensions.worst",
+          "edge.bridging",
+          "edge.misplaced",
+          "edge_step_column.worst",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst",
+          "temporal_work.within_budget"
+        ],
+        "outcome": "refused",
+        "refusal": "missing_carries_depth"
+      },
+      "name": "missing_carrying_depth",
+      "what": "declares a sample missing and hands out a depth for it anyway"
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "confidence.high_confidence_worst",
+          "coverage.measured_fraction",
+          "coverage.supported_fraction",
+          "coverage.temporal_recovery",
+          "dimensions.worst",
+          "edge.bridging",
+          "edge.misplaced",
+          "edge_step_column.worst",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst",
+          "temporal_work.within_budget"
+        ],
+        "outcome": "refused",
+        "refusal": "unknown_state"
+      },
+      "name": "unknown_provenance_state",
+      "what": "invents a fifth provenance state"
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "confidence.high_confidence_worst",
+          "coverage.measured_fraction",
+          "coverage.supported_fraction",
+          "coverage.temporal_recovery",
+          "dimensions.worst",
+          "edge.bridging",
+          "edge.misplaced",
+          "edge_step_column.worst",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst",
+          "temporal_work.within_budget"
+        ],
+        "outcome": "refused",
+        "refusal": "sample_count_mismatch"
+      },
+      "name": "truncated_window",
+      "what": "returns fewer samples than the window, dropping the hardest"
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "confidence.high_confidence_worst",
+          "coverage.measured_fraction",
+          "coverage.supported_fraction",
+          "coverage.temporal_recovery",
+          "dimensions.worst",
+          "edge.bridging",
+          "edge.misplaced",
+          "edge_step_column.worst",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst",
+          "temporal_work.within_budget"
+        ],
+        "outcome": "refused",
+        "refusal": "support_not_measured"
+      },
+      "name": "phantom_support",
+      "what": "names support at a pixel that returned no measurement"
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "confidence.high_confidence_worst",
+          "coverage.measured_fraction",
+          "coverage.supported_fraction",
+          "coverage.temporal_recovery",
+          "dimensions.worst",
+          "edge.bridging",
+          "edge.misplaced",
+          "edge_step_column.worst",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst",
+          "temporal_work.within_budget"
+        ],
+        "outcome": "refused",
+        "refusal": "temporal_support_not_another_frame"
+      },
+      "name": "temporal_support_from_own_frame",
+      "what": "calls a same-frame fill a temporal reconstruction"
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "confidence.high_confidence_worst",
+          "coverage.measured_fraction",
+          "coverage.supported_fraction",
+          "coverage.temporal_recovery",
+          "dimensions.worst",
+          "edge.bridging",
+          "edge.misplaced",
+          "edge_step_column.worst",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst",
+          "temporal_work.within_budget"
+        ],
+        "outcome": "refused",
+        "refusal": "work_counts_inconsistent"
+      },
+      "name": "temporal_completion_forged_work",
+      "what": "reports a temporal run that refused one hole fewer than it did"
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "confidence.high_confidence_worst",
+          "coverage.measured_fraction",
+          "coverage.supported_fraction",
+          "coverage.temporal_recovery",
+          "dimensions.worst",
+          "edge.bridging",
+          "edge.misplaced",
+          "edge_step_column.worst",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst",
+          "temporal_work.within_budget"
+        ],
+        "outcome": "refused",
+        "refusal": "temporal_support_not_another_frame"
+      },
+      "name": "temporal_completion_self_support",
+      "what": "cites the target frame's own measured sample as temporal evidence about itself"
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "confidence.high_confidence_worst",
+          "coverage.measured_fraction",
+          "coverage.supported_fraction",
+          "coverage.temporal_recovery",
+          "dimensions.worst",
+          "edge.bridging",
+          "edge.misplaced",
+          "edge_step_column.worst",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst",
+          "temporal_work.within_budget"
+        ],
+        "outcome": "refused",
+        "refusal": "support_not_measured"
+      },
+      "name": "temporal_completion_unmeasured_support",
+      "what": "cites another frame's NO-RETURN sample as temporal evidence"
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "confidence.high_confidence_worst",
+          "coverage.measured_fraction",
+          "coverage.supported_fraction",
+          "coverage.temporal_recovery",
+          "dimensions.worst",
+          "edge.bridging",
+          "edge.misplaced",
+          "edge_step_column.worst",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst",
+          "temporal_work.within_budget"
+        ],
+        "outcome": "refused",
+        "refusal": "confirmation_inconsistent"
+      },
+      "name": "temporal_completion_forged_confirmation",
+      "what": "calls a spatial estimate no independent evidence ever reached CONFIRMED, and leaves it spatial"
+    }
+  ],
+  "case_id": "temporal-motion",
+  "gates": [
+    {
+      "comparison": ">=",
+      "context": "the acceptance target: this fraction of the window must end up measured, or reconstructed onto surface that is really there. 0.95 of the surface this scene actually has; the unchanged baseline does not reach it, which is the whole reason this thread exists",
+      "limit": 0.95,
+      "measurement": "coverage",
+      "name": "coverage.supported_fraction",
+      "path": [
+        "supported_fraction"
+      ],
+      "unit": "fraction of 1"
+    },
+    {
+      "comparison": ">=",
+      "context": "non-inferiority: the raw measurements the sensor did return must all still be there and still be called measurements. A completion that discards awkward samples and interpolates over them is not a completion",
+      "limit": 0.793402,
+      "measurement": "coverage",
+      "name": "coverage.measured_fraction",
+      "path": [
+        "measured_fraction"
+      ],
+      "unit": "fraction of 1"
+    },
+    {
+      "comparison": "<=",
+      "context": "absolute: 4 raw codes. Error is scored ONLY on samples the candidate reconstructed where truth was held out, so copying the input cannot earn a good score here, and the coverage gates stop a candidate improving this by reconstructing only the easy holes",
+      "limit": 0.03125,
+      "measurement": "reconstructed_depth",
+      "name": "reconstructed_depth.p95",
+      "path": [
+        "absolute",
+        "p95"
+      ],
+      "unit": "synthetic depth units: raw code x depth scale, exact by construction"
+    },
+    {
+      "comparison": "<=",
+      "context": "absolute: 16 raw codes. A single sample placed on the wrong surface is the failure a percentile hides",
+      "limit": 0.125,
+      "measurement": "reconstructed_depth",
+      "name": "reconstructed_depth.worst",
+      "path": [
+        "absolute",
+        "worst"
+      ],
+      "unit": "synthetic depth units: raw code x depth scale, exact by construction"
+    },
+    {
+      "comparison": "<=",
+      "context": "absolute: zero. A reconstructed sample in the empty band between the foreground and the background is a flying pixel, whatever produced it",
+      "limit": 0.0,
+      "measurement": "edge",
+      "name": "edge.bridging",
+      "path": [
+        "bridging"
+      ],
+      "unit": "samples"
+    },
+    {
+      "comparison": "<=",
+      "context": "absolute: zero. A reconstructed sample on the wrong side of the step has been put on a surface it is not on",
+      "limit": 0.0,
+      "measurement": "edge",
+      "name": "edge.misplaced",
+      "path": [
+        "misplaced"
+      ],
+      "unit": "samples"
+    },
+    {
+      "comparison": "<=",
+      "context": "absolute: 1.0 column. The step belongs where the truth puts it. The baseline fails this gate on purpose - dropout along the edge moves its apparent boundary inward, which is exactly the defect completion should repair",
+      "limit": 1.0,
+      "measurement": "edge_step_column",
+      "name": "edge_step_column.worst",
+      "path": [
+        "absolute",
+        "worst"
+      ],
+      "unit": "window columns"
+    },
+    {
+      "comparison": "<=",
+      "context": "non-inferiority: the baseline's own worst extent error plus 8 raw codes. Smoothing an object smaller is the classic way a denser result looks better and measures worse",
+      "limit": 0.0625,
+      "measurement": "dimensions",
+      "name": "dimensions.worst",
+      "path": [
+        "absolute",
+        "worst"
+      ],
+      "unit": "synthetic depth units: raw code x depth scale, exact by construction"
+    },
+    {
+      "comparison": ">=",
+      "context": "a strict gain, stated by this scene and not by any candidate: 265 dropped sample(s) of these frames, away from any foreground boundary the scene declares, were measured by at least two OTHER posed frames, at the sample and the depth the truth puts them at, with the correspondence holding in both directions. A pose-compensated method must put at least that many back, as temporally reconstructed samples standing on surface the truth really has. Only recovered depth pays this gate: a refusal, a contradicted spatial estimate and a single-frame fill are each evidence about a sample rather than a sample put back. The unchanged baseline and the single-frame spatial primitive recover none of them",
+      "limit": 265.0,
+      "measurement": "coverage",
+      "name": "coverage.temporal_recovery",
+      "path": [
+        "temporally_reconstructed_on_surface"
+      ],
+      "unit": "samples"
+    },
+    {
+      "comparison": "<=",
+      "context": "absolute: 16 raw codes, the same worst-sample tolerance the held-out error gate uses, applied only to reconstructions the candidate itself published at confidence 0.5 or above. A completion is free to be unsure; what it may not do is be sure and wrong. Lowering its own confidence is the only way to leave this gate, and that lowering is visible in the same measurement",
+      "limit": 0.125,
+      "measurement": "confidence",
+      "name": "confidence.high_confidence_worst",
+      "path": [
+        "high_confidence_worst"
+      ],
+      "unit": "synthetic depth units: raw code x depth scale, exact by construction"
+    },
+    {
+      "comparison": "is",
+      "context": "the work a completion spent must be inside the budget derivable from its input before it ran - one neighbourhood scan per hole at its published radius. A bound by construction rather than a wall-clock assertion, which would measure the machine. Candidates that report no work record leave this gate inapplicable, and each case declares exactly which ones those are",
+      "limit": true,
+      "measurement": "completion_work",
+      "name": "completion_work.within_budget",
+      "path": [
+        "within_budget"
+      ]
+    },
+    {
+      "comparison": "is",
+      "context": "the projection and comparison work a temporal completion spent must be inside the budget derivable from its input before it ran - one projection per eligible source sample into its published footprint, and one bounded comparison per hole. A bound by construction rather than a wall-clock assertion, which would measure the machine. Candidates that report no temporal run leave this gate inapplicable",
+      "limit": true,
+      "measurement": "temporal_work",
+      "name": "temporal_work.within_budget",
+      "path": [
+        "within_budget"
+      ]
+    }
+  ],
+  "kind": "scanner3d.depth-completeness-case",
+  "notes": [
+    "The pose spec's translation moves the SCENE, so a frame's own world pose - the camera-to-model transform this benchmark scores with - is its inverse. The temporal transform from a source frame into the target camera is the target's inverse composed with the source's, and composing those the other way round is invisible on a stationary pair; here it moves every sample ten columns the wrong way.",
+    "The three strips are disjoint in OBJECT space, not merely in image columns. A sample dropped in one frame is only recoverable from a frame that did not drop the same part of the box, and at a five-pixel motion the image column and the object column are five apart.",
+    "Only frame 0's strip straddles a silhouette. The silhouette is one object feature, so three strips that each straddle it in their own frame would be the same object columns three times and nothing would be complementary. The edge measurements score frame 0, which is the frame that has the step.",
+    "Speckle is applied to every frame as well, so some holes are isolated and recoverable from one frame's own evidence and some are not. The single-frame spatial primitive is run here for exactly that comparison."
+  ],
+  "regions": {
+    "dimensions": true,
+    "foreground_below": 15000,
+    "fusion": null,
+    "landmarks": false,
+    "plane": false,
+    "slot_columns": [],
+    "surface_tolerance": null,
+    "tracking": false,
+    "weighted_fusion": null
+  },
+  "scene": {
+    "depth_scale": 0.0078125,
+    "frames": [
+      {
+        "index": 0,
+        "input_returned": 764,
+        "input_sha256": "7c977723c8c940919a7f5248227248106083c71e2286737e24e2c5e1ccf1702b",
+        "masks": [
+          {
+            "fraction": 0.08,
+            "kind": "speckle"
+          },
+          {
+            "first_column": 24,
+            "kind": "strip",
+            "last_column": 28
+          }
+        ],
+        "pose": {
+          "axis": [
+            0.0,
+            1.0,
+            0.0
+          ],
+          "degrees": 0.0,
+          "through": [
+            0.0,
+            0.0,
+            100.0
+          ],
+          "translation": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "truth_returned": 960,
+        "truth_sha256": "34d7767f851bbedf870e587270c67d286ccbec41721be5625d79cd4e26a6bd19"
+      },
+      {
+        "index": 1,
+        "input_returned": 758,
+        "input_sha256": "0b34eeb55bf790a051b16ba2910630f08be8d5be3c3136d0a3a8de7184d561cd",
+        "masks": [
+          {
+            "fraction": 0.08,
+            "kind": "speckle"
+          },
+          {
+            "first_column": 4,
+            "kind": "strip",
+            "last_column": 8
+          }
+        ],
+        "pose": {
+          "axis": [
+            0.0,
+            1.0,
+            0.0
+          ],
+          "degrees": 0.0,
+          "through": [
+            0.0,
+            0.0,
+            100.0
+          ],
+          "translation": [
+            1.2,
+            0.0,
+            0.0
+          ]
+        },
+        "truth_returned": 960,
+        "truth_sha256": "98f77dd0cd64dac3cb2dac923f206cfc4f22acaaa7ed09f3212f309fb769be93"
+      },
+      {
+        "index": 2,
+        "input_returned": 763,
+        "input_sha256": "93a419c15ee088dcb6be9eec8ad40fd441d0b458a25a61b7bf4748594a7223a8",
+        "masks": [
+          {
+            "fraction": 0.08,
+            "kind": "speckle"
+          },
+          {
+            "first_column": 30,
+            "kind": "strip",
+            "last_column": 34
+          }
+        ],
+        "pose": {
+          "axis": [
+            0.0,
+            1.0,
+            0.0
+          ],
+          "degrees": 0.0,
+          "through": [
+            0.0,
+            0.0,
+            100.0
+          ],
+          "translation": [
+            2.4,
+            0.0,
+            0.0
+          ]
+        },
+        "truth_returned": 960,
+        "truth_sha256": "f97f14a2e1051062eeef6406576bc2f805dcf27e3366aa0265d756853d0afd96"
+      }
+    ],
+    "intrinsics": {
+      "cx": 320.0,
+      "cy": 200.0,
+      "fx": 400.0,
+      "fy": 400.0,
+      "height": 400,
+      "width": 640
+    },
+    "seed": "depth-completeness-028:temporal-motion",
+    "shapes": [
+      {
+        "half_extents": [
+          4.0,
+          6.0,
+          4.0
+        ],
+        "kind": "box",
+        "translation": [
+          0.0,
+          0.0,
+          100.0
+        ]
+      },
+      {
+        "kind": "plane",
+        "normal": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "offset": 140.0
+      }
+    ],
+    "window": {
+      "height": 24,
+      "sample_count": 960,
+      "u0": 310,
+      "v0": 188,
+      "width": 40
+    }
+  },
+  "schema_version": 1,
+  "what": "One box in front of a backing plane, seen from three laterally displaced cameras, with a complementary strip of columns missing from each.",
+  "why": "This is the case that separates 'use the other frame' from 'use the other frame THROUGH the pose between them'. The camera moves exactly five pixels at the box's own depth between frames, so the silhouette sits at column 26 in frame 0, 31 in frame 1 and 36 in frame 2. Frame 0's missing strip straddles its silhouette. Carrying the other frames' samples at the SAME pixel therefore lands backing-plane depth - 17920 raw codes - on samples whose truth is the box front face at 12288, which is a 5,632-code error on the wrong surface. Carrying the same raw samples through the exact poses lands them on the samples they belong to, exactly. Nothing here is an aggregate score: the two answers differ by which surface a sample is on."
+}

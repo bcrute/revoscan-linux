@@ -254,11 +254,11 @@ def test_the_panel_describes_the_model_it_is_showing_not_the_frame_that_just_lan
 ) -> None:
     """The 2026-08-26 counter, reattached to the picture it belongs to.
 
-    The model built after three aligned frames is not drawn until fifteen frames
-    have been saved - which is what happens whenever the window is busy. The
-    panel must then say "rebuilt after 3", because 3 is the model on the screen.
+    The model built after three aligned frames is not drawn until the last frame
+    of the sweep - which is what happens whenever the window is busy. The panel
+    must then say "rebuilt after 3", because 3 is the model on the screen.
     Reading the live saved count instead made it claim a rebuild that had not
-    happened, over a picture that was twelve frames old.
+    happened, over a picture several frames old.
     """
     total = MIN_COVERAGE_CLOUDS + COVERAGE_EVERY
     stream_kernel(frames(total))
@@ -342,14 +342,22 @@ def test_the_live_model_payload_never_exceeds_what_the_view_can_draw(monkeypatch
     points = np.arange(3 * 200_000, dtype=np.float32).reshape(-1, 3)
     thin = np.zeros(len(points), dtype=bool)
     thin[::2] = True
-    monkeypatch.setattr(gui, "_coloured_cloud", lambda _clouds, _poses: (points, thin, 0.25))
+    newest = np.zeros(len(points), dtype=bool)
+    newest[-len(points) // 4 :] = True
+    monkeypatch.setattr(
+        gui, "_coloured_cloud", lambda _clouds, _poses: (points, thin, 0.25, newest)
+    )
 
     snapshot = _live_snapshot([((0.0, 0.0, 1.0),)], [Rigid.identity()], saved=9, aligned=7)
 
     assert len(snapshot.points) <= LIVE_MODEL_POINTS
     assert len(snapshot.points) <= MAX_RENDER_POINTS
-    # The flags stay parallel to the points, or the colouring is meaningless.
+    # Both flag arrays stay parallel to the points, or the colouring is
+    # meaningless - and the newest frame survives the decimation rather than
+    # being thinned out of existence by it.
     assert len(snapshot.thin) == len(snapshot.points)
+    assert len(snapshot.newest) == len(snapshot.points)
+    assert snapshot.newest.any()
     assert snapshot.aligned == 7
     assert snapshot.saved == 9
 
@@ -378,7 +386,12 @@ def test_the_model_build_stops_growing_with_the_capture(
         last = cast(tuple[tuple[float, float, float], ...], built_from[-1])
         spans.append((first[0][0], last[0][0]))
         count = len(built_from) * gui.PREVIEW_POINTS
-        return (np.zeros((count, 3), dtype=np.float32), np.zeros(count, dtype=bool), 0.5)
+        return (
+            np.zeros((count, 3), dtype=np.float32),
+            np.zeros(count, dtype=bool),
+            0.5,
+            np.zeros(count, dtype=bool),
+        )
 
     monkeypatch.setattr(gui, "_coloured_cloud", build)
 
@@ -410,10 +423,14 @@ def test_reconstruction_still_builds_from_every_frame_and_every_point() -> None:
     ]
     poses = [Rigid.identity() for _ in range(total)]
 
-    points, thin, _covered = gui._coloured_cloud(clouds, poses)
+    points, thin, _covered, newest = gui._coloured_cloud(clouds, poses)
 
     assert len(points) == total * 2
     assert len(thin) == total * 2
+    # The build flags the last frame it was given whatever the caller intends to
+    # do with that; what a REGISTERED model does with it is
+    # ``test_gui_model_view.py``'s subject, and the answer there is "discard it".
+    assert len(newest) == total * 2
 
 
 # -- the evidence a physical report needs ----------------------------------

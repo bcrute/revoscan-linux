@@ -1,0 +1,292 @@
+{
+  "candidates": [
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst"
+        ],
+        "outcome": "pass",
+        "refusal": null
+      },
+      "name": "baseline",
+      "what": "the unchanged pipeline over input that is already complete"
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst"
+        ],
+        "outcome": "pass",
+        "refusal": null
+      },
+      "name": "identity",
+      "what": "a completion that completes nothing, over complete input"
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst"
+        ],
+        "outcome": "pass",
+        "refusal": null
+      },
+      "name": "spatial_completion",
+      "what": "the product primitive over input with no holes in it: it faces nothing, reconstructs nothing, and every downstream metric is the baseline's exactly"
+    },
+    {
+      "expectation": {
+        "failed_gates": [
+          "coverage.measured_fraction",
+          "coverage.supported_fraction",
+          "dimensions.worst",
+          "landmarks.worst",
+          "surface.reference_to_observed.p95"
+        ],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst"
+        ],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "discarded_measurements",
+      "what": "with nothing missing there is nothing to interpolate, so this candidate only discards measurements - and every downstream metric notices"
+    },
+    {
+      "expectation": {
+        "failed_gates": [],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "coverage.measured_fraction",
+          "coverage.supported_fraction",
+          "dimensions.worst",
+          "landmarks.worst",
+          "plane.residual.p95",
+          "plane.residual.worst",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst",
+          "surface.observed_to_reference.p95",
+          "surface.reference_to_observed.p95"
+        ],
+        "outcome": "refused",
+        "refusal": "raw_frame_mutated"
+      },
+      "name": "mutated_raw_frame",
+      "what": "returns raw bytes that are not the ones it was given"
+    }
+  ],
+  "case_id": "plane-fronto-complete",
+  "gates": [
+    {
+      "comparison": ">=",
+      "context": "the acceptance target: this fraction of the window must end up measured, or reconstructed onto surface that is really there. 0.95 of the surface this scene actually has; the unchanged baseline does not reach it, which is the whole reason this thread exists",
+      "limit": 0.95,
+      "measurement": "coverage",
+      "name": "coverage.supported_fraction",
+      "path": [
+        "supported_fraction"
+      ],
+      "unit": "fraction of 1"
+    },
+    {
+      "comparison": ">=",
+      "context": "non-inferiority: the raw measurements the sensor did return must all still be there and still be called measurements. A completion that discards awkward samples and interpolates over them is not a completion",
+      "limit": 1.0,
+      "measurement": "coverage",
+      "name": "coverage.measured_fraction",
+      "path": [
+        "measured_fraction"
+      ],
+      "unit": "fraction of 1"
+    },
+    {
+      "comparison": "<=",
+      "context": "absolute: 4 raw codes. Error is scored ONLY on samples the candidate reconstructed where truth was held out, so copying the input cannot earn a good score here, and the coverage gates stop a candidate improving this by reconstructing only the easy holes",
+      "limit": 0.03125,
+      "measurement": "reconstructed_depth",
+      "name": "reconstructed_depth.p95",
+      "path": [
+        "absolute",
+        "p95"
+      ],
+      "unit": "synthetic depth units: raw code x depth scale, exact by construction"
+    },
+    {
+      "comparison": "<=",
+      "context": "absolute: 16 raw codes. A single sample placed on the wrong surface is the failure a percentile hides",
+      "limit": 0.125,
+      "measurement": "reconstructed_depth",
+      "name": "reconstructed_depth.worst",
+      "path": [
+        "absolute",
+        "worst"
+      ],
+      "unit": "synthetic depth units: raw code x depth scale, exact by construction"
+    },
+    {
+      "comparison": "<=",
+      "context": "non-inferiority: the baseline's own roughness plus 4 raw codes. A surface known to be flat may not come out of a completion lumpier than it went in",
+      "limit": 0.03125,
+      "measurement": "plane",
+      "name": "plane.residual.p95",
+      "path": [
+        "residuals",
+        "p95"
+      ],
+      "unit": "synthetic depth units: raw code x depth scale, exact by construction"
+    },
+    {
+      "comparison": "<=",
+      "context": "non-inferiority: the baseline's own worst residual plus 4 raw codes, for a local bump a percentile would hide",
+      "limit": 0.03125,
+      "measurement": "plane",
+      "name": "plane.residual.worst",
+      "path": [
+        "residuals",
+        "worst"
+      ],
+      "unit": "synthetic depth units: raw code x depth scale, exact by construction"
+    },
+    {
+      "comparison": "<=",
+      "context": "non-inferiority: the baseline's own worst extent error plus 8 raw codes. Smoothing an object smaller is the classic way a denser result looks better and measures worse",
+      "limit": 0.0625,
+      "measurement": "dimensions",
+      "name": "dimensions.worst",
+      "path": [
+        "absolute",
+        "worst"
+      ],
+      "unit": "synthetic depth units: raw code x depth scale, exact by construction"
+    },
+    {
+      "comparison": "<=",
+      "context": "non-inferiority: the baseline's own worst landmark offset plus 8 raw codes. A feature must not move",
+      "limit": 0.0625,
+      "measurement": "landmarks",
+      "name": "landmarks.worst",
+      "path": [
+        "offsets",
+        "worst"
+      ],
+      "unit": "synthetic depth units: raw code x depth scale, exact by construction"
+    },
+    {
+      "comparison": "<=",
+      "context": "non-inferiority: the baseline's own agreement plus 8 raw codes, measured observed-to-reference, which is the direction that notices geometry that is there and should not be",
+      "limit": 0.0625,
+      "measurement": "surface",
+      "name": "surface.observed_to_reference.p95",
+      "path": [
+        "observed_to_reference",
+        "distances",
+        "p95"
+      ],
+      "unit": "synthetic depth units: raw code x depth scale, exact by construction"
+    },
+    {
+      "comparison": "<=",
+      "context": "non-inferiority: the baseline's own agreement plus 8 raw codes, measured reference-to-observed, which is the direction that notices surface that is missing. Both directions, because neither alone is agreement",
+      "limit": 0.0625,
+      "measurement": "surface",
+      "name": "surface.reference_to_observed.p95",
+      "path": [
+        "reference_to_observed",
+        "distances",
+        "p95"
+      ],
+      "unit": "synthetic depth units: raw code x depth scale, exact by construction"
+    },
+    {
+      "comparison": "is",
+      "context": "the work a completion spent must be inside the budget derivable from its input before it ran - one neighbourhood scan per hole at its published radius. A bound by construction rather than a wall-clock assertion, which would measure the machine. Candidates that report no work record leave this gate inapplicable, and each case declares exactly which ones those are",
+      "limit": true,
+      "measurement": "completion_work",
+      "name": "completion_work.within_budget",
+      "path": [
+        "within_budget"
+      ]
+    }
+  ],
+  "kind": "scanner3d.depth-completeness-case",
+  "notes": [
+    "No dropout mask. Every sample of the window is a returned measurement.",
+    "The reconstructed-depth gates do not apply to a candidate that reconstructs nothing; the fixture declares that rather than letting a gate be skipped silently."
+  ],
+  "regions": {
+    "dimensions": true,
+    "foreground_below": null,
+    "fusion": null,
+    "landmarks": true,
+    "plane": true,
+    "slot_columns": [],
+    "surface_tolerance": 0.1,
+    "tracking": false,
+    "weighted_fusion": null
+  },
+  "scene": {
+    "depth_scale": 0.0078125,
+    "frames": [
+      {
+        "index": 0,
+        "input_returned": 960,
+        "input_sha256": "d3628a6a769bc83a5116709878c1b9afe4d1a5d36e82a20dd01c9874db9f47de",
+        "masks": [],
+        "pose": {
+          "axis": [
+            0.0,
+            1.0,
+            0.0
+          ],
+          "degrees": 0.0,
+          "through": [
+            0.0,
+            0.0,
+            100.0
+          ]
+        },
+        "truth_returned": 960,
+        "truth_sha256": "d3628a6a769bc83a5116709878c1b9afe4d1a5d36e82a20dd01c9874db9f47de"
+      }
+    ],
+    "intrinsics": {
+      "cx": 320.0,
+      "cy": 200.0,
+      "fx": 400.0,
+      "fy": 400.0,
+      "height": 400,
+      "width": 640
+    },
+    "seed": "depth-completeness-028:plane-fronto-complete",
+    "shapes": [
+      {
+        "kind": "plane",
+        "normal": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "offset": 100.0
+      }
+    ],
+    "window": {
+      "height": 24,
+      "sample_count": 960,
+      "u0": 300,
+      "v0": 188,
+      "width": 40
+    }
+  },
+  "schema_version": 1,
+  "what": "A fronto-parallel plane with nothing missing at all.",
+  "why": "The control that says this benchmark measures the candidates and not its own noise. On complete input an identity completion must reproduce every measured value and every downstream metric exactly, and a candidate that discards measurements to smooth the result must still be refused."
+}

@@ -1,0 +1,339 @@
+# The offline quality gates from README.md, run on GitHub-hosted Linux runners.
+# Read-only: no release build, upload, secret, device or system outside the
+# ephemeral runner.
+name: CI
+
+# Quoted so the key stays the string `on` under YAML 1.1 parsers, which read a
+# bare `on` as boolean true.
+'on':
+  push:
+  # Fork pull requests included; GitHub runs them on its own hosted
+  # infrastructure with the read-only token below.
+  pull_request:
+  workflow_dispatch:
+
+# Nothing here writes to the repository, its packages, its pages or its checks.
+permissions:
+  contents: read
+
+# A newer push to the same branch or pull request cancels the run in flight.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Without this uv would download its own CPython 3.14 beside the one
+  # setup-python installed; every job stays on that single interpreter.
+  UV_PYTHON_PREFERENCE: only-system
+
+jobs:
+  # Split so a formatting failure and a test failure are separately visible,
+  # run in parallel, and can be required independently.
+  static:
+    name: Static quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the repository
+        # Actions are pinned to full release commits, reviewed 2026-08-28.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Leave no credential in .git/config for later steps to reach.
+          persist-credentials: false
+
+      - name: Install CPython 3.14
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          # Keyed from the lockfile, so a cache hit can only restore what that
+          # lockfile names; the frozen sync still decides the environment.
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Sync the locked development environment
+        # `--frozen` fails rather than re-resolving if uv.lock and pyproject.toml
+        # disagree. The tooling is an extra, not a dependency group.
+        run: uv sync --frozen --extra dev
+
+      - name: Format
+        run: .venv/bin/ruff format --check .
+
+      - name: Lint
+        run: .venv/bin/ruff check .
+
+      - name: Types
+        run: .venv/bin/mypy
+
+  tests:
+    name: Offline test suite
+    runs-on: ubuntu-latest
+    # The frozen full suite measured about 29 minutes 30 seconds on the owner's
+    # machine at the end of the previous task, and it has been growing. A
+    # GitHub-hosted runner is not that machine and may well be slower, so a
+    # 30-minute bound would have left no margin at all and would have started
+    # reporting timeouts instead of test results. An hour is twice the measured
+    # cost, which is margin a hosted runner can plausibly need, while still
+    # catching a suite that hangs rather than one that is merely slow.
+    timeout-minutes: 60
+    env:
+      # A real Qt platform that maps no window, matching tests/qt_offscreen.py.
+      # Tests needing an OpenGL context skip when the runner has none.
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install CPython 3.14
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Sync the locked development environment
+        run: uv sync --frozen --extra dev
+
+      - name: Tests
+        # The ordinary suite, exactly as README.md documents it. pytest's own
+        # configuration selects tests/, so tests/quality_replay.py and
+        # tests/tsdf_benchmark.py are not collected.
+        run: .venv/bin/pytest
+
+  # Additional named evidence, not a replacement for the suite above. The
+  # deterministic reconstruction-quality corpus runs as its own job so that a
+  # regression in the geometry is separately visible from an ordinary test
+  # failure, and so its report survives the run that failed.
+  #
+  # CPU-only and GitHub-hosted on purpose. This is a correctness oracle over
+  # synthetic truth: the default compute backend is the pure-Python reference,
+  # and a GPU would change how fast it answers rather than what it answers.
+  # See docs/quality-harness.md.
+  harness:
+    name: Reconstruction quality harness
+    runs-on: ubuntu-latest
+    # It runs in well under a second on this corpus; the bound is here so a
+    # harness that hangs stops rather than occupying a runner.
+    timeout-minutes: 10
+    # Restated at job level as well as at workflow level, so this job stays
+    # read-only even if the workflow default is ever widened.
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install CPython 3.14
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Sync the locked development environment
+        run: uv sync --frozen --extra dev
+
+      - name: Run the deterministic reconstruction quality harness
+        # The whole report goes to this step's log - every case, every gate,
+        # passing ones included - so a failure can be read here without
+        # downloading anything. Exit 1 is a case that did not produce the
+        # outcome its fixture declares; exit 2 is a corpus that could not be
+        # run at all.
+        run: .venv/bin/python -m tests.quality_harness --out quality-harness-report.json
+
+      - name: Upload the harness report
+        # `always()` and not `success()`: the failing run is the one whose
+        # report is worth keeping, and the step above exits nonzero exactly
+        # then.
+        if: always()
+        # Actions are pinned to full release commits, reviewed 2026-08-29.
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: quality-harness-report
+          path: quality-harness-report.json
+          # A missing report is a failure and not a quiet skip. The harness
+          # publishes atomically, so "no file" means it never got that far -
+          # which is a thing this job must say out loud.
+          if-no-files-found: error
+          # Long enough to investigate a failure, short enough that the
+          # artifact is not an archive nobody prunes.
+          retention-days: 14
+
+  # The second named CPU correctness oracle, and a separate job for the same
+  # reasons as the first: a depth-completion regression is a different fact
+  # from an ordinary test failure, and the report of the run that failed has
+  # to outlive the runner.
+  #
+  # It is not folded into the reconstruction-quality harness above because the
+  # two measure different evidence and publish different artifacts; see
+  # docs/depth-completeness-benchmark.md. Both are CPU-only and
+  # GitHub-hosted on purpose: the compute backends are the pure-Python
+  # references over committed synthetic truth, so a GPU or a LAN machine would
+  # change how fast the answer arrives, not what the answer is.
+  depth-completeness:
+    name: Depth-completeness benchmark
+    runs-on: ubuntu-latest
+    # The corpus runs in seconds; the bound is here so a benchmark that hangs
+    # stops rather than occupying a runner.
+    timeout-minutes: 10
+    # Restated at job level as well as at workflow level, so this job stays
+    # read-only even if the workflow default is ever widened.
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install CPython 3.14
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Sync the locked development environment
+        run: uv sync --frozen --extra dev
+
+      - name: Run the deterministic depth-completeness benchmark
+        # The whole report goes to this step's log - every case, every
+        # candidate, every expected-versus-observed gate - so a failure can be
+        # read here without downloading anything. Exit 1 is a candidate that
+        # did not produce the outcome its fixture declares; exit 2 is a corpus
+        # that could not be run at all. Either fails this job, because the
+        # step is not guarded and its exit code is the step's.
+        run: .venv/bin/python -m tests.depth_completeness_harness --out depth-completeness-report.json
+
+      - name: Upload the depth-completeness report
+        # `always()` and not `success()`: the failing run is the one whose
+        # report is worth keeping, and the step above exits nonzero exactly
+        # then.
+        if: always()
+        # Actions are pinned to full release commits, reviewed 2026-08-29.
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          # Distinct from the reconstruction-quality artifact above and from
+          # the surface-oracle one below, so one run leaves three separately
+          # named reports rather than a collision.
+          name: depth-completeness-report
+          path: depth-completeness-report.json
+          # A missing report is a failure and not a quiet skip. The harness
+          # publishes atomically and clears the destination first, so "no
+          # file" means it never got that far - which is a thing this job must
+          # say out loud.
+          if-no-files-found: error
+          # Long enough to investigate a failure, short enough that the
+          # artifact is not an archive nobody prunes.
+          retention-days: 14
+
+  # The third named CPU correctness oracle: raw measured dots against the raw
+  # multi-view TSDF surface, both scored on the same frames and poses against
+  # closed-form analytic truth. It is a separate job for the same reason as the
+  # other two - "the fused surface got lumpier" is its own fact, not an ordinary
+  # test failure - and because its report has to outlive the runner that failed.
+  #
+  # It is the slowest of the three: about 3 minutes 11 seconds of CPU on the
+  # owner's machine for the whole corpus, since the shipped desktop resolution
+  # arm meshes a field at the voxel size the Reconstruct action really chooses.
+  #
+  # It is not here to fill a gap in the ordinary suite, because there is none:
+  # tests/test_surface_oracle_harness.py has a module-scoped fixture that runs
+  # this corpus for real and a determinism test that runs it a second time and
+  # compares, so the pytest job above already exercises it twice. What this job
+  # adds is that the exact command docs/surface-oracle.md documents is run once,
+  # under its own visible status, keeping its own complete report - so a fused
+  # surface regression reads as itself rather than as one failure inside a
+  # five-thousand-test suite, and the report of the run that failed outlives
+  # the runner.
+  #
+  # CPU-only and GitHub-hosted on purpose. The six declared grid cells run on
+  # the pure-Python reference backend; the shipped-policy appliance arm runs on
+  # the numpy CPU backend instead, because the resolution that policy derives
+  # needs about two million voxels - roughly thirty times the pure-Python
+  # ceiling - and the accepted artifact records that split as a limitation.
+  # Both are CPU implementations scored against committed synthetic truth, and
+  # no accelerated implementation is selected or required anywhere in this
+  # corpus, so an accelerator would add a different execution path without
+  # improving the correctness evidence - while making the run depend on a
+  # machine no reviewer of this repository can inspect.
+  # See docs/surface-oracle.md.
+  surface-oracle:
+    name: Surface regression oracle
+    runs-on: ubuntu-latest
+    # Roughly six times the measured corpus cost, so an ordinary slow hosted
+    # runner still finishes while an oracle that hangs gives the runner back.
+    timeout-minutes: 20
+    # Restated at job level as well as at workflow level, so this job stays
+    # read-only even if the workflow default is ever widened.
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install CPython 3.14
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Sync the locked development environment
+        run: uv sync --frozen --extra dev
+
+      - name: Run the deterministic surface regression oracle
+        # The exact command docs/surface-oracle.md documents, run once and
+        # unguarded, so its exit status is the step's. The whole report goes to
+        # this step's log - every case, every arm, every corruption control -
+        # so a failure can be read here without downloading anything. Exit 1 is
+        # an arm or a control that did not do what its fixture declares, or an
+        # attribution that does not reconcile; exit 2 is a corpus that could
+        # not be run at all.
+        run: .venv/bin/python -m tests.surface_oracle_harness --out surface-oracle-report.json
+
+      - name: Upload the surface oracle report
+        # `always()` and not `success()`: the failing run is the one whose
+        # report is worth keeping, and the step above exits nonzero exactly
+        # then. Every case is attempted, so a failing report still carries all
+        # of them.
+        if: always()
+        # Actions are pinned to full release commits, reviewed 2026-08-29.
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          # Its own name, distinct from the other two reports, so one run
+          # leaves three separately named artifacts rather than a collision.
+          name: surface-oracle-report
+          path: surface-oracle-report.json
+          # A missing report is a failure and not a quiet skip. The harness
+          # publishes atomically, so "no file" means it never got that far -
+          # which is a thing this job must say out loud.
+          if-no-files-found: error
+          # Long enough to investigate a failure, short enough that the
+          # artifact is not an archive nobody prunes.
+          retention-days: 14

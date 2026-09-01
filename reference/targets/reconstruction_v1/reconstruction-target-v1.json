@@ -1,0 +1,356 @@
+{
+  "artifacts": {
+    "reconstruction-target-v1-reference.ply": {
+      "bytes": 312330,
+      "points": 12000,
+      "role": "area-weighted CAD reference surface with normals and surface IDs; excludes only the print-bed face",
+      "sha256": "9310546044251238cdff6f751c65b6e6a27b656c616930dfac67a681065c6ee3"
+    },
+    "reconstruction-target-v1.stl": {
+      "bytes": 1473884,
+      "role": "binary STL to slice in millimetres without scaling",
+      "sha256": "e7fc005eadcb2ba84b3f180e94f23e6c05d3bd5888bacb1ec5c8b541ceaddc15"
+    }
+  },
+  "bounds_mm": {
+    "maximum": [
+      46.0,
+      41.0,
+      56.0
+    ],
+    "minimum": [
+      -46.0,
+      -41.0,
+      0.0
+    ],
+    "size": [
+      92.0,
+      82.0,
+      56.0
+    ],
+    "under_100mm_on_every_axis": true
+  },
+  "capture_constraint": "preferred first run: keep the camera fixed and rotate the target continuously on a turntable; moving the camera around a stationary target is also valid, but never move both in one capture and do not flip, scale, sand, fill, lift or recenter the target",
+  "coordinate_frame": {
+    "origin": "centre of the print-bed face",
+    "unit": "millimetres",
+    "x": "right across the 92 mm width in the documented top view",
+    "y": "toward the 82 mm rear in the documented top view",
+    "z": "up from the print-bed face"
+  },
+  "curved_region": {
+    "domain": {
+      "x": [
+        16.0,
+        42.0
+      ],
+      "y": [
+        -34.0,
+        -8.0
+      ]
+    },
+    "mesh_segments_per_axis": 96,
+    "name": "smooth_bump",
+    "peak": [
+      29.0,
+      -21.0,
+      19.0
+    ],
+    "surface": "z = 6 + 13 sin(pi (x-16)/26)^2 sin(pi (y+34)/26)^2"
+  },
+  "features": {
+    "deep_open_pocket": "tests missed concave surface and whether completion bridges unsupported space",
+    "four_metric_steps": "tests edge placement and dimension preservation at four scales",
+    "ramp_and_offset_layout": "break rotational and flip symmetries so relative-pose tracking has one answer",
+    "smooth_two_axis_bump": "tests curvature, local ripples and blobby surface bias",
+    "three_thin_rails": "tests feature survival around the shipped mesh resolution"
+  },
+  "landmarks_mm": {
+    "highest_step_back_right": [
+      42.0,
+      35.0,
+      26.0
+    ],
+    "pocket_floor_front_left": [
+      -38.0,
+      22.0,
+      10.0
+    ],
+    "ramp_high_back_right": [
+      11.0,
+      33.0,
+      56.0
+    ],
+    "ramp_low_front_left": [
+      -9.0,
+      -33.0,
+      10.0
+    ],
+    "smooth_bump_peak": [
+      29.0,
+      -21.0,
+      19.0
+    ]
+  },
+  "manufacturing_truth": {
+    "limitation": "the STL is exact digital truth; an FDM print is not. Dense CAD agreement can gate scanner-scale defects only with a tolerance no tighter than the measured print error and layer surface",
+    "required_before_physical_gating": [
+      "record printer, material, nozzle and layer height",
+      "take at least three caliper readings of overall x, y and z",
+      "take at least three readings of plateau height, pocket opening and pocket depth",
+      "record caliper resolution and the full reading spread; do not report only a mean",
+      "photograph the printed target before scanning so damage and cleanup are visible",
+      "record whether the camera or target supplied the relative motion; never move both in one capture"
+    ],
+    "status": "nominal CAD truth until the individual print is measured"
+  },
+  "mesh": {
+    "surface_area_mm2": 27219.00834499042,
+    "triangle_count": 29476,
+    "volume_mm3": 110935.00203442003,
+    "watertight_oriented_2_manifold": true
+  },
+  "nominal_dimensions_mm": {
+    "base_thickness": 6.0,
+    "overall_x": 92.0,
+    "overall_y": 82.0,
+    "overall_z": 56.0,
+    "plateau_height_above_base": 16.0,
+    "plateau_top_z": 22.0,
+    "pocket_depth": 12.0,
+    "pocket_floor_z": 10.0,
+    "pocket_opening_x": 9.0,
+    "pocket_opening_y": 10.0,
+    "ramp_high_z": 56.0,
+    "ramp_low_z": 10.0,
+    "smooth_bump_height_above_base": 13.0,
+    "step_heights_above_base": [
+      2.0,
+      5.0,
+      10.0,
+      20.0
+    ]
+  },
+  "planar_regions": [
+    {
+      "name": "base_front_left",
+      "plane": "z = 6",
+      "x": [
+        -42.0,
+        -16.0
+      ],
+      "y": [
+        -36.0,
+        -19.0
+      ]
+    },
+    {
+      "name": "plateau_main",
+      "plane": "z = 22",
+      "x": [
+        -40.0,
+        -17.0
+      ],
+      "y": [
+        -5.0,
+        16.0
+      ]
+    },
+    {
+      "name": "ramp_interior",
+      "plane": "z = 33 + (23/33) y",
+      "x": [
+        -7.0,
+        9.0
+      ],
+      "y": [
+        -27.0,
+        27.0
+      ]
+    },
+    {
+      "name": "highest_step",
+      "plane": "z = 26",
+      "x": [
+        18.0,
+        40.0
+      ],
+      "y": [
+        26.0,
+        33.0
+      ]
+    },
+    {
+      "name": "pocket_floor",
+      "plane": "z = 10",
+      "x": [
+        -36.0,
+        -31.0
+      ],
+      "y": [
+        24.0,
+        30.0
+      ]
+    }
+  ],
+  "purpose": "physical truth target for rigid relative-pose registration, coverage, edge preservation, dimension error, planar lumpiness and unsupported-fill evaluation",
+  "resolution_design": {
+    "expected_voxel_for_full_cad_bounds_mm": 0.6392666016301444,
+    "rail_widths_in_expected_voxels": [
+      2.346438866311748,
+      4.692877732623496,
+      9.385755465246993
+    ],
+    "rail_widths_mm": [
+      1.5,
+      3.0,
+      6.0
+    ],
+    "shipped_tsdf_voxel_budget": 2097152,
+    "why": "the three rails span approximately 2.3, 4.7 and 9.4 shipped voxels; the smallest is deliberately vulnerable while the largest should survive"
+  },
+  "schema_version": 1,
+  "surface_ids": {
+    "base_top": {
+      "id": 0,
+      "included_in_reference_ply": true,
+      "triangle_count": 2932
+    },
+    "bottom": {
+      "id": 1,
+      "included_in_reference_ply": false,
+      "triangle_count": 442
+    },
+    "outer_east": {
+      "id": 2,
+      "included_in_reference_ply": true,
+      "triangle_count": 228
+    },
+    "outer_north": {
+      "id": 3,
+      "included_in_reference_ply": true,
+      "triangle_count": 214
+    },
+    "outer_south": {
+      "id": 4,
+      "included_in_reference_ply": true,
+      "triangle_count": 214
+    },
+    "outer_west": {
+      "id": 5,
+      "included_in_reference_ply": true,
+      "triangle_count": 228
+    },
+    "plateau_side": {
+      "id": 6,
+      "included_in_reference_ply": true,
+      "triangle_count": 128
+    },
+    "plateau_top": {
+      "id": 7,
+      "included_in_reference_ply": true,
+      "triangle_count": 102
+    },
+    "pocket_floor": {
+      "id": 8,
+      "included_in_reference_ply": true,
+      "triangle_count": 8
+    },
+    "pocket_wall": {
+      "id": 9,
+      "included_in_reference_ply": true,
+      "triangle_count": 32
+    },
+    "rail_1_5mm_side": {
+      "id": 10,
+      "included_in_reference_ply": true,
+      "triangle_count": 72
+    },
+    "rail_1_5mm_top": {
+      "id": 11,
+      "included_in_reference_ply": true,
+      "triangle_count": 28
+    },
+    "rail_3mm_side": {
+      "id": 12,
+      "included_in_reference_ply": true,
+      "triangle_count": 120
+    },
+    "rail_3mm_top": {
+      "id": 13,
+      "included_in_reference_ply": true,
+      "triangle_count": 28
+    },
+    "rail_6mm_side": {
+      "id": 14,
+      "included_in_reference_ply": true,
+      "triangle_count": 544
+    },
+    "rail_6mm_top": {
+      "id": 15,
+      "included_in_reference_ply": true,
+      "triangle_count": 134
+    },
+    "ramp_side": {
+      "id": 16,
+      "included_in_reference_ply": true,
+      "triangle_count": 856
+    },
+    "ramp_top": {
+      "id": 17,
+      "included_in_reference_ply": true,
+      "triangle_count": 212
+    },
+    "smooth_bump": {
+      "id": 18,
+      "included_in_reference_ply": true,
+      "triangle_count": 19594
+    },
+    "step_10mm_side": {
+      "id": 19,
+      "included_in_reference_ply": true,
+      "triangle_count": 18
+    },
+    "step_10mm_top": {
+      "id": 20,
+      "included_in_reference_ply": true,
+      "triangle_count": 388
+    },
+    "step_20mm_side": {
+      "id": 21,
+      "included_in_reference_ply": true,
+      "triangle_count": 414
+    },
+    "step_20mm_top": {
+      "id": 22,
+      "included_in_reference_ply": true,
+      "triangle_count": 582
+    },
+    "step_2mm_side": {
+      "id": 23,
+      "included_in_reference_ply": true,
+      "triangle_count": 396
+    },
+    "step_2mm_top": {
+      "id": 24,
+      "included_in_reference_ply": true,
+      "triangle_count": 194
+    },
+    "step_5mm_side": {
+      "id": 25,
+      "included_in_reference_ply": true,
+      "triangle_count": 10
+    },
+    "step_5mm_top": {
+      "id": 26,
+      "included_in_reference_ply": true,
+      "triangle_count": 194
+    },
+    "step_riser": {
+      "id": 27,
+      "included_in_reference_ply": true,
+      "triangle_count": 1164
+    }
+  },
+  "target_id": "reconstruction-target-v1"
+}

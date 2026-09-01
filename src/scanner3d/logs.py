@@ -11,7 +11,7 @@ outside looked like nothing happening.
 
 So: a log file, always on, in a predictable place, with timestamps. It costs
 almost nothing and it is the difference between "it froze" and "it froze in
-wait_for_scanner after the preview stopped".
+wait_for_capture_access after the preview stopped".
 
 What gets logged
 ----------------

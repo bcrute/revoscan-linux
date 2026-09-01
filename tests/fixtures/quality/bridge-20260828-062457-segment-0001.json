@@ -1,0 +1,418 @@
+{
+  "schema_version": 1,
+  "kind": "scanner3d.relocalization-bridge",
+  "predecessor_frame_index": 141,
+  "segment_start_frame_index": 142,
+  "frames": [
+    {
+      "file": "frame_0142.raw",
+      "frame_index": 142,
+      "byte_count": 512000,
+      "sha256": "34e41ce19ea35882e8dd8778f95d6a14da0388619610bcc1cc5a9ecbfbfd487a"
+    },
+    {
+      "file": "frame_0143.raw",
+      "frame_index": 143,
+      "byte_count": 512000,
+      "sha256": "1919c620acbb950f972b1cdadbadfa1c7c74a5064b493f73c56b0a0cdca7efea"
+    },
+    {
+      "file": "frame_0144.raw",
+      "frame_index": 144,
+      "byte_count": 512000,
+      "sha256": "3be107ffd6913968c9d21e17e7ce526d5c13075830842cbc6d6466f4b2f63276"
+    },
+    {
+      "file": "frame_0145.raw",
+      "frame_index": 145,
+      "byte_count": 512000,
+      "sha256": "47829275517c571b4ff8a4b97e437d3fead4da562b94db715d61afc135cbc436"
+    },
+    {
+      "file": "frame_0146.raw",
+      "frame_index": 146,
+      "byte_count": 512000,
+      "sha256": "b0f4b6ce535b20f20980cca935b97aa8995f0bf5e213f2fb02cf9a6dae9d95b3"
+    }
+  ],
+  "frame_order": "the batch is one consecutive run of global indices, in capture order",
+  "bridge_transform": {
+    "schema_version": 1,
+    "rotation": [
+      [
+        -0.7875041074697147,
+        0.3617010846553924,
+        -0.49900862324957407
+      ],
+      [
+        0.3678726108632302,
+        -0.3737463811060328,
+        -0.8514595614512744
+      ],
+      [
+        -0.49447651399735454,
+        -0.8540995070653323,
+        0.1612668879087079
+      ]
+    ],
+    "translation": [
+      224.12056100400338,
+      72.14766200924666,
+      200.04688897642626
+    ],
+    "rotation_angle_radians": 3.1375430418356363,
+    "translation_magnitude": 308.9564189125973
+  },
+  "bridge_transform_convention": "carries the segment-start frame's coordinates into the predecessor frame's, so a sequential pose chain composes it exactly where it would compose an adjacent fit",
+  "evidence": {
+    "schema_version": 1,
+    "accepted": true,
+    "bridge": {
+      "schema_version": 1,
+      "rotation": [
+        [
+          0.7184957151827638,
+          -0.5739592581228603,
+          0.39285452432047246
+        ],
+        [
+          -0.5798701365009528,
+          -0.8062137967725518,
+          -0.11734538204784266
+        ],
+        [
+          0.38407620605600606,
+          -0.14349245244486974,
+          -0.9120829918559942
+        ]
+      ],
+      "translation": [
+        -117.09269814703632,
+        24.98934262062703,
+        322.8004905123132
+      ],
+      "rotation_angle_radians": 3.1274884041608524,
+      "translation_magnitude": 344.2895930448001
+    },
+    "refusals": [],
+    "candidates": [
+      {
+        "transform": {
+          "schema_version": 1,
+          "rotation": [
+            [
+              0.7184957151827638,
+              -0.5739592581228603,
+              0.39285452432047246
+            ],
+            [
+              -0.5798701365009528,
+              -0.8062137967725518,
+              -0.11734538204784266
+            ],
+            [
+              0.38407620605600606,
+              -0.14349245244486974,
+              -0.9120829918559942
+            ]
+          ],
+          "translation": [
+            -117.09269814703632,
+            24.98934262062703,
+            322.8004905123132
+          ],
+          "rotation_angle_radians": 3.1274884041608524,
+          "translation_magnitude": 344.2895930448001
+        },
+        "origin": "principal+octahedral",
+        "coarse_score": 4.404669125996996,
+        "coarse_matched": 398,
+        "rmse": 0.5148863692487536,
+        "rmse_unit": "input coordinate units, whose physical meaning is not established",
+        "converged": true,
+        "iterations": 28,
+        "matched_fraction": 1.0,
+        "used_fraction": 0.6020761245674741,
+        "overlap": 0.48333333333333334,
+        "resolved_backend": "scipy"
+      },
+      {
+        "transform": {
+          "schema_version": 1,
+          "rotation": [
+            [
+              -0.2238971933900997,
+              -0.6760173313707982,
+              0.7020474446063756
+            ],
+            [
+              -0.7330764365086087,
+              -0.3578636056518124,
+              -0.5783879130702207
+            ],
+            [
+              0.6422374833563333,
+              -0.6441538693791949,
+              -0.4154477193774617
+            ]
+          ],
+          "translation": [
+            -73.73268340633284,
+            123.49848126423828,
+            207.19459539646638
+          ],
+          "rotation_angle_radians": 3.0887520329788924,
+          "translation_magnitude": 252.22605701706817
+        },
+        "origin": "principal+octahedral",
+        "coarse_score": 4.5087373040881245,
+        "coarse_matched": 398,
+        "rmse": 0.7736920561094557,
+        "rmse_unit": "input coordinate units, whose physical meaning is not established",
+        "converged": true,
+        "iterations": 38,
+        "matched_fraction": 1.0,
+        "used_fraction": 0.6020761245674741,
+        "overlap": 0.598,
+        "resolved_backend": "scipy"
+      },
+      {
+        "transform": {
+          "schema_version": 1,
+          "rotation": [
+            [
+              -0.8394079999416684,
+              -0.14534743632813515,
+              0.523706341747707
+            ],
+            [
+              0.5107725903190926,
+              0.118366469480581,
+              0.8515284727367767
+            ],
+            [
+              -0.18575675118996868,
+              0.982274656934375,
+              -0.025118274857290054
+            ]
+          ],
+          "translation": [
+            13.863943994650633,
+            -210.01352914520464,
+            245.07780929242762
+          ],
+          "rotation_angle_radians": 2.632280111415358,
+          "translation_magnitude": 323.04956891270734
+        },
+        "origin": "principal+octahedral",
+        "coarse_score": 4.702570750436216,
+        "coarse_matched": 400,
+        "rmse": 1.0070313616017612,
+        "rmse_unit": "input coordinate units, whose physical meaning is not established",
+        "converged": false,
+        "iterations": 50,
+        "matched_fraction": 1.0,
+        "used_fraction": 0.6020761245674741,
+        "overlap": 0.59,
+        "resolved_backend": "scipy"
+      },
+      {
+        "transform": {
+          "schema_version": 1,
+          "rotation": [
+            [
+              0.40675694591237666,
+              0.5172926504874005,
+              -0.7529655375272872
+            ],
+            [
+              0.35037847339075506,
+              -0.8495374821087334,
+              -0.3943614989786883
+            ],
+            [
+              -0.8436727519224503,
+              -0.10341363664466258,
+              -0.5268034808346713
+            ]
+          ],
+          "translation": [
+            138.13987711425682,
+            -2.7794760612768257,
+            355.605053480055
+          ],
+          "rotation_angle_radians": 2.966969082746822,
+          "translation_magnitude": 381.5040041688553
+        },
+        "origin": "principal+octahedral",
+        "coarse_score": 4.860869422034351,
+        "coarse_matched": 398,
+        "rmse": 1.0105839116274316,
+        "rmse_unit": "input coordinate units, whose physical meaning is not established",
+        "converged": true,
+        "iterations": 12,
+        "matched_fraction": 1.0,
+        "used_fraction": 0.6020761245674741,
+        "overlap": 0.59,
+        "resolved_backend": "scipy"
+      },
+      {
+        "transform": {
+          "schema_version": 1,
+          "rotation": [
+            [
+              -0.9424475758504275,
+              0.3166496178257445,
+              -0.10735728342531399
+            ],
+            [
+              0.064962080940101,
+              -0.14155640495428118,
+              -0.9877963921053529
+            ],
+            [
+              -0.3279824611371544,
+              -0.9379204677088726,
+              0.11283927259241566
+            ]
+          ],
+          "translation": [
+            135.7615768700377,
+            133.42910465062627,
+            190.63337134820205
+          ],
+          "rotation_angle_radians": 2.9715783926269563,
+          "translation_magnitude": 269.39861542645025
+        },
+        "origin": "principal+octahedral",
+        "coarse_score": 4.644430895061635,
+        "coarse_matched": 398,
+        "rmse": 1.122750083998499,
+        "rmse_unit": "input coordinate units, whose physical meaning is not established",
+        "converged": true,
+        "iterations": 9,
+        "matched_fraction": 1.0,
+        "used_fraction": 0.6020761245674741,
+        "overlap": 0.5613333333333334,
+        "resolved_backend": "scipy"
+      }
+    ],
+    "frame_overlaps": [
+      0.5669099756690997,
+      0.5811965811965812,
+      0.5681265206812652,
+      0.5909661229611042,
+      0.5940721649484536
+    ],
+    "runner_up_margin": 1.5026462192780772,
+    "had_runner_up": true,
+    "coarse_unambiguous": false,
+    "segment_points": 1500,
+    "reference_points": 4000,
+    "frames": 5,
+    "thresholds": {
+      "schema_version": 1,
+      "noise_floor": 0.65,
+      "min_tentative_frames": 3,
+      "max_tentative_frames": 12,
+      "max_tentative_bytes": 25165824,
+      "max_tentative_seconds": 180.0,
+      "max_attempts": 8,
+      "reference_points": 4000,
+      "segment_points": 1500,
+      "candidates_refined": 5,
+      "residual_multiple": 4.0,
+      "max_residual": 2.6,
+      "overlap_tolerance_multiple": 3.0,
+      "overlap_tolerance": 1.9500000000000002,
+      "min_overlap": 0.35,
+      "min_frame_overlap": 0.2,
+      "min_matched_fraction": 0.55,
+      "min_used_fraction": 0.4,
+      "runner_up_margin": 1.25,
+      "same_pose_degrees": 3.0,
+      "same_pose_distance": 1.9500000000000002,
+      "local_chain": {
+        "schema_version": 1,
+        "noise_floor": 0.65,
+        "local_residual_multiple": 4.0,
+        "local_max_residual": 2.6,
+        "local_min_matched_fraction": 0.55,
+        "local_min_used_fraction": 0.4
+      }
+    },
+    "limitations": [
+      "A relocalization places a small segment against an accumulated model whose own poses came from chained alignment, so it inherits that chain's drift. It establishes where the segment sits relative to the model as the model stood, not where either sits in truth.",
+      "The gates are conservative thresholds on overlap, residual, matched fraction and candidate margin. A repeated or self-similar surface can satisfy all of them at the wrong placement; nothing here detects that, which is why the evidence is recorded rather than reduced to a decision.",
+      "The reference is a bounded, evenly spread sample of the accepted clouds, not every point of them. Overlap and residual are measured against that sample.",
+      "The coarse ranking did not separate its best orientation from the runner-up. The refinement did, and that is what was judged, but the starting point was a weaker signal than usual."
+    ],
+    "local_chain": {
+      "gates": {
+        "schema_version": 1,
+        "noise_floor": 0.65,
+        "local_residual_multiple": 4.0,
+        "local_max_residual": 2.6,
+        "local_min_matched_fraction": 0.55,
+        "local_min_used_fraction": 0.4
+      },
+      "edges": [
+        {
+          "frame": 1,
+          "rmse": 0.2371432040875788,
+          "rmse_unit": "input coordinate units, whose physical meaning is not established",
+          "converged": true,
+          "iterations": 9,
+          "matched_fraction": 0.9937205651491365,
+          "used_fraction": 0.7959183673469388,
+          "resolved_backend": "scipy",
+          "accepted": true,
+          "refusals": []
+        },
+        {
+          "frame": 2,
+          "rmse": 0.21599296015263786,
+          "rmse_unit": "input coordinate units, whose physical meaning is not established",
+          "converged": true,
+          "iterations": 6,
+          "matched_fraction": 0.9940119760479041,
+          "used_fraction": 0.7964071856287425,
+          "resolved_backend": "scipy",
+          "accepted": true,
+          "refusals": []
+        },
+        {
+          "frame": 3,
+          "rmse": 0.2649289184035516,
+          "rmse_unit": "input coordinate units, whose physical meaning is not established",
+          "converged": true,
+          "iterations": 10,
+          "matched_fraction": 0.9777424483306836,
+          "used_fraction": 0.7821939586645469,
+          "resolved_backend": "scipy",
+          "accepted": true,
+          "refusals": []
+        },
+        {
+          "frame": 4,
+          "rmse": 0.3024569132274943,
+          "rmse_unit": "input coordinate units, whose physical meaning is not established",
+          "converged": true,
+          "iterations": 20,
+          "matched_fraction": 0.993660855784469,
+          "used_fraction": 0.7955625990491284,
+          "resolved_backend": "scipy",
+          "accepted": true,
+          "refusals": []
+        }
+      ],
+      "anchor_frames": 1
+    }
+  },
+  "limitations": [
+    "A relocalization places a small segment against an accumulated model whose own poses came from chained alignment, so it inherits that chain's drift. It establishes where the segment sits relative to the model as the model stood, not where either sits in truth.",
+    "The gates are conservative thresholds on overlap, residual, matched fraction and candidate margin. A repeated or self-similar surface can satisfy all of them at the wrong placement; nothing here detects that, which is why the evidence is recorded rather than reduced to a decision.",
+    "The reference is a bounded, evenly spread sample of the accepted clouds, not every point of them. Overlap and residual are measured against that sample.",
+    "The coarse ranking did not separate its best orientation from the runner-up. The refinement did, and that is what was judged, but the starting point was a weaker signal than usual."
+  ]
+}

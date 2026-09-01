@@ -14,9 +14,15 @@ the fix, and it is deliberately narrow:
   repository keeps arithmetic and hardware access apart.
 * **Zero is not a distance.** A raw sample of 0 means the sensor returned no
   depth for that pixel - the same reading :mod:`scanner3d.depth_metric` and
-  :mod:`scanner3d.v4l2_capture` use. It is rendered as a distinct "no data"
-  colour, never blended into the near end of the depth ramp, and never
-  counted as though it measured anything.
+  :mod:`scanner3d.v4l2_capture` use. It is never blended into the near end of
+  the depth ramp and never counted as though it measured anything. It is drawn
+  instead in a coarse neutral-grey checker no colour on the ramp can produce
+  (:data:`DEFAULT_PALETTE`), because the flat black this used to use is also
+  what a panel that has stopped drawing looks like - and on 2026-08-28 that is
+  exactly how the owner read a frame the sensor had genuinely returned almost
+  nothing for. How much is missing, where it is missing, and whether it is
+  getting worse are :mod:`scanner3d.return_health`'s, reported by both front
+  ends below.
 * **A raw code is not a distance either.** Nothing here multiplies a sample by
   any scale, and no physical unit is implied anywhere in this module. The
   colour ramp and the numeric readout both show the sensor's own uint16
@@ -65,6 +71,13 @@ from typing import Final, cast
 
 from scanner3d.depth_metric import NO_RETURN_SAMPLE
 from scanner3d.errors import DoctorStatus, ScannerError
+from scanner3d.return_health import (
+    ReturnHealth,
+    ReturnHealthTracker,
+    SpatialReturns,
+    health_summary,
+    spatial_returns,
+)
 from scanner3d.v4l2_capture import EXPECTED_FRAME_BYTES, FRAME_HEIGHT, FRAME_WIDTH
 
 #: Every dict this module emits stamps this.
@@ -188,6 +201,7 @@ class FrameStats:
     clipped_right: int
     clipped_top: int
     clipped_bottom: int
+    spatial: SpatialReturns
 
     @property
     def has_clipping(self) -> bool:
@@ -218,6 +232,7 @@ class FrameStats:
                 "bottom": self.clipped_bottom,
                 "any": self.has_clipping,
             },
+            "spatial": self.spatial.as_dict(),
         }
 
 
@@ -225,17 +240,23 @@ def frame_stats(raw: bytes) -> FrameStats:
     """Compute :class:`FrameStats` for one raw depth frame.
 
     Refuses (see :func:`_ensure_frame`) before a single sample is unpacked.
+
+    A caller that also wants the frame's colours should call
+    :func:`render_frame` instead: it produces both from ONE unpack of the same
+    512000 bytes, rather than this function and :func:`depth_to_pixels` each
+    unpacking the frame again.
     """
     _ensure_frame(raw)
-    samples: tuple[int, ...] = struct.unpack(SAMPLES_FORMAT, raw)
+    return _stats_from_samples(struct.unpack(SAMPLES_FORMAT, raw))
 
-    returned = 0
-    non_zero: list[int] = []
-    for sample in samples:
-        if sample != NO_RETURN_SAMPLE:
-            returned += 1
-            non_zero.append(sample)
+
+def _stats_from_samples(samples: tuple[int, ...]) -> FrameStats:
+    """:class:`FrameStats` for an already-unpacked frame. Not a public entry point."""
+    spatial = spatial_returns(samples, FRAME_WIDTH, FRAME_HEIGHT)
+
+    non_zero: list[int] = [sample for sample in samples if sample != NO_RETURN_SAMPLE]
     non_zero.sort()
+    returned = spatial.returned
 
     min_code = non_zero[0] if non_zero else 0
     max_code = non_zero[-1] if non_zero else 0
@@ -267,6 +288,7 @@ def frame_stats(raw: bytes) -> FrameStats:
         clipped_right=right,
         clipped_top=top,
         clipped_bottom=bottom,
+        spatial=spatial,
     )
 
 
@@ -275,11 +297,20 @@ def frame_stats(raw: bytes) -> FrameStats:
 
 @dataclass(frozen=True, slots=True)
 class Palette:
-    """A code-to-colour ramp, plus a colour reserved for "no data".
+    """A code-to-colour ramp, plus the treatment reserved for "no data".
 
     ``no_data`` is never a colour ``stops`` can also produce for a real
     return - see :data:`DEFAULT_PALETTE` - so a viewer of the rendered image
     cannot mistake an absent reading for a real near or far one.
+
+    ``no_data_alt`` makes that treatment a coarse two-tone CHECKER rather than
+    a flat fill, alternating with ``no_data`` every ``no_data_block`` pixels in
+    both directions (see :meth:`no_data_color_at`). ``None`` - the default -
+    keeps the flat fill, so a palette written before this existed renders
+    exactly as it did. :data:`DEFAULT_PALETTE` opts in, because a flat fill in
+    the one colour a monitor also shows when nothing is being drawn at all is
+    indistinguishable from a dead panel, which is precisely the confusion the
+    owner reported on 2026-08-28.
 
     ``stops`` maps a fraction in ``[0, 1]`` to an RGB triple by linear
     interpolation between the two nearest control points. This assigns colour
@@ -289,6 +320,23 @@ class Palette:
 
     no_data: tuple[int, int, int]
     stops: tuple[tuple[float, tuple[int, int, int]], ...]
+    no_data_alt: tuple[int, int, int] | None = None
+    no_data_block: int = 8
+
+    def no_data_color_at(self, column: int, row: int) -> tuple[int, int, int]:
+        """The no-data colour for one pixel position.
+
+        Position-dependent on purpose, and coarse on purpose: the block size is
+        large enough to survive the window scaling both front ends apply, so
+        the pattern still reads as a pattern rather than dissolving into an
+        average grey that a distant viewer could mistake for a rendered
+        surface.
+        """
+        if self.no_data_alt is None:
+            return self.no_data
+        block = self.no_data_block
+        same = (column // block) % 2 == (row // block) % 2
+        return self.no_data if same else self.no_data_alt
 
     def color_for(self, fraction: float) -> tuple[int, int, int]:
         """RGB for ``fraction``, an out-of-range value clamped to ``[0, 1]``."""
@@ -313,11 +361,30 @@ class Palette:
         return stops[-1][1]  # unreachable: stops[0][0] == 0.0 and stops[-1][0] == 1.0
 
 
+#: The blocks the default no-data checker is drawn in, in frame pixels.
+NO_DATA_BLOCK: Final = 8
+
+#: The two neutral greys the default "no data" checker alternates between.
+#: Neutral - all three channels equal - is what makes them unreachable by the
+#: ramp below, whose every colour is strongly tinted (see
+#: :data:`DEFAULT_PALETTE`), and mid-toned rather than black so that a frame
+#: the sensor returned nothing for cannot be confused with a panel that failed
+#: to draw. They carry no meaning beyond "the sensor reported nothing here":
+#: neither is nearer, further, better or worse than the other.
+NO_DATA_PRIMARY: Final = (120, 120, 120)
+NO_DATA_SECONDARY: Final = (72, 72, 72)
+
 #: Dark blue (near end of a frame's own stretch) through cyan to yellow (far
-#: end), with pure black reserved for "no data" - a colour the ramp itself
-#: never produces, since its darkest stop is (20, 20, 120), not black.
+#: end), with a coarse neutral-grey checker reserved for "no data". Every
+#: colour the ramp produces has a channel spread of at least 30 - its stops are
+#: (20, 20, 120), (0, 200, 200) and (255, 220, 0), and linear interpolation
+#: between tinted colours on this path stays tinted - while both no-data greys
+#: have a spread of exactly 0, so no interpolation anywhere on the ramp can
+#: reach either of them.
 DEFAULT_PALETTE: Final = Palette(
-    no_data=(0, 0, 0),
+    no_data=NO_DATA_PRIMARY,
+    no_data_alt=NO_DATA_SECONDARY,
+    no_data_block=NO_DATA_BLOCK,
     stops=(
         (0.0, (20, 20, 120)),
         (0.5, (0, 200, 200)),
@@ -372,20 +439,107 @@ def depth_to_pixels(
     here.
     """
     _ensure_frame(raw)
-    samples: tuple[int, ...] = struct.unpack(SAMPLES_FORMAT, raw)
+    return _pixels_from_samples(
+        struct.unpack(SAMPLES_FORMAT, raw), low=low, high=high, palette=palette
+    )
+
+
+def _pixels_from_samples(
+    samples: tuple[int, ...],
+    *,
+    low: int | None,
+    high: int | None,
+    palette: Palette,
+) -> tuple[bytes, ...]:
+    """Colours for an already-unpacked frame. Not a public entry point.
+
+    Two bounded caches, both built and dropped inside this call:
+
+    * the two 640-entry no-data ROWS, one for each block parity. The checker is
+      a fixed function of position, so 1280 entries answer it for all 256000
+      samples and the inner loop is a lookup rather than two divisions.
+    * one ``bytes`` per DISTINCT code actually present. A uint16 frame has at
+      most 65536 of those and a real one has far fewer, so the ramp is
+      evaluated once per code rather than once per pixel. Identical output, by
+      construction: the colour of a code does not depend on where it sits.
+
+    Neither cache outlives the call, and nothing per-pixel is retained.
+    """
     non_zero_sorted = sorted(sample for sample in samples if sample != NO_RETURN_SAMPLE)
     lo, hi = _stretch_bounds(non_zero_sorted, low, high)
     span = hi - lo
 
-    no_data_pixel = bytes(palette.no_data)
+    primary = bytes(palette.no_data)
+    secondary = primary if palette.no_data_alt is None else bytes(palette.no_data_alt)
+    block = palette.no_data_block
+    even_row = tuple(
+        primary if (column // block) % 2 == 0 else secondary for column in range(FRAME_WIDTH)
+    )
+    odd_row = tuple(
+        secondary if (column // block) % 2 == 0 else primary for column in range(FRAME_WIDTH)
+    )
+
+    coloured: dict[int, bytes] = {}
     pixels: list[bytes] = []
-    for sample in samples:
-        if sample == NO_RETURN_SAMPLE:
-            pixels.append(no_data_pixel)
-            continue
-        fraction = 1.0 if span <= 0 else (sample - lo) / span
-        pixels.append(bytes(palette.color_for(fraction)))
+    index = 0
+    for row in range(FRAME_HEIGHT):
+        no_data_row = even_row if (row // block) % 2 == 0 else odd_row
+        for column, sample in enumerate(samples[index : index + FRAME_WIDTH]):
+            if sample == NO_RETURN_SAMPLE:
+                pixels.append(no_data_row[column])
+                continue
+            pixel = coloured.get(sample)
+            if pixel is None:
+                fraction = 1.0 if span <= 0 else (sample - lo) / span
+                pixel = bytes(palette.color_for(fraction))
+                coloured[sample] = pixel
+            pixels.append(pixel)
+        index += FRAME_WIDTH
     return tuple(pixels)
+
+
+@dataclass(frozen=True, slots=True)
+class FrameRender:
+    """One frame's colours and its statistics, from a single unpack of it.
+
+    Both halves of what a live front end needs per frame. Computing them
+    together is not an optimisation detail that can drift: the picture and the
+    numbers beside it are then guaranteed to describe the same 256000 samples,
+    unpacked exactly once.
+
+    What that guarantees is the UNPACK and the samples, not a single walk:
+    :func:`render_frame` still makes the documented bounded colour and
+    statistics passes over the tuple it unpacked. The saving is one
+    ``struct.unpack`` of 512000 bytes rather than two, and one shared sample
+    tuple rather than two that could disagree.
+    """
+
+    pixels: tuple[bytes, ...]
+    stats: FrameStats
+
+
+def render_frame(
+    raw: bytes,
+    *,
+    low: int | None = None,
+    high: int | None = None,
+    palette: Palette = DEFAULT_PALETTE,
+) -> FrameRender:
+    """Colour and measure one raw frame, unpacking it exactly once.
+
+    Identical in every value to calling :func:`depth_to_pixels` and
+    :func:`frame_stats` on the same bytes - the two are implemented on the same
+    internals this calls - but at one ``struct.unpack`` of 512000 bytes rather
+    than two, over one shared sample tuple. Colour and statistics then make
+    their own bounded passes over that tuple, exactly as they do when called
+    separately; this promises one unpack, not one walk.
+    """
+    _ensure_frame(raw)
+    samples: tuple[int, ...] = struct.unpack(SAMPLES_FORMAT, raw)
+    return FrameRender(
+        pixels=_pixels_from_samples(samples, low=low, high=high, palette=palette),
+        stats=_stats_from_samples(samples),
+    )
 
 
 #: The PPM (P6, binary) header this module writes. ``tkinter.PhotoImage``
@@ -404,7 +558,11 @@ def ppm_bytes(
     palette: Palette = DEFAULT_PALETTE,
 ) -> bytes:
     """One frame, false-coloured, as a binary P6 PPM image."""
-    pixels = depth_to_pixels(raw, low=low, high=high, palette=palette)
+    return _ppm_from_pixels(depth_to_pixels(raw, low=low, high=high, palette=palette))
+
+
+def _ppm_from_pixels(pixels: tuple[bytes, ...]) -> bytes:
+    """Wrap already-coloured pixels in a P6 header. Not a public entry point."""
     header = f"{PPM_MAGIC}\n{FRAME_WIDTH} {FRAME_HEIGHT}\n{PPM_MAXVAL}\n".encode("ascii")
     return header + b"".join(pixels)
 
@@ -517,10 +675,20 @@ class DepthViewer:
         # Python reference, even while it is still on screen.
         self._photo: tkinter.PhotoImage | None = None
 
+        #: This window's own run. Reset on close(), so a second viewer over a
+        #: second run never inherits the first run's collapse.
+        self._health = ReturnHealthTracker()
+
         self._root = tkinter.Tk()
         self._root.title(title)
         self._image_label = tkinter.Label(self._root)
         self._image_label.pack()
+        # Directly under the image, before the numbers: a frame the sensor
+        # returned nothing for must not read as a picture with a quiet caption.
+        self._health_label = tkinter.Label(
+            self._root, justify="left", anchor="w", wraplength=FRAME_WIDTH, font=("TkFixedFont", 11)
+        )
+        self._health_label.pack(fill="x")
         self._stats_label = tkinter.Label(
             self._root, justify="left", anchor="w", font=("TkFixedFont", 10)
         )
@@ -565,10 +733,23 @@ class DepthViewer:
         self._root.update()
 
     def _render(self, raw: bytes, now: float) -> None:
-        """Actually redraw: called at most every ``MIN_RENDER_INTERVAL``."""
-        stats = frame_stats(raw)
-        ppm = ppm_bytes(raw)
-        photo = tkinter.PhotoImage(data=ppm)
+        """Actually redraw: called at most every ``MIN_RENDER_INTERVAL``.
+
+        One :func:`render_frame` produces the picture and the numbers beside
+        it, so a redraw unpacks the frame once and colours and measures the
+        same samples - not once for colour and again for statistics. It is one
+        unpack and one shared sample tuple, not one walk: the bounded colour
+        and statistics passes over that tuple are unchanged.
+
+        The return-health window advances on RENDERED frames only, which is the
+        honest thing for a viewer that deliberately drops frames it is too slow
+        to draw: the baseline is over what this window has actually seen, and
+        :meth:`health_summary` says so.
+        """
+        rendered = render_frame(raw)
+        stats = rendered.stats
+        health = self._health.update(stats.yield_fraction)
+        photo = tkinter.PhotoImage(data=_ppm_from_pixels(rendered.pixels))
         if self._scale != 1:
             photo = photo.zoom(self._scale, self._scale)
         self._photo = photo
@@ -587,6 +768,12 @@ class DepthViewer:
                 f"code min {stats.min_code}  median {stats.median_code}  max {stats.max_code}"
             )
         )
+        self._health_label.configure(
+            text=health_summary(health, stats.spatial),
+            fg="#ffffff" if health.is_warning else "#333333",
+            bg="#8a4b00" if health.is_warning else self._root.cget("bg"),
+            font=("TkFixedFont", 11, "bold" if health.is_warning else "normal"),
+        )
         if stats.has_clipping:
             self._clip_label.configure(
                 text=(
@@ -599,10 +786,16 @@ class DepthViewer:
             self._clip_label.configure(text="")
 
     def close(self) -> None:
-        """Destroy the window. Tolerates being called more than once."""
+        """Destroy the window. Tolerates being called more than once.
+
+        The return-health window is cleared here as well as in the window: this
+        object is a run, and a torn-down run must not leave a baseline behind
+        for anything that outlives it.
+        """
         if self._closed:
             return
         self._closed = True
+        self._health.reset()
         # Already gone (e.g. the owner closed the window by hand) is not an
         # error: closing an already-closed window is a no-op either way.
         with contextlib.suppress(tkinter.TclError):
@@ -630,11 +823,15 @@ _INDEX_HTML: Final = """<!doctype html>
   #clip { display: none; margin-top: 0.5rem; padding: 0.5rem;
           background: #b00000; color: #fff; font-weight: bold; }
   #clip.show { display: block; }
+  #health { margin-top: 0.5rem; padding: 0.5rem; white-space: pre-wrap;
+            font-size: 1rem; text-align: left; }
+  #health.warn { background: #8a4b00; color: #fff; font-weight: bold; }
 </style>
 </head>
 <body>
 <h1>scanner3d - live depth</h1>
 <img id="frame" alt="waiting for first frame...">
+<div id="health"></div>
 <div id="stats">waiting for first frame...</div>
 <div id="clip"></div>
 <script>
@@ -650,6 +847,9 @@ async function poll() {
         "   yield " + (s.yield_fraction * 100).toFixed(1) + "%" +
         "   fps " + data.fps.toFixed(1) + "\\n" +
         "code min " + s.codes.min + "  median " + s.codes.median + "  max " + s.codes.max;
+      const health = document.getElementById("health");
+      health.textContent = data.health_summary;
+      health.classList.toggle("warn", data.health.warning);
       const clip = document.getElementById("clip");
       if (s.clipping.any) {
         clip.textContent = "CLIPPING - object runs off the sensor edge:  " +
@@ -674,12 +874,18 @@ _INDEX_HTML_BYTES: Final = _INDEX_HTML.encode("utf-8")
 
 
 class _ServerState:
-    """Mutable state shared between the capture thread and HTTP worker threads.
+    """One server RUN's state, shared between the capture and HTTP threads.
 
     Exactly one lock and one latest frame - never a growing buffer or a
     queue. :meth:`ViewerServer.show` overwrites ``raw`` and returns; a slow or
     absent browser only ever reads whatever happens to be here when it asks,
     and never causes memory to accumulate.
+
+    One object per run, installed by :class:`_RunHandle`. A stop/start does not
+    clear this object; it replaces it. That is what keeps a request still in
+    flight when the server was stopped confined to the run it arrived in: it
+    holds this object for the whole of its request and can neither read nor
+    seed the state the restarted run publishes into.
     """
 
     def __init__(self) -> None:
@@ -688,6 +894,53 @@ class _ServerState:
         self.received_count = 0
         self.last_update_time: float | None = None
         self.previous_update_time: float | None = None
+        #: A THIRD lock, held by an HTTP worker for the whole of one
+        #: snapshot-and-judge. It orders the request workers against each
+        #: other so that every answer describes one frame: the snapshot is
+        #: taken inside it, so a worker cannot analyse frame 1 while frame 2
+        #: is being judged and then report frame 1's numbers beside frame 2's
+        #: verdict. It is never held by :meth:`ViewerServer.show`, and ``lock``
+        #: is never held across the analysis, so a capture loop still never
+        #: waits on a browser.
+        self.analysis_lock = threading.Lock()
+        #: The last complete answer built, kept so that a repeat poll for a
+        #: frame already analysed is answered from it rather than by measuring
+        #: the same 256000 samples again. One payload, replaced in place.
+        self.latest_payload: dict[str, object] | None = None
+        #: A SECOND lock, held only while the return-health window is read or
+        #: advanced. Deliberately not ``lock``: computing a frame's statistics
+        #: takes long enough that holding ``lock`` across it would make
+        #: :meth:`ViewerServer.show` - and therefore the capture loop calling
+        #: it - wait on a browser poll, which is the one thing this class
+        #: promises never to do.
+        self.health_lock = threading.Lock()
+        self.health = ReturnHealthTracker()
+        #: The HIGHEST frame number the window has been advanced for. Only a
+        #: strictly greater one advances it again, so a browser polling faster
+        #: than frames arrive cannot feed one frame into the baseline several
+        #: times over, and a stale request that overtakes a newer one cannot
+        #: wind it back to a frame already counted.
+        self.health_frame = 0
+        self.latest_health: ReturnHealth | None = None
+
+    def publish(self, raw: bytes, now: float) -> None:
+        """Record one frame as this run's latest. One lock, four assignments."""
+        with self.lock:
+            self.previous_update_time = self.last_update_time
+            self.last_update_time = now
+            self.received_count += 1
+            self.raw = raw
+
+    def snapshot(self) -> tuple[bytes | None, int, float | None, float | None]:
+        """This run's latest frame and the counters that describe THAT frame.
+
+        Taken together under one lock, and released before anything is
+        computed from them, so the frame, its number and its timing cannot be
+        read from two different moments - and nothing expensive ever happens
+        while the lock a capture loop needs is held.
+        """
+        with self.lock:
+            return (self.raw, self.received_count, self.last_update_time, self.previous_update_time)
 
 
 class _ViewerRequestHandler(http.server.BaseHTTPRequestHandler):
@@ -715,23 +968,34 @@ class _ViewerRequestHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _state(self) -> _ServerState:
-        return cast(_ViewerHTTPServer, self.server).state
+    def _runs(self) -> _RunHandle:
+        return cast(_ViewerHTTPServer, self.server).runs
 
     def do_GET(self) -> None:
+        # The run is bound ONCE, here, and every read and every advance below
+        # is made against that object. A request that arrived in a run which
+        # has since been stopped therefore stays inside the run it arrived in:
+        # it cannot answer for, or seed the baseline of, the run that replaced
+        # it. See :meth:`_serve_stats_json` for what it is told instead.
+        runs = self._runs()
+        run = runs.current
         if self.path in ("/", "/index.html"):
             self._write(200, "text/html; charset=utf-8", _INDEX_HTML_BYTES)
         elif self.path == "/frame.png" or self.path.startswith("/frame.png?"):
-            self._serve_frame_png()
+            self._serve_frame_png(runs, run)
         elif self.path == "/stats.json" or self.path.startswith("/stats.json?"):
-            self._serve_stats_json()
+            self._serve_stats_json(runs, run)
         else:
             self.send_error(404)
 
-    def _serve_frame_png(self) -> None:
-        state = self._state()
-        with state.lock:
-            raw = state.raw
+    def _serve_frame_png(self, runs: _RunHandle, run: _ServerState) -> None:
+        raw, _number, _last_t, _previous_t = run.snapshot()
+        if raw is not None and not runs.is_current(run):
+            # The run this request belongs to was stopped while it was being
+            # served. Its frame is not this server's current picture, and
+            # saying so is the honest answer.
+            self._write(404, "text/plain; charset=utf-8", b"the run this request arrived in ended")
+            return
         if raw is None:
             # Sane and quiet, not a crash: a browser opened before the first
             # show() call is the ordinary startup sequence, not an error.
@@ -739,34 +1003,151 @@ class _ViewerRequestHandler(http.server.BaseHTTPRequestHandler):
             return
         self._write(200, "image/png", png_bytes(raw))
 
-    def _serve_stats_json(self) -> None:
-        state = self._state()
-        with state.lock:
-            raw = state.raw
-            frame_number = state.received_count
-            last_t = state.last_update_time
-            previous_t = state.previous_update_time
-        payload: dict[str, object]
-        if raw is None:
+    def _serve_stats_json(self, runs: _RunHandle, run: _ServerState) -> None:
+        payload = self._analysed(run)
+        if not runs.is_current(run):
+            # Stopped mid-request. Whatever this handler measured describes a
+            # run that is over, so it is not offered as the current state; the
+            # run it measured was its own object, so nothing it did reaches the
+            # run that replaced it.
             payload = {
                 "schema_version": SCHEMA_VERSION,
                 "available": False,
-                "frame_number": frame_number,
+                "stale_run": True,
+                "frame_number": payload["frame_number"],
             }
-        else:
+        self._write(200, "application/json", json.dumps(payload).encode("utf-8"))
+
+    @classmethod
+    def _analysed(cls, run: _ServerState) -> dict[str, object]:
+        """One request's complete answer about exactly ONE published frame.
+
+        Snapshot and judgement happen together, inside ``analysis_lock``, so
+        the whole document describes one frame: ``frame_number``, ``fps``, the
+        numeric and spatial statistics, the verdict's ``yield_fraction`` and
+        the rendered summary all come from the same 512000 bytes. Round 2 took
+        the snapshot outside every lock and then answered a stale request from
+        the health record, which protected the bounded window but made the
+        document internally false - older spatial evidence beside a newer
+        frame's verdict.
+
+        Ordering the request workers against each other is enough for that, and
+        is all that is done: ``lock`` is held only for the snapshot itself and
+        never across this analysis, and ``analysis_lock`` is never taken by
+        :meth:`ViewerServer.show`. A capture loop calling ``show`` therefore
+        still never waits for, and does no part of, a browser's poll. Two
+        browsers polling at once are serialised against each other instead,
+        which costs a poll its wait rather than costing the scanner a frame.
+
+        A repeat poll for a frame already analysed is answered from
+        ``latest_payload`` rather than measured again, so a browser polling
+        faster than frames arrive costs one analysis per frame, not per poll.
+        """
+        with run.analysis_lock:
+            raw, frame_number, last_t, previous_t = run.snapshot()
+            if raw is None:
+                return {
+                    "schema_version": SCHEMA_VERSION,
+                    "available": False,
+                    "frame_number": frame_number,
+                }
+            cached = run.latest_payload
+            if cached is not None and cached["frame_number"] == frame_number:
+                return cached
+            stats = frame_stats(raw)
+            health = cls._health_for(run, frame_number, stats)
             fps = (
                 0.0
                 if last_t is None or previous_t is None
                 else 1.0 / max(last_t - previous_t, 1e-9)
             )
-            payload = {
+            payload: dict[str, object] = {
                 "schema_version": SCHEMA_VERSION,
                 "available": True,
                 "frame_number": frame_number,
                 "fps": fps,
-                "stats": frame_stats(raw).as_dict(),
+                "stats": stats.as_dict(),
+                "health": health.as_dict(),
+                # The same two lines the Tk window shows, rendered once here so
+                # the page and the window cannot word the same frame
+                # differently.
+                "health_summary": health_summary(health, stats.spatial),
             }
-        self._write(200, "application/json", json.dumps(payload).encode("utf-8"))
+            run.latest_payload = payload
+            return payload
+
+    @staticmethod
+    def _health_for(state: _ServerState, frame_number: int, stats: FrameStats) -> ReturnHealth:
+        """This frame's verdict, advancing the window MONOTONICALLY.
+
+        The window advances only for a frame number strictly greater than the
+        last one judged; every other request is answered from the verdict
+        already recorded, without touching the history at all.
+
+        Answering a repeat poll from the record is what stops a browser polling
+        twice a second, while frames arrive at ten, from filling the bounded
+        window with copies of one frame and flattening the baseline.
+
+        Refusing a LOWER frame number is now a second line of defence rather
+        than the first: :meth:`_analysed` takes its snapshot inside
+        ``analysis_lock``, so the frame numbers reaching this method are
+        already non-decreasing. It is kept because it is what the rule
+        actually is - a bounded baseline may never go backwards or count a
+        frame twice - and because this method is also reachable directly, by
+        the tests that write the interleaving out by hand.
+        """
+        with state.health_lock:
+            if state.latest_health is not None and frame_number <= state.health_frame:
+                return state.latest_health
+            health = state.health.update(stats.yield_fraction)
+            state.health_frame = frame_number
+            state.latest_health = health
+            return health
+
+
+class _RunHandle:
+    """Which :class:`_ServerState` is the CURRENT run, and nothing else.
+
+    A stop/start installs a new state object rather than clearing the old one.
+    An HTTP handler binds the current run once, at the top of its request, and
+    works only against that object; :meth:`is_current` is how it finds out,
+    before answering, that the run it was serving has since ended.
+
+    The lock here is held for one attribute read or one attribute write and
+    never across anything else, so binding a run costs a handler - and
+    :meth:`ViewerServer.show` - an uncontended acquisition and nothing more.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._run = _ServerState()
+
+    @property
+    def current(self) -> _ServerState:
+        """The run being published into now."""
+        with self._lock:
+            return self._run
+
+    def begin(self) -> _ServerState:
+        """Install a fresh run and return it. The previous object is left alone.
+
+        Left alone deliberately: a handler still inside a request holds it, and
+        clearing it underneath that handler would produce a torn answer instead
+        of an honest "this run has ended". Nothing else references it once that
+        handler returns, so it is collected with the request.
+
+        A new run has published nothing - no frame, no count, no timing, no
+        history - and ``/stats.json`` says exactly that until the first
+        :meth:`ViewerServer.show`.
+        """
+        with self._lock:
+            self._run = _ServerState()
+            return self._run
+
+    def is_current(self, run: _ServerState) -> bool:
+        """Whether ``run`` is still the run this server publishes into."""
+        with self._lock:
+            return run is self._run
 
 
 class _ViewerHTTPServer(http.server.ThreadingHTTPServer):
@@ -775,8 +1156,8 @@ class _ViewerHTTPServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, server_address: tuple[str, int], state: _ServerState) -> None:
-        self.state = state
+    def __init__(self, server_address: tuple[str, int], runs: _RunHandle) -> None:
+        self.runs = runs
         super().__init__(server_address, _ViewerRequestHandler)
 
 
@@ -813,9 +1194,14 @@ class ViewerServer:
     def __init__(self, *, port: int = 0, bind_all_interfaces: bool = False) -> None:
         self._requested_port = _ensure_valid_port(port)
         self._host = "0.0.0.0" if bind_all_interfaces else "127.0.0.1"
-        self._state = _ServerState()
+        self._runs = _RunHandle()
         self._httpd: _ViewerHTTPServer | None = None
         self._thread: threading.Thread | None = None
+
+    @property
+    def _state(self) -> _ServerState:
+        """The current run's state. Not part of this class's public surface."""
+        return self._runs.current
 
     @property
     def host(self) -> str:
@@ -840,7 +1226,13 @@ class ViewerServer:
         """
         if self._httpd is not None:
             return
-        self._httpd = _ViewerHTTPServer((self._host, self._requested_port), self._state)
+        # A started server is a new run: neither the last one's frame nor
+        # whatever it saw collapse is evidence about this one. A fresh state
+        # object rather than a cleared one, so a request still in flight from
+        # the run before cannot write into this one. Until show() is called,
+        # this run has published nothing, and /stats.json says so.
+        self._runs.begin()
+        self._httpd = _ViewerHTTPServer((self._host, self._requested_port), self._runs)
         self._thread = threading.Thread(
             target=self._httpd.serve_forever, name="scanner3d-viewer-http", daemon=True
         )
@@ -856,21 +1248,22 @@ class ViewerServer:
             self._thread.join(timeout=5.0)
         self._httpd = None
         self._thread = None
+        # Same reason as in start(): the stopped run's state is retired, not
+        # wiped, so a handler still holding it answers "that run has ended"
+        # instead of tearing, and this server's published state is empty again.
+        self._runs.begin()
 
     def show(self, raw: bytes) -> None:
         """Publish one frame for the next poll to pick up. Never blocks.
 
         Refuses (see :func:`_ensure_frame`) a malformed frame before this
-        server's state is touched at all. Otherwise this is one lock
-        acquisition guarding a handful of attribute assignments - no image is
-        encoded and no statistic is computed here, so a capture loop calling
-        this is never made to wait on whether, or how fast, anything is
+        server's state is touched at all. Otherwise this is two uncontended
+        lock acquisitions - one to find the current run, one guarding four
+        attribute assignments - and nothing else. No image is encoded, no
+        statistic is computed and no verdict is reached here, and the lock the
+        HTTP workers do their analysis under is never taken, so a capture loop
+        calling this is never made to wait on whether, or how fast, anything is
         actually reading the other end.
         """
         _ensure_frame(raw)
-        now = time.monotonic()
-        with self._state.lock:
-            self._state.previous_update_time = self._state.last_update_time
-            self._state.last_update_time = now
-            self._state.received_count += 1
-            self._state.raw = raw
+        self._runs.current.publish(raw, time.monotonic())

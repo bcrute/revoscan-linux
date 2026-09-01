@@ -29,6 +29,7 @@ import math
 import os
 import struct
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 
@@ -44,8 +45,11 @@ from scanner3d.mesh import (
     INHERENT_LIMITATIONS,
     MAX_GRID_CELLS,
     MAX_OUTPUT_BYTES,
+    METHOD_LIMITATIONS,
+    PAD_CELLS,
     SCHEMA_VERSION,
     TRIANGLE_TABLE,
+    TSDF_INHERENT_LIMITATIONS,
     DegenerateFace,
     EmptyMesh,
     GridTooLarge,
@@ -55,18 +59,21 @@ from scanner3d.mesh import (
     MeshCountExceeded,
     MeshFileFormat,
     MeshIndexOutOfRange,
+    MeshMethod,
     MeshNotAllowed,
     MeshProvenance,
     MeshWriteIncomplete,
     NoPointsOffered,
     OutputSizeExceeded,
     PointCountExceeded,
+    SurfaceAccumulator,
     VoxelSizeUnusable,
     binary32,
     case_index,
     edge_census,
     encode_obj,
     encode_ply_mesh,
+    provenance_comments,
     reconstruct,
     write_obj,
     write_ply_mesh,
@@ -77,6 +84,7 @@ from scanner3d.pointcloud import (
     CloudProvenance,
     PlyFormat,
 )
+from scanner3d.pointcloud import MAX_POINTS as MAX_INPUT_POINTS
 from scanner3d.v4l2_capture import EXPECTED_FRAME_BYTES
 
 # --------------------------------------------------------------------------
@@ -172,6 +180,21 @@ def sub(record: dict[str, object], key: str) -> dict[str, object]:
     value = record[key]
     assert isinstance(value, dict), f"{key} should be a mapping, not {value!r}"
     return value
+
+
+def flattened(lines: list[str]) -> str:
+    """Every line with its internal whitespace collapsed away, then concatenated.
+
+    A comment block is prose that :func:`textwrap.wrap` has broken onto several
+    lines - sometimes mid-word, at a hyphen. A literal substring search over the
+    joined lines is exactly what that wrapping defeats. Stripping whitespace out
+    of each line before joining removes the one thing wrapping is allowed to
+    change - where a space or a newline falls - while a hyphen, which wrapping
+    never inserts or deletes, survives untouched; comparing two strings put
+    through the same reduction is then a search for the original sentence
+    regardless of where it happened to be broken.
+    """
+    return "".join("".join(line.split()) for line in lines)
 
 
 def rebuilt(parsed: ParsedObj | ParsedPlyMesh) -> Mesh:
@@ -707,6 +730,201 @@ def test_the_mesh_record_carries_counts_and_caveats_and_no_geometry(sphere_mesh)
     # The geometry belongs in the exported file, not in a second copy here.
     assert "vertices" not in record
     assert "faces" not in record
+
+
+# --------------------------------------------------------------------------
+# MeshProvenance's method family: two constructions, two sets of caveats, one
+# record that cannot be talked into dropping either
+# --------------------------------------------------------------------------
+
+
+def test_a_provenance_built_without_naming_a_family_carries_every_inherent_limitation_first():
+    """The legacy safety claim: every call site that predates ``method_family``
+    still gets occupancy's whole caveat list, in order, at the front of the
+    record.
+
+    Nothing in this repository names a family yet outside this test file - every
+    real call to :class:`MeshProvenance` looks exactly like :func:`provenance`
+    here, with no ``method_family`` keyword at all. If the default silently
+    dropped or reordered a caveat, every one of those existing files would be
+    weaker than the ones written before this field existed, and nothing about
+    the call site would have changed to warn a reader.
+    """
+    prov = provenance()
+    assert prov.method_family == MeshMethod.OCCUPANCY
+    assert prov.inherent_limitations == INHERENT_LIMITATIONS
+    assert prov.all_limitations[: len(INHERENT_LIMITATIONS)] == INHERENT_LIMITATIONS
+
+
+def test_selecting_tsdf_carries_only_the_tsdf_caveats_and_none_of_occupancys_own():
+    """A fused field has different inherent defects, and occupancy's must not follow it.
+
+    Six of occupancy's eight caveats are about the occupancy construction
+    specifically and nothing a TSDF fusion does: the surface standing off the
+    samples because a cell counts as solid when any sample falls anywhere in
+    it, an iso level counted over a node's eight touching cells, a
+    six-connected flood fill from the grid border deciding what is interior,
+    and a padded grid that always closes whether or not the object was seen
+    from every side. None of that happened to a level set of a fused signed
+    distance field, so a TSDF-family provenance must not carry any of them.
+    """
+    prov = provenance(method_family=MeshMethod.TSDF)
+    assert prov.inherent_limitations == TSDF_INHERENT_LIMITATIONS
+    occupancy_only = set(INHERENT_LIMITATIONS) - set(TSDF_INHERENT_LIMITATIONS)
+    # Sanity: there really is something occupancy-only to exclude, or this test
+    # would pass for a reason that has nothing to do with what it claims.
+    assert len(occupancy_only) == 6
+    for limitation in occupancy_only:
+        assert limitation not in prov.all_limitations
+
+
+def test_the_caveats_shared_by_both_families_are_the_same_string_object():
+    """Shared prose has to be repeated verbatim, not respelled, or the two
+    families drift into two sentences that were supposed to be one.
+
+    The module docstring says this is done by reusing the same string object
+    rather than typing it twice, which is checked here with ``is`` rather than
+    ``==``: two equal-but-distinct strings would already satisfy equality and
+    still be exactly the drift this is meant to catch.
+    """
+    assert TSDF_INHERENT_LIMITATIONS[0] is INHERENT_LIMITATIONS[0]
+    assert TSDF_INHERENT_LIMITATIONS[-1] is INHERENT_LIMITATIONS[-1]
+    shared = set(INHERENT_LIMITATIONS) & set(TSDF_INHERENT_LIMITATIONS)
+    assert shared == {INHERENT_LIMITATIONS[0], INHERENT_LIMITATIONS[-1]}
+
+
+def test_a_caller_cannot_drop_or_replace_an_inherent_caveat_via_limitations():
+    """``limitations`` adds to a family's caveats; it is not a way to compose them.
+
+    Passing an empty tuple, passing something unrelated, and restating one of
+    the inherent caveats verbatim are three different ways a caller might try
+    to end up with a shorter or edited list. None of them can: the family's set
+    is always there, in front, and restating one does not duplicate it.
+    """
+    dropped = provenance(limitations=())
+    assert dropped.all_limitations[: len(INHERENT_LIMITATIONS)] == INHERENT_LIMITATIONS
+
+    unrelated = provenance(limitations=("the lighting rig was not colour calibrated",))
+    assert unrelated.all_limitations[: len(INHERENT_LIMITATIONS)] == INHERENT_LIMITATIONS
+    assert "the lighting rig was not colour calibrated" in unrelated.all_limitations
+
+    restated = provenance(limitations=(INHERENT_LIMITATIONS[0],))
+    assert restated.all_limitations.count(INHERENT_LIMITATIONS[0]) == 1
+
+
+def test_method_limitations_is_exhaustive_over_meshmethod_and_not_mutable():
+    """A family with no entry would be a family whose meshes carry no inherent
+    caveats at all, silently, so the mapping is checked to cover every member -
+    and to be a :class:`~types.MappingProxyType`, so a caller holding a
+    reference to it cannot edit what every future provenance reads from.
+    """
+    assert set(METHOD_LIMITATIONS) == set(MeshMethod)
+    assert isinstance(METHOD_LIMITATIONS, MappingProxyType)
+    with pytest.raises(TypeError):
+        METHOD_LIMITATIONS[MeshMethod.OCCUPANCY] = ()  # type: ignore[index]
+
+
+def test_as_dict_and_the_written_file_agree_on_which_family_a_tsdf_mesh_belongs_to(tmp_path):
+    """The record and the artifact must tell the same story about a TSDF mesh.
+
+    A tiny hand-built mesh stands in for a real TSDF surface - what matters here
+    is the provenance, not the geometry. ``as_dict`` names the family
+    explicitly, and the OBJ and PLY files it is written into must carry TSDF's
+    caveats and none of occupancy's own, the same way :func:`provenance_comments`
+    assembles them.
+    """
+    prov = provenance(method_family=MeshMethod.TSDF, method="tsdf fusion + marching cubes")
+    record = prov.as_dict()
+    assert record["method_family"] == "tsdf"
+
+    mesh = tetrahedron()
+    occupancy_only = set(INHERENT_LIMITATIONS) - set(TSDF_INHERENT_LIMITATIONS)
+    # The six caveats about the stand-off of a solid that contains its
+    # samples, an iso level counted over a node's cells, a six-connected fill
+    # deciding an interior, and a padded grid that always closes - none of
+    # which happened to a fused signed-distance field - must be excluded here
+    # even though the words alone were checked absent at the provenance level
+    # already; this checks the FILE, not just the record.
+    assert len(occupancy_only) == 6
+
+    block = flattened(provenance_comments(mesh, prov))
+    for limitation in TSDF_INHERENT_LIMITATIONS:
+        assert flattened([limitation]) in block
+    for limitation in occupancy_only:
+        assert flattened([limitation]) not in block
+
+    obj_path = tmp_path / "tsdf.obj"
+    ply_path = tmp_path / "tsdf.ply"
+    obj_export = write_obj(obj_path, mesh, provenance=prov)
+    ply_export = write_ply_mesh(ply_path, mesh, provenance=prov)
+    for export, path, parser in (
+        (obj_export, obj_path, ParsedObj),
+        (ply_export, ply_path, ParsedPlyMesh),
+    ):
+        assert set(TSDF_INHERENT_LIMITATIONS) <= set(export.limitations)
+        assert not (occupancy_only & set(export.limitations))
+        file_block = flattened(parser(path.read_bytes()).comments)
+        for limitation in TSDF_INHERENT_LIMITATIONS:
+            assert flattened([limitation]) in file_block
+        for limitation in occupancy_only:
+            assert flattened([limitation]) not in file_block
+
+
+def test_each_family_states_the_level_it_actually_has_and_never_the_other_ones(tmp_path):
+    """An iso level is occupancy's parameter, and a TSDF file must not print it.
+
+    Two claims, and the second is only safe because of the first. The occupancy
+    line is byte for byte what it has always been - including ``iso level: not
+    stated`` when a caller left the parameter out - because those bytes are in
+    every occupancy file this repository has written and a reader diffing an old
+    export against a new one is entitled to see no difference.
+
+    A TSDF surface has no such quantity: nothing counted how many of a node's
+    eight touching cells were solid, and the level it does have is the zero of a
+    signed distance, fixed by arithmetic rather than chosen. So the LABEL is
+    absent from the comment block of both file formats and from the record, and
+    the level that exists is stated in its place. The label is searched for with
+    its colon, because the words themselves still appear inside the caveat that
+    says no iso level was counted.
+    """
+    occupancy = provenance()
+    assert occupancy.summary == "voxel occupancy + marching cubes; voxel size: 0.1; iso level: 3.5"
+    assert provenance(iso_level=None).summary == (
+        "voxel occupancy + marching cubes; voxel size: 0.1; iso level: not stated"
+    )
+    assert provenance(voxel_size=None, iso_level=None).summary == (
+        "voxel occupancy + marching cubes; voxel size: not stated; iso level: not stated"
+    )
+    assert occupancy.as_dict()["iso_level"] == DEFAULT_ISO_LEVEL
+    assert "level_set" not in occupancy.as_dict()
+
+    fused = provenance(method_family=MeshMethod.TSDF, method="tsdf fusion + marching cubes")
+    assert (
+        fused.summary
+        == "tsdf fusion + marching cubes; voxel size: 0.1; level set: zero (the sign change)"
+    )
+    assert "iso level:" not in fused.summary
+    record = fused.as_dict()
+    assert "iso_level" not in record, "the record states an occupancy parameter"
+    assert record["level_set"] == 0.0
+
+    # The FILES, not just the record: the summary reaches them through
+    # provenance_comments, and a reader opening the mesh sees that line and not
+    # this object.
+    mesh = tetrahedron()
+    obj_path = tmp_path / "level.obj"
+    ply_path = tmp_path / "level.ply"
+    write_obj(obj_path, mesh, provenance=fused)
+    write_ply_mesh(ply_path, mesh, provenance=fused)
+    for path, parser in ((obj_path, ParsedObj), (ply_path, ParsedPlyMesh)):
+        block = flattened(parser(path.read_bytes()).comments)
+        assert flattened(["iso level:"]) not in block, f"{path.suffix} states an iso level"
+        assert flattened(["level set: zero"]) in block
+    # And the occupancy files still carry theirs, so the absence above is this
+    # family's and not a line that stopped being written for everybody.
+    legacy = tmp_path / "legacy.obj"
+    write_obj(legacy, mesh, provenance=occupancy)
+    assert flattened(["iso level: 3.5"]) in flattened(ParsedObj(legacy.read_bytes()).comments)
 
 
 # --------------------------------------------------------------------------
@@ -1321,3 +1539,325 @@ def test_one_real_captured_frame_reconstructs_and_exports(tmp_path):
     assert len(parsed.faces) == mesh.face_count
     assert export.watertight is True
     assert any("no physical measurement has validated" in line for line in export.limitations)
+
+
+# --- reconstructing while the capture runs ------------------------------------
+#
+# The accumulator's whole claim is that folding frames in one at a time reaches
+# the same surface as reading them all at once. That is asserted directly rather
+# than approximately: the same points, the same voxel size, the same vertices
+# and the same faces. Everything else here is about what it costs and what it
+# gives up.
+
+
+def shell(count: int, *, inner: float, outer: float, seed: int) -> list[Point]:
+    """Points in a spherical shell: a cloud with a real surface, and repeatable."""
+    import random
+
+    rng = random.Random(seed)
+    points: list[Point] = []
+    while len(points) < count:
+        candidate = (
+            rng.uniform(-outer, outer),
+            rng.uniform(-outer, outer),
+            rng.uniform(-outer, outer),
+        )
+        if inner <= norm(candidate) <= outer:
+            points.append(candidate)
+    return points
+
+
+def sphere_surface(count: int, radius: float) -> list[Point]:
+    """A dense, evenly spread sphere SURFACE - a Fibonacci lattice, no randomness.
+
+    Different from :func:`shell` on purpose. A shell is a thick volume sampled
+    sparsely, where nearly every point owns a cell; this is a two-dimensional
+    surface sampled densely, where several points share one. That is what a
+    depth frame of an object actually is, and it is the only shape on which
+    "re-observing costs nothing" is a meaningful claim.
+    """
+    points: list[Point] = []
+    golden = math.pi * (3.0 - math.sqrt(5.0))
+    for index in range(count):
+        y = 1.0 - 2.0 * (index + 0.5) / count
+        ring = math.sqrt(max(0.0, 1.0 - y * y))
+        angle = golden * index
+        points.append(
+            (radius * ring * math.cos(angle), radius * y, radius * ring * math.sin(angle))
+        )
+    return points
+
+
+def test_folding_frames_in_one_at_a_time_reaches_the_same_surface_as_reading_them_at_once():
+    """The claim the whole class exists to make, asserted exactly."""
+    points = shell(2000, inner=25.0, outer=30.0, seed=11)
+    accumulator = SurfaceAccumulator(voxel_size=2.0)
+    for start in range(0, len(points), 137):
+        accumulator.add(points[start : start + 137])
+
+    incremental = accumulator.surface()
+    at_once = reconstruct(points, voxel_size=2.0)
+
+    assert incremental.vertices == at_once.vertices
+    assert incremental.faces == at_once.faces
+    assert accumulator.added_points == len(points)
+
+
+def test_the_order_frames_arrive_in_does_not_change_the_surface():
+    """Occupancy is a set union, so it cannot. Asserted because it is the reason
+    a frame can be folded in and then forgotten."""
+    points = shell(900, inner=20.0, outer=24.0, seed=3)
+    forwards = SurfaceAccumulator(voxel_size=1.5)
+    forwards.add(points)
+    backwards = SurfaceAccumulator(voxel_size=1.5)
+    backwards.add(list(reversed(points)))
+
+    assert forwards.surface().faces == backwards.surface().faces
+
+
+def test_adding_the_same_frame_twice_changes_nothing_but_the_point_count():
+    points = shell(500, inner=15.0, outer=18.0, seed=5)
+    accumulator = SurfaceAccumulator(voxel_size=1.5)
+    accumulator.add(points)
+    cells = accumulator.occupied_cells
+    first = accumulator.surface().faces
+
+    accumulator.add(points)
+
+    assert accumulator.occupied_cells == cells
+    assert accumulator.surface().faces == first
+    assert accumulator.added_points == 2 * len(points)
+
+
+def test_an_empty_frame_is_a_no_op_and_not_a_refusal():
+    """The difference from :func:`reconstruct`, and the reason for it: a frame
+    that caught nothing is a normal event during a capture."""
+    accumulator = SurfaceAccumulator(voxel_size=1.0)
+
+    assert accumulator.add([]) == 0
+    assert accumulator.is_empty
+    assert accumulator.grid_shape == (0, 0, 0)
+    assert accumulator.grid_cells == 0
+
+
+def test_an_accumulator_with_nothing_in_it_refuses_to_produce_a_surface():
+    with pytest.raises(NoPointsOffered):
+        SurfaceAccumulator(voxel_size=1.0).surface()
+
+
+def test_add_reports_how_many_cells_are_new():
+    accumulator = SurfaceAccumulator(voxel_size=1.0)
+
+    first = accumulator.add([(0.0, 0.0, 0.0), (5.0, 0.0, 0.0)])
+    again = accumulator.add([(0.0, 0.0, 0.0), (9.0, 0.0, 0.0)])
+
+    assert first == 2
+    assert again == 1
+    assert accumulator.occupied_cells == 3
+
+
+def test_coarsening_halves_each_axis_of_the_grid_and_doubles_the_cell_edge():
+    points = shell(1500, inner=20.0, outer=26.0, seed=17)
+    accumulator = SurfaceAccumulator(voxel_size=1.0)
+    accumulator.add(points)
+    before = accumulator.grid_shape
+
+    assert accumulator.coarsen() == 2.0
+
+    after = accumulator.grid_shape
+    assert accumulator.voxel_size == 2.0
+    assert accumulator.coarsenings == 1
+    for axis in range(3):
+        # Halved, give or take the padding, which is a constant on each side and
+        # so a larger share of a smaller grid.
+        assert after[axis] < before[axis]
+        assert after[axis] >= before[axis] // 2 - 2 * PAD_CELLS
+
+
+def test_a_coarsened_cell_is_where_its_own_centre_lands_on_the_new_grid():
+    """The exact arithmetic, on indices whose answer is written down by hand.
+
+    A cell's centre is ``index * voxel_size``, so at twice the edge its index is
+    ``floor(index / 2 + 0.5)``. The negative cases are the ones worth pinning:
+    Python's floor division is what makes ``(index + 1) // 2`` agree with the
+    floor of a negative half.
+    """
+    indices = (-4, -3, -2, -1, 0, 1, 2, 3)
+    accumulator = SurfaceAccumulator(voxel_size=1.0)
+    accumulator.add([(float(index), 0.0, 0.0) for index in indices])
+
+    accumulator.coarsen()
+
+    lanes = sorted({cell[0] for cell in accumulator._occupied})
+    assert lanes == sorted({math.floor(index / 2 + 0.5) for index in indices})
+    # Written out, because the negative half is where an implementation that
+    # truncated instead of flooring would differ and still look plausible.
+    assert lanes == [-2, -1, 0, 1, 2]
+
+
+def test_coarsening_is_not_the_grid_the_points_would_have_made_at_the_new_edge():
+    """Stated in the docstring as a limitation, so it is asserted as one.
+
+    Coarsening re-bins from the old cells' centres, not from where the points
+    actually were - which is information that was discarded when they were
+    added. The two grids are close and they are not the same, and a caller told
+    otherwise would treat a preview as if it were a choice of resolution.
+    """
+    points = shell(1200, inner=18.0, outer=23.0, seed=23)
+    coarsened = SurfaceAccumulator(voxel_size=1.0)
+    coarsened.add(points)
+    coarsened.coarsen()
+    fresh = SurfaceAccumulator(voxel_size=2.0)
+    fresh.add(points)
+
+    assert coarsened.voxel_size == fresh.voxel_size
+    assert coarsened._occupied != fresh._occupied
+
+
+def test_coarsen_to_fit_reaches_the_budget_and_says_how_many_steps_it_took():
+    points = shell(2000, inner=25.0, outer=30.0, seed=29)
+    accumulator = SurfaceAccumulator(voxel_size=0.4)
+    accumulator.add(points)
+    assert accumulator.grid_cells > 200_000
+
+    steps = accumulator.coarsen_to_fit(50_000)
+
+    assert steps >= 1
+    assert accumulator.grid_cells <= 50_000
+    assert accumulator.coarsenings == steps
+
+
+def test_coarsen_to_fit_does_nothing_when_the_grid_already_fits():
+    accumulator = SurfaceAccumulator(voxel_size=1.0)
+    accumulator.add(shell(300, inner=8.0, outer=10.0, seed=31))
+    edge = accumulator.voxel_size
+
+    assert accumulator.coarsen_to_fit(MAX_GRID_CELLS) == 0
+    assert accumulator.voxel_size == edge
+
+
+def test_coarsen_to_fit_terminates_on_a_budget_no_grid_can_meet():
+    """It stops when doubling stops helping, not when the budget is met.
+
+    The trap this guards is specific and it is not "the grid gets small enough".
+    Re-binning maps an index to ``(index + 1) // 2``, whose FIXED POINTS are 0
+    and 1, so occupied cells can settle on a grid a few cells wide that no
+    further doubling shrinks - a grid that is still bigger than a small enough
+    budget. A loop watching only the budget spins there for ever.
+    """
+    accumulator = SurfaceAccumulator(voxel_size=1.0)
+    accumulator.add(shell(400, inner=10.0, outer=14.0, seed=37))
+
+    steps = accumulator.coarsen_to_fit(1)
+
+    assert steps > 0
+    assert accumulator.grid_cells > 1, "the impossible budget was not met, and that is correct"
+    # And it really is the fixed point: another doubling changes nothing.
+    settled = accumulator.grid_shape
+    accumulator.coarsen()
+    assert accumulator.grid_shape == settled
+
+
+def test_the_fixed_point_of_re_binning_is_reached_and_recognised():
+    """The two indices that survive halving, made explicit on a two-cell grid.
+
+    ``(0 + 1) // 2`` is 0 and ``(1 + 1) // 2`` is 1, so this grid is six cells
+    wide for ever. Written down here because it is the whole reason
+    :meth:`coarsen_to_fit` watches progress rather than the budget.
+    """
+    accumulator = SurfaceAccumulator(voxel_size=1.0)
+    accumulator.add([(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)])
+    shape = accumulator.grid_shape
+
+    for _ in range(5):
+        accumulator.coarsen()
+        assert accumulator.grid_shape == shape
+
+    assert accumulator.coarsen_to_fit(1) == 1, "one doubling to learn it, and no more"
+
+
+def test_a_budget_that_cannot_be_met_surfaces_as_a_refusal_and_not_as_a_hang():
+    """Where an impossible budget is actually reported: the march refuses it."""
+    accumulator = SurfaceAccumulator(voxel_size=1.0)
+    accumulator.add([(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)])
+    accumulator.coarsen_to_fit(1)
+
+    with pytest.raises(GridTooLarge):
+        accumulator.surface(max_grid_cells=1)
+
+
+def test_a_surface_past_the_budget_is_refused_rather_than_silently_coarsened():
+    """The decision belongs to the caller: a class that halved its own
+    resolution would change the picture for a reason nobody saw."""
+    accumulator = SurfaceAccumulator(voxel_size=0.5)
+    accumulator.add(shell(1500, inner=25.0, outer=30.0, seed=41))
+
+    with pytest.raises(GridTooLarge):
+        accumulator.surface(max_grid_cells=1000)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected"),
+    [
+        ({"voxel_size": 0.0}, VoxelSizeUnusable),
+        ({"voxel_size": -1.0}, VoxelSizeUnusable),
+        ({"voxel_size": float("nan")}, NonFiniteValue),
+        ({"voxel_size": 1.0, "max_points": 0}, MeshNotAllowed),
+        ({"voxel_size": 1.0, "max_points": MAX_INPUT_POINTS + 1}, MeshNotAllowed),
+    ],
+)
+def test_an_unusable_accumulator_is_refused_at_construction(kwargs, expected):
+    with pytest.raises(expected):
+        SurfaceAccumulator(**kwargs)
+
+
+def test_an_unusable_iso_level_is_refused_before_the_grid_is_allocated():
+    accumulator = SurfaceAccumulator(voxel_size=1.0)
+    accumulator.add(shell(200, inner=8.0, outer=11.0, seed=43))
+
+    with pytest.raises(IsoLevelUnusable):
+        accumulator.surface(iso_level=0.0)
+
+
+def test_a_frame_past_the_point_cap_is_refused_and_what_preceded_it_is_kept():
+    """Documented as deliberate: the union does not need an all-or-nothing, and
+    buffering a whole frame to provide one would cost what this class saves."""
+    accumulator = SurfaceAccumulator(voxel_size=1.0, max_points=4)
+
+    with pytest.raises(PointCountExceeded):
+        accumulator.add([(float(index), 0.0, 0.0) for index in range(10)])
+
+    assert accumulator.occupied_cells == 4
+
+
+def test_a_non_finite_point_is_refused_by_the_accumulator_too():
+    accumulator = SurfaceAccumulator(voxel_size=1.0)
+
+    with pytest.raises(NonFiniteValue):
+        accumulator.add([(0.0, 0.0, 0.0), (float("nan"), 0.0, 0.0)])
+
+
+def test_re_observing_one_surface_barely_grows_the_grid():
+    """The property that makes this affordable: cost is bounded by the OBJECT.
+
+    Ten views of one surface, each nudged by less than a cell the way overlapping
+    frames of a sweep are. The points go in ten times over and the occupied set
+    ends up about the size one view produced, which is what makes the march's
+    cost flat over a long sweep instead of proportional to its length.
+    """
+    import random
+
+    points = sphere_surface(4000, 20.0)
+    accumulator = SurfaceAccumulator(voxel_size=3.0)
+    accumulator.add(points)
+    one_view = accumulator.occupied_cells
+    rng = random.Random(53)
+    for _ in range(9):
+        dx, dy, dz = (rng.uniform(-0.3, 0.3) for _ in range(3))
+        accumulator.add([(x + dx, y + dy, z + dz) for x, y, z in points])
+
+    assert accumulator.added_points == 10 * len(points)
+    assert one_view > 0
+    # Ten times the points, and about a fifth more cells.
+    assert accumulator.occupied_cells < 1.5 * one_view
+    assert accumulator.surface().is_watertight

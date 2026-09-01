@@ -1,0 +1,242 @@
+{
+  "case_id": "readiness-valid-orbit",
+  "expectation": {
+    "failed_gates": [],
+    "outcome": "pass"
+  },
+  "gates": [
+    {
+      "comparison": "is",
+      "context": "the real readiness reader's decision on this record is not the one the fixture records; the refusal rules or the record changed",
+      "limit": true,
+      "measurement": "readiness",
+      "name": "readiness.ready",
+      "path": [
+        "ready"
+      ]
+    },
+    {
+      "comparison": "is",
+      "context": "coverage_not_measurable fired on a record it does not belong to; the refusal is coming from somewhere other than the evidence this fixture is about",
+      "limit": false,
+      "measurement": "readiness",
+      "name": "readiness.not_reason.coverage_not_measurable",
+      "path": [
+        "reason_present",
+        "coverage_not_measurable"
+      ]
+    },
+    {
+      "comparison": "is",
+      "context": "coverage_unsupported fired on a record it does not belong to; the refusal is coming from somewhere other than the evidence this fixture is about",
+      "limit": false,
+      "measurement": "readiness",
+      "name": "readiness.not_reason.coverage_unsupported",
+      "path": [
+        "reason_present",
+        "coverage_unsupported"
+      ]
+    },
+    {
+      "comparison": "is",
+      "context": "pose_excursion_insufficient fired on a record it does not belong to; the refusal is coming from somewhere other than the evidence this fixture is about",
+      "limit": false,
+      "measurement": "readiness",
+      "name": "readiness.not_reason.pose_excursion_insufficient",
+      "path": [
+        "reason_present",
+        "pose_excursion_insufficient"
+      ]
+    },
+    {
+      "comparison": "is",
+      "context": "pose_motion_below_noise fired on a record it does not belong to; the refusal is coming from somewhere other than the evidence this fixture is about",
+      "limit": false,
+      "measurement": "readiness",
+      "name": "readiness.not_reason.pose_motion_below_noise",
+      "path": [
+        "reason_present",
+        "pose_motion_below_noise"
+      ]
+    },
+    {
+      "comparison": "is",
+      "context": "pose_motion_not_measurable fired on a record it does not belong to; the refusal is coming from somewhere other than the evidence this fixture is about",
+      "limit": false,
+      "measurement": "readiness",
+      "name": "readiness.not_reason.pose_motion_not_measurable",
+      "path": [
+        "reason_present",
+        "pose_motion_not_measurable"
+      ]
+    },
+    {
+      "comparison": "is",
+      "context": "pose_viewpoints_insufficient fired on a record it does not belong to; the refusal is coming from somewhere other than the evidence this fixture is about",
+      "limit": false,
+      "measurement": "readiness",
+      "name": "readiness.not_reason.pose_viewpoints_insufficient",
+      "path": [
+        "reason_present",
+        "pose_viewpoints_insufficient"
+      ]
+    },
+    {
+      "comparison": "is",
+      "context": "surface_abandons_evidence fired on a record it does not belong to; the refusal is coming from somewhere other than the evidence this fixture is about",
+      "limit": false,
+      "measurement": "readiness",
+      "name": "readiness.not_reason.surface_abandons_evidence",
+      "path": [
+        "reason_present",
+        "surface_abandons_evidence"
+      ]
+    },
+    {
+      "comparison": "is",
+      "context": "surface_agreement_not_measurable fired on a record it does not belong to; the refusal is coming from somewhere other than the evidence this fixture is about",
+      "limit": false,
+      "measurement": "readiness",
+      "name": "readiness.not_reason.surface_agreement_not_measurable",
+      "path": [
+        "reason_present",
+        "surface_agreement_not_measurable"
+      ]
+    },
+    {
+      "comparison": "is",
+      "context": "surface_unsupported_by_evidence fired on a record it does not belong to; the refusal is coming from somewhere other than the evidence this fixture is about",
+      "limit": false,
+      "measurement": "readiness",
+      "name": "readiness.not_reason.surface_unsupported_by_evidence",
+      "path": [
+        "reason_present",
+        "surface_unsupported_by_evidence"
+      ]
+    },
+    {
+      "comparison": "is",
+      "context": "tracking_loss_record_unusable fired on a record it does not belong to; the refusal is coming from somewhere other than the evidence this fixture is about",
+      "limit": false,
+      "measurement": "readiness",
+      "name": "readiness.not_reason.tracking_loss_record_unusable",
+      "path": [
+        "reason_present",
+        "tracking_loss_record_unusable"
+      ]
+    },
+    {
+      "comparison": "is",
+      "context": "tracking_lost fired on a record it does not belong to; the refusal is coming from somewhere other than the evidence this fixture is about",
+      "limit": false,
+      "measurement": "readiness",
+      "name": "readiness.not_reason.tracking_lost",
+      "path": [
+        "reason_present",
+        "tracking_lost"
+      ]
+    }
+  ],
+  "kind": "scanner3d.quality-harness-case",
+  "measurements": [
+    {
+      "kind": "readiness_record",
+      "name": "readiness",
+      "record": {
+        "coverage": {
+          "cell_size": 7.135096790741911,
+          "detail": "562 of 562 occupied cell(s) of size 7.135 were seen by at least 2 frame(s) spanning at least 20.0 degrees of view direction",
+          "frames_offered": 12,
+          "frames_used": 12,
+          "measured": true,
+          "points_used": 17603,
+          "supported_cells": 562,
+          "supported_fraction": 1.0,
+          "total_cells": 562
+        },
+        "failures": [],
+        "kind": "scanner3d.reconstruction-readiness",
+        "limitations": [
+          "every measurement here is INTERNAL CONSISTENCY. Nothing in this record was compared against an independent measurement of the object, so a ready result is not a dimensional accuracy claim and never establishes scale",
+          "watertightness is NOT required and is not measured here. A scan of one side of an object legitimately produces an open surface with real boundaries and passes",
+          "the pose gates judge the trajectory that was ACCEPTED. A pose the registration got wrong and was confident about is a pose this module measures as ordinary motion",
+          "coverage is measured over OCCUPIED cells only. Empty space nobody looked at is not counted as an unsupported surface, and this therefore says nothing about what was missed entirely"
+        ],
+        "policy": {
+          "coverage_cells_per_span": 32,
+          "coverage_max_frames": 64,
+          "coverage_min_observations": 2,
+          "coverage_min_spread_radians": 0.3490658503988659,
+          "coverage_min_supported_fraction": 0.5,
+          "coverage_points_per_frame": 2000,
+          "coverage_spacing_multiple": 2.0,
+          "fusion_pixels_per_frame": 2048,
+          "fusion_sample_frames": 64,
+          "max_viewpoints_examined": 16,
+          "min_distinct_viewpoints": 3,
+          "min_excursion": 3.9000000000000004,
+          "min_excursion_multiple": 6.0,
+          "min_moving_steps": 2,
+          "noise_floor": 0.65,
+          "probe_points": 128,
+          "surface_cell_fraction": 1.0,
+          "surface_max_coarsening": 16,
+          "surface_min_evidence_explained": 0.6,
+          "surface_min_supported_fraction": 0.9,
+          "surface_sample_points": 20000,
+          "surface_tolerance_noise_multiple": 2.0,
+          "surface_tolerance_truncations": 1.0,
+          "viewpoint_separation": 1.9500000000000002,
+          "viewpoint_separation_multiple": 3.0
+        },
+        "poses": {
+          "adjacent_steps": 11,
+          "distinct_viewpoints": 12,
+          "excursion": 99.50190445723261,
+          "moving_steps": 11,
+          "poses": 12,
+          "probe_points": 123,
+          "stationary_steps": 0,
+          "travel_median": 18.47232049922648,
+          "travel_worst": 18.472320499226512,
+          "viewpoints_capped": false
+        },
+        "ready": true,
+        "schema_version": 2,
+        "surface": {
+          "detail": "tolerance 2.2517 = max(1 x truncation 1.0200, 2 x noise floor 0.65, one 1.3000 sampling cell diagonal). Evidence: 4000 point(s) deprojected from 2 of 2 FULL-RESOLUTION fused frame(s), 4000 candidate sample(s) examined. INTERNAL CONSISTENCY ONLY: both clouds are in the reconstruction's own coordinate system, so this establishes no dimensional accuracy and sees no uniform scale error",
+          "distance_clamp": 2.25166604983954,
+          "evidence_distance_median": 0.7335370182224243,
+          "evidence_distance_p95": 1.0623875450343063,
+          "evidence_explained_fraction": 1.0,
+          "evidence_points": 4000,
+          "measured": true,
+          "sample_cell": 1.3,
+          "source_frames_offered": 2,
+          "source_frames_sampled": 2,
+          "source_points": 4000,
+          "source_samples_examined": 4000,
+          "surface_distance_median": 0.8935900545258267,
+          "surface_distance_p95": 1.3336011849013771,
+          "surface_points": 5977,
+          "surface_supported_fraction": 1.0,
+          "tolerance": 2.25166604983954,
+          "truncation": 1.02,
+          "voxel_size": 0.34
+        },
+        "tracking": {
+          "detail": "",
+          "records_found": 0,
+          "recovered_episodes": 0,
+          "unresolved": false
+        }
+      }
+    }
+  ],
+  "notes": [
+    "Produced by running the real evaluate_readiness() and surface_evidence() and freezing the record they returned."
+  ],
+  "schema_version": 1,
+  "what": "A full twelve-view orbit whose extracted surface sits on its own fused evidence.",
+  "why": "The control for the readiness boundary: a record the real reader accepts, so a refusal that started firing on everything would be caught here rather than being mistaken for strictness."
+}

@@ -1,0 +1,399 @@
+{
+  "candidates": [
+    {
+      "expectation": {
+        "failed_gates": [
+          "coverage.local_recovery"
+        ],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "confidence.high_confidence_false_fill",
+          "confidence.high_confidence_worst",
+          "reconstructed_depth.p95",
+          "reconstructed_depth.worst"
+        ],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "baseline",
+      "what": "the unchanged pipeline: the aperture and the dropout both stay missing, and the ambiguity between them never has to be resolved. One dropped sample out of 960 still clears the acceptance fraction, so the only bar this fails is the strict local-recovery gain the scene itself owes"
+    },
+    {
+      "expectation": {
+        "failed_gates": [
+          "confidence.high_confidence_false_fill",
+          "coverage.false_fill"
+        ],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "weighted_fusion.matches_measured_only",
+          "weighted_fusion.observed_voxel_gain",
+          "weighted_fusion.observed_voxels",
+          "weighted_fusion.spatially_excluded_contribution"
+        ],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "dense_nearest",
+      "what": "fills every hole with its nearest returned sample, which on this constant-depth plane recovers the dropout onto real surface and fills the aperture with the same confident, wrong answer: both holes get code 12800 at confidence 1.0"
+    },
+    {
+      "expectation": {
+        "failed_gates": [
+          "confidence.high_confidence_false_fill",
+          "coverage.false_fill"
+        ],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "weighted_fusion.matches_measured_only",
+          "weighted_fusion.observed_voxel_gain",
+          "weighted_fusion.observed_voxels",
+          "weighted_fusion.spatially_excluded_contribution"
+        ],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "broad_interpolation",
+      "what": "averages the nearest measured sample in each direction, which does the same on both holes as dense_nearest does"
+    },
+    {
+      "expectation": {
+        "failed_gates": [
+          "confidence.high_confidence_false_fill",
+          "coverage.false_fill"
+        ],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "weighted_fusion.matches_measured_only",
+          "weighted_fusion.observed_voxel_gain",
+          "weighted_fusion.observed_voxels",
+          "weighted_fusion.spatially_excluded_contribution"
+        ],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "foreground_bias",
+      "what": "there is no foreground here to prefer, so it behaves like dense_nearest on both holes"
+    },
+    {
+      "expectation": {
+        "failed_gates": [
+          "confidence.high_confidence_false_fill",
+          "coverage.false_fill"
+        ],
+        "inapplicable_gates": [],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "spatial_completion",
+      "what": "the product primitive's scored neighbourhood around the aperture is byte-identical to the one around the dropout - a single zero surrounded by a constant depth - so it cannot tell a small true gap from a small sensor dropout on the same plane. This is not a tuning limit on component size; it is what one frame cannot know. It reconstructs both onto the constant plane depth at confidence 0.73: the dropout correctly, and the aperture as a confident, invented surface where none exists"
+    },
+    {
+      "expectation": {
+        "failed_gates": [
+          "confidence.high_confidence_false_fill",
+          "coverage.false_fill"
+        ],
+        "inapplicable_gates": [
+          "completion_work.within_budget",
+          "weighted_fusion.matches_measured_only",
+          "weighted_fusion.observed_voxel_gain",
+          "weighted_fusion.observed_voxels",
+          "weighted_fusion.spatially_excluded_contribution"
+        ],
+        "outcome": "fail",
+        "refusal": null
+      },
+      "name": "easy_samples_only",
+      "what": "both holes have four close neighbours, so it fills both the same way dense_nearest does"
+    }
+  ],
+  "case_id": "aperture-ambiguity",
+  "gates": [
+    {
+      "comparison": ">=",
+      "context": "the acceptance target: this fraction of the window must end up measured, or reconstructed onto surface that is really there. 0.95 of the surface this scene actually has; the unchanged baseline does not reach it, which is the whole reason this thread exists",
+      "limit": 0.94901,
+      "measurement": "coverage",
+      "name": "coverage.supported_fraction",
+      "path": [
+        "supported_fraction"
+      ],
+      "unit": "fraction of 1"
+    },
+    {
+      "comparison": ">=",
+      "context": "non-inferiority: the raw measurements the sensor did return must all still be there and still be called measurements. A completion that discards awkward samples and interpolates over them is not a completion",
+      "limit": 0.997916,
+      "measurement": "coverage",
+      "name": "coverage.measured_fraction",
+      "path": [
+        "measured_fraction"
+      ],
+      "unit": "fraction of 1"
+    },
+    {
+      "comparison": "<=",
+      "context": "absolute: 4 raw codes. Error is scored ONLY on samples the candidate reconstructed where truth was held out, so copying the input cannot earn a good score here, and the coverage gates stop a candidate improving this by reconstructing only the easy holes",
+      "limit": 0.03125,
+      "measurement": "reconstructed_depth",
+      "name": "reconstructed_depth.p95",
+      "path": [
+        "absolute",
+        "p95"
+      ],
+      "unit": "synthetic depth units: raw code x depth scale, exact by construction"
+    },
+    {
+      "comparison": "<=",
+      "context": "absolute: 16 raw codes. A single sample placed on the wrong surface is the failure a percentile hides",
+      "limit": 0.125,
+      "measurement": "reconstructed_depth",
+      "name": "reconstructed_depth.worst",
+      "path": [
+        "absolute",
+        "worst"
+      ],
+      "unit": "synthetic depth units: raw code x depth scale, exact by construction"
+    },
+    {
+      "comparison": "<=",
+      "context": "absolute: zero. Space this scene really leaves empty must stay empty. This is the gate a dense fill fails while its aggregate coverage improves",
+      "limit": 0.0,
+      "measurement": "coverage",
+      "name": "coverage.false_fill",
+      "path": [
+        "false_fill"
+      ],
+      "unit": "samples"
+    },
+    {
+      "comparison": ">=",
+      "context": "a strict gain, stated by this scene and not by any candidate: 1 sample(s) of this frame were dropped with a returned measurement on all four sides of them, on geometry that is locally planar, and a completion must recover at least that many onto surface that is really there. Beside coverage.measured_fraction, which pins the measured population, this is a strict supported-coverage gain over the unchanged baseline - which recovers none of them",
+      "limit": 1.0,
+      "measurement": "coverage",
+      "name": "coverage.local_recovery",
+      "path": [
+        "reconstructed_on_surface"
+      ],
+      "unit": "samples"
+    },
+    {
+      "comparison": "<=",
+      "context": "absolute: 16 raw codes, the same worst-sample tolerance the held-out error gate uses, applied only to reconstructions the candidate itself published at confidence 0.5 or above. A completion is free to be unsure; what it may not do is be sure and wrong. Lowering its own confidence is the only way to leave this gate, and that lowering is visible in the same measurement",
+      "limit": 0.125,
+      "measurement": "confidence",
+      "name": "confidence.high_confidence_worst",
+      "path": [
+        "high_confidence_worst"
+      ],
+      "unit": "synthetic depth units: raw code x depth scale, exact by construction"
+    },
+    {
+      "comparison": "<=",
+      "context": "absolute: zero, and scoped to this case alone. Elsewhere false fill of any confidence already fails coverage.false_fill, which makes a confidence-only bar vacuous. Here the aperture and the held-out dropout score identical input bytes, so a completion may be unsure about the aperture without failing this gate - that is the disclosed ambiguity - but it may not be sure and wrong, because nothing in one frame could have told it apart from the real surface a few pixels away",
+      "limit": 0.0,
+      "measurement": "confidence",
+      "name": "confidence.high_confidence_false_fill",
+      "path": [
+        "high_confidence_false_fill"
+      ],
+      "unit": "samples"
+    },
+    {
+      "comparison": "<=",
+      "context": "absolute: not one voxel more observed than the same raw field observes. Space does not become observed by being filled in an image, and this is the case where filling it is indistinguishable from recovering it",
+      "limit": 0.0,
+      "measurement": "weighted_fusion",
+      "name": "weighted_fusion.observed_voxel_gain",
+      "path": [
+        "observed_voxel_gain"
+      ],
+      "unit": "samples"
+    },
+    {
+      "comparison": "is",
+      "context": "the weighted field must be BYTE-IDENTICAL - values and accumulated weights both - to the field this scene's raw measurements alone produce. A single-frame estimate nothing independent confirmed changed the picture and may not change the geometry",
+      "limit": true,
+      "measurement": "weighted_fusion",
+      "name": "weighted_fusion.matches_measured_only",
+      "path": [
+        "matches_measured_only"
+      ]
+    },
+    {
+      "comparison": "<=",
+      "context": "absolute: the baseline's own observed space, and not one voxel more. Space does not become observed by being filled in an image, and this is the case where filling it is indistinguishable from recovering it",
+      "limit": 8445.0,
+      "measurement": "weighted_fusion",
+      "name": "weighted_fusion.observed_voxels",
+      "path": [
+        "observed_voxels"
+      ],
+      "unit": "samples"
+    },
+    {
+      "comparison": "<=",
+      "context": "absolute: every accepted single-frame spatial estimate that no independent view confirmed contributes exactly zero to the field. Not a low weight - zero, which scanner3d.tsdf treats as absence",
+      "limit": 0.0,
+      "measurement": "weighted_fusion",
+      "name": "weighted_fusion.spatially_excluded_contribution",
+      "path": [
+        "spatially_excluded_contribution"
+      ],
+      "unit": "samples"
+    },
+    {
+      "comparison": "is",
+      "context": "the work a completion spent must be inside the budget derivable from its input before it ran - one neighbourhood scan per hole at its published radius. A bound by construction rather than a wall-clock assertion, which would measure the machine. Candidates that report no work record leave this gate inapplicable, and each case declares exactly which ones those are",
+      "limit": true,
+      "measurement": "completion_work",
+      "name": "completion_work.within_budget",
+      "path": [
+        "within_budget"
+      ]
+    }
+  ],
+  "kind": "scanner3d.depth-completeness-case",
+  "notes": [
+    "Four thin coplanar slabs, front faces all at z = 100.0, tile the window except one sample at column 29, row 12: genuine empty space, nothing behind it, truth code 0. That is the aperture.",
+    "A blob mask of radius 0.5 at column 9, row 12 removes exactly its centre sample from the same plane - an ordinary isolated dropout, on real surface.",
+    "No speckle mask is used in this case, unlike every other masked case in this corpus. Speckle would put additional zeros inside the two scored neighbourhoods and destroy the byte-identity the case depends on.",
+    "The 9x9 window centred on the aperture and the 9x9 window centred on the dropout are byte-identical in the input frame: a single zero at the centre, code 12800 everywhere else. tests/test_depth_completeness.py asserts this directly rather than trusting the geometry comment.",
+    "This is an epistemic boundary, not a size tuning knob. Recovering the dropout and false-filling the aperture are the same act performed on indistinguishable input; nothing here is evidence that a bigger neighbourhood radius would do better; a bigger radius only relocates where the identical pair can be built. A spatial-only estimate produced under this ambiguity must not be treated as tracking or fused geometry until independent temporal or physical evidence - a second view, a second frame, a return that disagrees - confirms it."
+  ],
+  "regions": {
+    "dimensions": false,
+    "foreground_below": null,
+    "fusion": null,
+    "landmarks": false,
+    "plane": false,
+    "slot_columns": [],
+    "surface_tolerance": null,
+    "tracking": false,
+    "weighted_fusion": {
+      "coverage_tolerance": 0.5,
+      "max_depth": 200.0,
+      "maximum": [
+        5.5,
+        3.5,
+        101.5
+      ],
+      "min_depth": 50.0,
+      "min_weight": 1.0,
+      "minimum": [
+        -5.5,
+        -3.5,
+        98.5
+      ],
+      "truncation": 0.75,
+      "voxel_size": 0.25
+    }
+  },
+  "scene": {
+    "depth_scale": 0.0078125,
+    "frames": [
+      {
+        "index": 0,
+        "input_returned": 958,
+        "input_sha256": "ea01c258574da2271cf4046e26db98a3030702d5c1fe7a8b26ac9013e6716704",
+        "masks": [
+          {
+            "column": 9,
+            "kind": "blob",
+            "radius": 0.5,
+            "row": 12
+          }
+        ],
+        "pose": {
+          "axis": [
+            0.0,
+            1.0,
+            0.0
+          ],
+          "degrees": 0.0,
+          "through": [
+            0.0,
+            0.0,
+            100.0
+          ]
+        },
+        "truth_returned": 959,
+        "truth_sha256": "d444e59f54c6222daf9b6235137b1eca8115a1541aed2f302b2b36df8d52fb7b"
+      }
+    ],
+    "intrinsics": {
+      "cx": 320.0,
+      "cy": 200.0,
+      "fx": 400.0,
+      "fy": 400.0,
+      "height": 400,
+      "width": 640
+    },
+    "seed": "depth-completeness-028:aperture-ambiguity",
+    "shapes": [
+      {
+        "half_extents": [
+          40.0,
+          40.0,
+          0.02
+        ],
+        "kind": "box",
+        "translation": [
+          -37.875,
+          0.0,
+          100.02
+        ]
+      },
+      {
+        "half_extents": [
+          40.0,
+          40.0,
+          0.02
+        ],
+        "kind": "box",
+        "translation": [
+          42.375,
+          0.0,
+          100.02
+        ]
+      },
+      {
+        "half_extents": [
+          40.0,
+          40.0,
+          0.02
+        ],
+        "kind": "box",
+        "translation": [
+          0.0,
+          -40.125,
+          100.02
+        ]
+      },
+      {
+        "half_extents": [
+          40.0,
+          40.0,
+          0.02
+        ],
+        "kind": "box",
+        "translation": [
+          0.0,
+          40.125,
+          100.02
+        ]
+      }
+    ],
+    "window": {
+      "height": 24,
+      "sample_count": 960,
+      "u0": 300,
+      "v0": 188,
+      "width": 40
+    }
+  },
+  "schema_version": 1,
+  "what": "A single genuine aperture and a single held-out dropout on the same plane, placed so their scored input neighbourhoods are byte-identical. This is not a component-size tuning limit like the slot or the strip: a small true gap in a surface and a small sensor dropout on that same surface are, at this size and with no other evidence, the same input bytes. One frame cannot know which it is looking at, and this case exists to make that failure land on a gate instead of disappearing into 'component too long to close'.",
+  "why": "The other single-view cases refuse invention because the geometry they hide is bigger than any local support: a slot spanning the frame, a strip collapse wider than the scored neighbourhood. That is a real and useful bar, but it lets a candidate pass by being conservative at scale rather than by being right about ambiguity. Shrink the hidden geometry to the same size as an ordinary dropout and the excuse of span is gone: the aperture here sits inside one scored neighbourhood, exactly like the dropout six columns away, and nothing about the input distinguishes a hole in the sensor's return from a hole in the world. A deterministic single-frame method is not asked to resolve that - it structurally cannot - but it is asked to say which side of the ambiguity it lost, in gates a report cannot omit."
+}
