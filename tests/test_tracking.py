@@ -2049,9 +2049,17 @@ def test_a_scanner_that_has_not_moved_makes_no_prediction_and_pays_for_no_retry(
     """A prediction inside the stationary band is the seed the first attempt used.
 
     Retrying there would re-run that solve and reach that answer again, so the
-    refusal stands on one solve rather than two. This is also what keeps the
-    fixed-camera case - a turntable, where the scanner genuinely does not move -
-    paying exactly what it paid before any of this existed.
+    refusal stands on one solve rather than two.
+
+    The band is about the STEP BETWEEN FRAMES, not about the scanner being
+    bolted down, and an earlier draft of this docstring got that wrong by
+    offering a turntable as the example. A turntable is the opposite case: the
+    scanner is fixed and the object turns, so consecutive frames differ by the
+    whole rotation step and a prediction is formed exactly as it is for a
+    carried scanner. Measured on the owner's 20260901-145316 turntable capture,
+    the tracker's own travel runs 1.77 to 10.60 with a median of 3.38 - the
+    middle of the guidance band, nowhere near stationary. What this test
+    describes is a scanner pointed at something that is not moving at all.
     """
     tracker = _placed_pair()
     seeds = _recording_solver(monkeypatch, lambda initial: _fit(rmse=99.0))

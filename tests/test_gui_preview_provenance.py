@@ -52,6 +52,7 @@ from PySide6.QtWidgets import QCheckBox, QLabel, QWidget
 from scanner3d import gui
 from scanner3d.cloud_view import CloudCamera, CloudView
 from scanner3d.cloud_viewer import CloudViewer
+from scanner3d.depth_plausibility import StaticRegionTracker
 from scanner3d.gui import COVERAGE_EVERY, ModelSnapshot, ScannerWindow
 from scanner3d.preview_provenance import (
     LIVE_SURFACE_PROVENANCE,
@@ -548,6 +549,9 @@ class DepthPanel:
     def __init__(self) -> None:
         self._return_health = ReturnHealthTracker()
         self._return_verdict: str | None = None
+        #: The value half of frame health. Named here rather than by the
+        #: builder because the real window holds it on itself, not on the panel.
+        self._static_regions = StaticRegionTracker()
         self._depth_run = 0
         self.panel: QWidget = ScannerWindow._build_depth_panel(cast(ScannerWindow, self))
 
@@ -557,6 +561,9 @@ class DepthPanel:
 
     def _show_return_health(self, stats: FrameStats) -> None:
         ScannerWindow._show_return_health(cast(ScannerWindow, self), stats)
+
+    def _show_plausibility(self, samples: tuple[int, ...]) -> None:
+        ScannerWindow._show_plausibility(cast(ScannerWindow, self), samples)
 
     def _reset_return_health(self) -> None:
         """The REAL one, reached both directly and by the run boundary below."""

@@ -169,6 +169,12 @@ from scanner3d.config import (
 )
 from scanner3d.coverage import coverage_map
 from scanner3d.denoise import estimate_spacing
+from scanner3d.depth_plausibility import (
+    StaticRegionTracker,
+    depth_profile,
+    locate_cluster,
+    plausibility,
+)
 from scanner3d.discovery import find_scanners
 from scanner3d.geometry import Rigid
 from scanner3d.logs import configure as configure_logging
@@ -2013,6 +2019,12 @@ class ScannerWindow(QMainWindow):
         #: so a scan is never judged against the collapse of the scan before
         #: it and no warning outlives the run that raised it.
         self._return_health = ReturnHealthTracker()
+        #: The value half of frame health - see
+        #: :mod:`scanner3d.depth_plausibility`. Held beside the return tracker
+        #: because the two answer different halves of one question and an
+        #: operator needs both: where the returns are, and whether their
+        #: distances describe a scene.
+        self._static_regions = StaticRegionTracker()
         #: Which run the depth panel is currently showing. Bumped by
         #: :meth:`_begin_depth_run` and :meth:`_end_depth_run`; every depth
         #: frame is delivered through a slot that remembers the run it was
@@ -2354,6 +2366,14 @@ class ScannerWindow(QMainWindow):
         self._return_label.setWordWrap(True)
         self._return_label.setStyleSheet(QUIET_RETURN_STYLE)
         layout.addWidget(self._return_label)
+        self._plausibility_label = QLabel("")
+        self._plausibility_label.setWordWrap(True)
+        self._plausibility_label.setStyleSheet(QUIET_RETURN_STYLE)
+        layout.addWidget(self._plausibility_label)
+        #: The last plausibility verdict said, so the log records the CHANGE
+        #: rather than one line per frame - the same rule the return-health
+        #: label follows.
+        self._said_plausibility = ""
         self._return_advice = QLabel("")
         self._return_advice.setWordWrap(True)
         layout.addWidget(self._return_advice)
@@ -3264,6 +3284,62 @@ class ScannerWindow(QMainWindow):
             f"depth codes {stats.min_code} to {stats.max_code}, median {stats.median_code}"
         )
         self._show_return_health(stats)
+        self._show_plausibility(rendered.samples)
+
+    def _show_plausibility(self, samples: tuple[int, ...]) -> None:
+        """Restate what this frame's DISTANCES look like. GUI THREAD. NEVER raises.
+
+        The sibling of :meth:`_show_return_health`, and advisory in exactly the
+        same way: it writes one label and nothing else. It accepts and refuses
+        no frame, stops no capture, moves no tracking gate and clips no sample.
+
+        This exists because between 2026-08-31 and 2026-09-01 four captures
+        failed with something sitting 60 units from the scanner while the
+        object sat at 180, and every panel in this window reported health. The
+        return count was normal; it was the values that were wrong, and nothing
+        here was looking at those.
+
+        Wrapped whole, because a preview that stopped drawing because an
+        advisory indicator raised would be strictly worse than no indicator.
+        """
+        # Local, exactly as scanner3d.preparation imports it, to keep the
+        # module graph acyclic.
+        from scanner3d.cli import DEPTH_SCALE_METRES
+
+        try:
+            region = self._static_regions.observe(
+                samples, FRAME_WIDTH, FRAME_HEIGHT, depth_scale=DEPTH_SCALE_METRES
+            )
+            profile = depth_profile(samples, depth_scale=DEPTH_SCALE_METRES)
+            # Localised only when there is something to localise: the second
+            # pass walks the frame again, and an ordinary frame must not pay
+            # for it.
+            located = (
+                None
+                if profile.detached is None
+                else locate_cluster(
+                    samples,
+                    FRAME_WIDTH,
+                    FRAME_HEIGHT,
+                    profile.detached,
+                    depth_scale=DEPTH_SCALE_METRES,
+                )
+            )
+            verdict = plausibility(profile, region, located)
+        except Exception as exc:  # advisory: never allowed to stop the preview
+            LOG.debug("depth plausibility skipped this frame: %s", exc)
+            return
+        if verdict.verdict != self._said_plausibility:
+            self._said_plausibility = verdict.verdict
+            if verdict.warning:
+                LOG.warning("frame plausibility: %s - %s", verdict.verdict, verdict.detail)
+        self._plausibility_label.setText(
+            f"{verdict.verdict.upper()} — {verdict.detail}" if verdict.warning else ""
+        )
+        self._plausibility_label.setToolTip(verdict.advice)
+        self._plausibility_label.setStyleSheet(
+            LOUD_RETURN_STYLE if verdict.warning else QUIET_RETURN_STYLE
+        )
 
     def _show_return_health(self, stats: FrameStats) -> None:
         """Restate the return-health warning from this frame. GUI THREAD.
@@ -3354,6 +3430,13 @@ class ScannerWindow(QMainWindow):
         self._return_label.setStyleSheet(QUIET_RETURN_STYLE)
         self._return_advice.setText("")
         self._return_advice.setToolTip("")
+        # The value half resets with the presence half: an old scan's intruder
+        # is not evidence about a new one either.
+        self._static_regions.reset()
+        self._said_plausibility = ""
+        self._plausibility_label.setText("")
+        self._plausibility_label.setToolTip("")
+        self._plausibility_label.setStyleSheet(QUIET_RETURN_STYLE)
         if hasattr(self, "_scan_statuses"):
             ScannerWindow._clear_scan_status(self, SCAN_STATUS_DEPTH_SOURCE)
 

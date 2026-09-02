@@ -135,9 +135,19 @@ LIMITATIONS: Final = (
     "follows the operator's speed rather than anticipating it. A scanner that speeds up sharply "
     "is corrected one kept frame after it did, and the frame in between is exactly the one that "
     "may already have been refused.",
-    "Travel is assumed proportional to how many deliveries a kept frame is worth, which is only "
-    "true while the operator's speed is roughly steady across the correction. It is the "
-    "relationship the correction is computed from and it is not measured per capture.",
+    "Travel is assumed proportional to how many deliveries a kept frame is worth. That holds on "
+    "average and is noisier per frame than the correction implies, because travel is the "
+    "product of THREE things and only one of them is the operator: the angular rate, the "
+    "distance of the visible surface from the axis of motion, and the gap between kept frames. "
+    "Measured on 20260901-191525, a 60-frame turntable sweep at a constant motor rate: surface "
+    "travel varied 6.0x across the sweep (CV 37%) while the recovered ROTATION ANGLE varied "
+    "3.0x (CV 18%), and dividing out the camera's own alternating delivery left 13.9%. So a "
+    "single frame's travel overstates how much the operator changed speed, and the deadband is "
+    "what keeps that from being corrected on every frame.",
+    "The scanner delivers frames in pairs - about 69 ms then 373 ms - so kept frames are not "
+    "evenly spaced in TIME whatever the decimation is. On the same sweep the alternating phases "
+    "differed by 1.24x in rotation angle. Nothing here corrects for that; it is part of the "
+    "noise the deadband absorbs.",
     "A refusal is treated as evidence of speed. It is not: a hand across the view, a burst of "
     "sensor noise or a genuinely singular flat panel all refuse a frame without the scanner "
     "moving at all, and this answers each of them by keeping more frames for a while.",

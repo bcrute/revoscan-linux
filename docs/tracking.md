@@ -115,8 +115,16 @@ Deliberately absent, rather than approximated, wherever it would be a guess:
   seed is withheld rather than made and then refused.
 - **inside the stationary band.** Then it is not a different starting point from
   the identity the first attempt already used, so a retry would re-run that solve
-  and reach that answer again. A fixed scanner watching a turning object
-  therefore pays exactly what it paid before any of this existed.
+  and reach that answer again, and the frame is decided on one solve.
+
+  Note what this band is *not* about. It measures the step between two frames,
+  not whether the scanner is bolted down — so a turntable does **not** land in
+  it. There the scanner is fixed and the object turns, which means consecutive
+  frames differ by the whole rotation step and a prediction is formed exactly as
+  it is for a carried scanner. Measured on `20260901-145316`, a turntable
+  capture: travel of 1.77 to 10.60, median 3.38, which is the middle of the
+  guidance band. Only a scanner pointed at something genuinely not moving is
+  inside this band.
 
 Both of the last two bounds are the module's existing numbers — the travel gate
 and the keyframe stationary band — rather than new ones invented here.
@@ -137,6 +145,16 @@ fast" ceiling is 5.85.
 | 33° | 10.5 | 16/16, worst error 6.87° | 16/16, **41° wrong** from frame 7 |
 | 36° | 11.4 | 16/16, **23° wrong** from frame 10 | refuses at frame 6 |
 | 39° | 12.4 | 16/16, worst error 2.13° | refuses at frame 6 |
+
+A caution on reading that "surface travel" column, measured afterwards on a real
+turntable sweep (`20260901-191525`, constant motor rate, 60 frames). Travel is
+the product of three things — the angular rate, how far the visible surface sits
+from the axis, and the gap between kept frames — and only the first is the
+motion. Across that sweep travel varied **6.0×** (CV 37%) while the recovered
+rotation angle varied **3.0×** (CV 18%), and dividing out the camera's own
+alternating 69/373 ms delivery left **13.9%**. So travel is the right quantity
+for "how far did the surface move relative to the noise", which is what
+alignment cares about, and the wrong one for "how fast is this turning".
 
 Read those rows carefully, because they do not all say the same thing.
 

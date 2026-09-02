@@ -64,6 +64,7 @@ import pytest
 from scanner3d import gui, icp_plane, pipeline, reconstruction_export, tracking
 from scanner3d.capture_sequence import read_capture_sequence
 from scanner3d.cli import DEPTH_SCALE_METRES
+from scanner3d.depth_plausibility import StaticRegionTracker
 from scanner3d.geometry import Point, Rigid, rotation_about_axis
 from scanner3d.gui import ScannerWindow
 from scanner3d.pipeline import SweepReconstruction
@@ -603,6 +604,12 @@ class CaptureWindow:
         self._return_verdict: str | None = None
         self._return_label = FakeLabel()
         self._return_advice = FakeLabel()
+        #: The value half of frame health, beside the presence half. Both
+        #: windows carry it because both draw depth frames, and
+        #: ``_show_plausibility`` runs on the same slot that draws them.
+        self._static_regions = StaticRegionTracker()
+        self._said_plausibility = ""
+        self._plausibility_label = FakeLabel()
         #: The real run identity, so a capture that ends without moving it on
         #: - and therefore leaves the last run's frames able to reach this
         #: one's panel - fails here rather than passing quietly.
@@ -976,6 +983,12 @@ class PreviewWindow:
         self._return_verdict: str | None = None
         self._return_label = FakeLabel()
         self._return_advice = FakeLabel()
+        #: The value half of frame health, beside the presence half. Both
+        #: windows carry it because both draw depth frames, and
+        #: ``_show_plausibility`` runs on the same slot that draws them.
+        self._static_regions = StaticRegionTracker()
+        self._said_plausibility = ""
+        self._plausibility_label = FakeLabel()
         #: The real run identity. See :class:`CaptureWindow`.
         self._depth_run = 0
         #: What a real window would have to wait for. ``None`` is "no previous

@@ -215,6 +215,23 @@ index rather than skipping the frame or manufacturing a pose for it. Measured on
 24-frame walk around an asymmetric object, blind chaining drifts to 1.60 degrees while this holds
 0.58, and the gap grows with the sweep. See [docs/tracking.md](docs/tracking.md).
 
+**The window now says when a frame's distances do not describe a scene.**
+Return health answers *where* the returns are and catches the object sliding off the sensor.
+Nothing answered *whether the distances make sense* &mdash; so when something entered the scanner's
+view 60 units away while the object sat at 180, every panel reported health and four consecutive
+sessions failed over two days. Those points were 4.7% of the frame, they sat 100 units off the
+object, and they dragged its principal-extent ratio to 1.05 &mdash; which is how a deliberately
+asymmetric target gets made to look rotationally symmetric, and why the coarse search could no
+longer rank orientations. The tracker refused rather than inventing poses, correctly, and nothing
+said why. A frame now carries three checks alongside the return count: a near group of returns
+separated from everything else by a void, returns outside the range this unit was characterised
+over, and a patch of the view that will not move while the rest does. It is advisory &mdash; it
+refuses no frame, moves no gate and clips no sample &mdash; and it names what to look at, never
+what the thing is, because the bytes do not carry a cause. Measured against every capture on the
+owner's machine: no warning on a clean one, and a warning on **frame 0** of all four bad ones,
+including the session the intruder first appeared. See
+[docs/depth-plausibility.md](docs/depth-plausibility.md).
+
 **Frame spacing can be decided while the capture runs, rather than typed in before it.**
 "Use 1 frame in every N" is the one capture setting whose right value is a property of how fast the
 scanner happens to be moving at that moment, and neither end of a fixed value is harmless: set for a

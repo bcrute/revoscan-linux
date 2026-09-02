@@ -516,6 +516,12 @@ class FrameRender:
 
     pixels: tuple[bytes, ...]
     stats: FrameStats
+    #: The raw codes both of the above were computed from, handed on rather
+    #: than unpacked again. A third consumer - the depth-plausibility indicator
+    #: in the appliance window - needs the distances rather than the colours or
+    #: the counts, and unpacking 512000 bytes a second time to get them would
+    #: give it a tuple that could disagree with the picture beside it.
+    samples: tuple[int, ...]
 
 
 def render_frame(
@@ -539,6 +545,7 @@ def render_frame(
     return FrameRender(
         pixels=_pixels_from_samples(samples, low=low, high=high, palette=palette),
         stats=_stats_from_samples(samples),
+        samples=samples,
     )
 
 

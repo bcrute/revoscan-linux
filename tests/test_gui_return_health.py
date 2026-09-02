@@ -40,6 +40,7 @@ pytest.importorskip("PySide6")
 from PySide6.QtWidgets import QApplication, QLabel, QMessageBox, QWidget
 
 from scanner3d import gui
+from scanner3d.depth_plausibility import StaticRegionTracker
 from scanner3d.gui import ScannerWindow
 from scanner3d.return_health import (
     COLLAPSING,
@@ -113,6 +114,9 @@ class DepthPanel:
     def __init__(self) -> None:
         self._return_health = ReturnHealthTracker()
         self._return_verdict: str | None = None
+        #: The value half of frame health. Named here rather than by the
+        #: builder because the real window holds it on itself, not on the panel.
+        self._static_regions = StaticRegionTracker()
         #: The run identity the real window keeps, so the run boundaries and
         #: the stale-frame guard are asked of the real methods here too.
         self._depth_run = 0
@@ -128,6 +132,10 @@ class DepthPanel:
     def _show_return_health(self, stats: FrameStats) -> None:
         """The REAL one, reached the way the real window reaches it."""
         ScannerWindow._show_return_health(cast(ScannerWindow, self), stats)
+
+    def _show_plausibility(self, samples: tuple[int, ...]) -> None:
+        """The REAL one. The value half of frame health runs on this same slot."""
+        ScannerWindow._show_plausibility(cast(ScannerWindow, self), samples)
 
     def _reset_return_health(self) -> None:
         """The REAL one, reached the way the run boundaries reach it."""
