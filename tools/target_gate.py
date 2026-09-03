@@ -93,15 +93,13 @@ PASSES_PER_WIDTH: Final = 3
 MIN_OBSERVED_TO_JUDGE: Final = 0.25
 
 
-def load_reference() -> tuple[np.ndarray, np.ndarray, dict[int, str], dict]:
-    """CAD points shrinkage-adjusted as the print record predeclared, plus ids."""
-    manifest = json.loads((TARGET / "reconstruction-target-v1.json").read_text())
-    prints = sorted((TARGET / "prints").glob("physical-print-*.json"))
-    if not prints:
-        raise SystemExit("no print record: cannot know this print's shrinkage")
-    record = json.loads(prints[-1].read_text())
-    scale = record["dense_reference_adjustment"]
+def read_reference_ply() -> np.ndarray:
+    """The reference PLY as a structured array, positions UNSCALED.
 
+    Separate from :func:`load_reference` because the normals are needed by the
+    orthogonality gate and the positions are needed shrinkage-adjusted, and
+    parsing the header twice to get them was the alternative.
+    """
     raw = (TARGET / "reconstruction-target-v1-reference.ply").read_bytes()
     head = raw.index(b"end_header\n") + len(b"end_header\n")
     count = int(
@@ -120,7 +118,25 @@ def load_reference() -> tuple[np.ndarray, np.ndarray, dict[int, str], dict]:
             ("sid", "<u2"),
         ]
     )
-    ply = np.frombuffer(raw, dtype=dtype, count=count, offset=head)
+    return np.frombuffer(raw, dtype=dtype, count=count, offset=head)
+
+
+def read_reference_ply_normals() -> np.ndarray:
+    """Unit normals from the reference PLY, in the CAD's own frame."""
+    ply = read_reference_ply()
+    return np.c_[ply["nx"], ply["ny"], ply["nz"]].astype(float)
+
+
+def load_reference() -> tuple[np.ndarray, np.ndarray, dict[int, str], dict]:
+    """CAD points shrinkage-adjusted as the print record predeclared, plus ids."""
+    manifest = json.loads((TARGET / "reconstruction-target-v1.json").read_text())
+    prints = sorted((TARGET / "prints").glob("physical-print-*.json"))
+    if not prints:
+        raise SystemExit("no print record: cannot know this print's shrinkage")
+    record = json.loads(prints[-1].read_text())
+    scale = record["dense_reference_adjustment"]
+
+    ply = read_reference_ply()
     cad = np.c_[
         ply["x"] * scale["scale_x"], ply["y"] * scale["scale_y"], ply["z"] * scale["scale_z"]
     ].astype(float)
@@ -145,6 +161,197 @@ def nearest(a: np.ndarray, b: np.ndarray, chunk: int = 400) -> np.ndarray:
     if len(b) == 0:
         return np.full(len(a), np.inf)
     return cKDTree(b).query(a, workers=-1)[0]
+
+
+#: The four outer side faces the orthogonality gate is declared over, and the
+#: face every angle is measured against.
+GATE_FACES: Final = ("outer_east", "outer_west", "outer_north", "outer_south")
+GATE_DATUM: Final = "base_top"
+
+#: Scan points needed before a face's plane is fitted at all. A plane through
+#: too few points is dominated by whichever stray returns landed in the set,
+#: and reporting an angle from it would be exactly the plausible-number-from-a-
+#: broken-measurement this tool refuses elsewhere.
+MIN_FACE_POINTS: Final = 60
+
+
+def fit_plane(points: np.ndarray, rounds: int = 3) -> tuple[np.ndarray, float]:
+    """Unit normal of a plane through ``points``, refitted without its outliers.
+
+    Trimmed because the points reaching this are whatever fell within the
+    observation radius of a CAD face, which near an edge includes returns from
+    the neighbouring face, and a least-squares plane has no defence against
+    them. Returns the normal and the RMS deviation of the surviving points.
+    """
+    keep = np.ones(len(points), dtype=bool)
+    normal = np.array([0.0, 0.0, 1.0])
+    for _ in range(rounds):
+        q = points[keep]
+        centred = q - q.mean(0)
+        normal = np.linalg.svd(centred, compute_uv=True)[2][2]
+        residual = (points - q.mean(0)) @ normal
+        keep = np.abs(residual) < 2.0 * float(np.sqrt((residual[keep] ** 2).mean()))
+        if keep.sum() < MIN_FACE_POINTS:
+            keep = np.ones(len(points), dtype=bool)
+            break
+    q = points[keep]
+    return normal, float(np.sqrt((((q - q.mean(0)) @ normal) ** 2).mean()))
+
+
+def local_normals(points: np.ndarray, radius: float = 2.0, min_n: int = 10) -> np.ndarray:
+    """Unit normal of a plane fitted in each point's own neighbourhood.
+
+    Points whose neighbourhood is too small to define one get a zero vector,
+    which fails every orientation test it is later used in.
+    """
+    tree = cKDTree(points)
+    out = np.zeros_like(points)
+    for i, neighbours in enumerate(tree.query_ball_point(points, radius, workers=-1)):
+        if len(neighbours) < min_n:
+            continue
+        q = points[neighbours]
+        out[i] = np.linalg.svd(q - q.mean(0), compute_uv=True)[2][2]
+    return out
+
+
+#: How far a scan point's own surface orientation may sit from the CAD face it
+#: was attributed to before it is dropped from that face's plane fit.
+#:
+#: Proximity alone is not attribution to a SURFACE, and the first version of
+#: this gate proved it: it handed outer_north 4391 scan points for a face
+#: carrying 335 CAD points and reported 11.8-16.0 degrees against a 2 degree
+#: bar. Most scan points within 3 mm of a 92 mm model on a turntable are not on
+#: the face nearest them - they are turntable, background, or the adjacent face
+#: across an edge - and none of those faces the way the face faces.
+FACE_NORMAL_TOLERANCE_DEGREES: Final = 25.0
+
+#: How close a scan point must be to a CAD point OF THAT FACE to join its fit.
+#:
+#: Against the face's own points, not the whole model. Global
+#: nearest-CAD-point attribution hands a face whatever happens to be nearer to
+#: it than to anything else, which on a densely sampled model is a sliver:
+#: measured, outer_north's set was 20.5 x 2.05 x 1.6 mm, a rod whose two short
+#: axes are within 30% of each other, so its "normal" was whichever of them the
+#: noise picked. Selecting against the face's own points gave the same face a
+#: set whose normal sits 2.1 degrees from the CAD's.
+FACE_SELECT_RADIUS: Final = 1.5
+
+#: In-plane extent must exceed thickness by this much before an angle is
+#: reported.
+#:
+#: The guard that turns the sliver problem from a wrong number into an honest
+#: refusal. A plane normal is only defined when the two smallest principal
+#: extents are well separated; on a strip 2 mm wide and 0.8 mm thick they are
+#: not, and the fit is free to rotate within that ambiguity. Measured on
+#: 20260901-201341, a turntable-only sweep sees base_top at 24x and the outer
+#: side faces at 2.8x - it grazes them rather than viewing them, which is a
+#: statement about what a single-axis sweep can cover and not about the
+#: scanner's geometry.
+FACE_FLATNESS_RATIO: Final = 3.0
+
+#: Scan points needed before a face's plane is fitted at all.
+MIN_FACE_POINTS: Final = 60
+
+
+def face_plane(
+    points: np.ndarray,
+    observed_normals: np.ndarray,
+    face_cad: np.ndarray,
+    face_normal: np.ndarray,
+) -> dict:
+    """Fit one CAD face's plane on the scan, or say why it cannot be fitted."""
+    chosen = cKDTree(face_cad).query(points, workers=-1)[0] < FACE_SELECT_RADIUS
+    chosen &= np.abs(observed_normals @ face_normal) > math.cos(
+        math.radians(FACE_NORMAL_TOLERANCE_DEGREES)
+    )
+    q = points[chosen]
+    if len(q) < MIN_FACE_POINTS:
+        return {"scan_points": len(q), "verdict": "not_observed"}
+    spread = np.linalg.svd(q - q.mean(0), compute_uv=False) / math.sqrt(len(q))
+    flatness = float(spread[1] / spread[2]) if spread[2] > 0 else float("inf")
+    if flatness < FACE_FLATNESS_RATIO:
+        return {
+            "scan_points": len(q),
+            "flatness_ratio": flatness,
+            "verdict": "not_resolvable",
+        }
+    normal = np.linalg.svd(q - q.mean(0))[2][2]
+    return {
+        "scan_points": len(q),
+        "flatness_ratio": flatness,
+        "plane_rms_mm": float(np.sqrt((((q - q.mean(0)) @ normal) ** 2).mean())),
+        "normal": normal,
+        "verdict": "fitted",
+    }
+
+
+def orthogonality(
+    scan: np.ndarray,
+    placed: np.ndarray,
+    sid: np.ndarray,
+    normals: np.ndarray,
+    names: dict[int, str],
+    radius: float = OBSERVED_RADIUS,
+) -> list[dict]:
+    """Angle between each outer side face and base_top, fitted on the SCAN.
+
+    The first of the three gates tolerance-v1.json declares, and one this tool
+    did not compute until now. It is the principal-point test: a shear
+    ``x += k*z`` leaves a plane a plane but rotates its normal, so east and west
+    tilt against the top while north and south do not move.
+
+    Fitted on the registered scan, never on the CAD - the CAD is square by
+    construction and would report 90 degrees whatever the scanner did.
+
+    A face this capture only grazed is reported ``not_resolvable`` rather than
+    given an angle. See FACE_FLATNESS_RATIO: the number a sliver produces is
+    determined by which of two nearly equal principal axes the noise selected,
+    and reporting it as an orthogonality failure would blame the scanner's
+    geometry for the sweep's coverage.
+    """
+    by_name = {v: k for k, v in names.items()}
+    distance, _ = cKDTree(placed).query(scan, workers=-1)
+    points = scan[distance < radius]
+    observed_normals = local_normals(points)
+
+    def cad_face(face: str) -> tuple[np.ndarray, np.ndarray] | None:
+        fid = by_name.get(face)
+        if fid is None:
+            return None
+        mask = sid == fid
+        if not mask.any():
+            return None
+        normal = normals[mask].mean(0)
+        length = float(np.linalg.norm(normal))
+        if length < 1e-9:  # opposing facets cancel: not a single plane
+            return None
+        return placed[mask], normal / length
+
+    datum = cad_face(GATE_DATUM)
+    if datum is None:
+        return [{"face": GATE_DATUM, "verdict": "not_observed", "scan_points": 0}]
+    fit = face_plane(points, observed_normals, *datum)
+    if fit["verdict"] != "fitted":
+        return [{"face": GATE_DATUM, **{k: v for k, v in fit.items() if k != "normal"}}]
+    datum_normal = fit["normal"]
+    rows: list[dict] = [
+        {"face": GATE_DATUM, **{k: v for k, v in fit.items() if k != "normal"}, "verdict": "datum"}
+    ]
+
+    for face in GATE_FACES:
+        found = cad_face(face)
+        if found is None:
+            rows.append({"face": face, "scan_points": 0, "verdict": "not_observed"})
+            continue
+        fit = face_plane(points, observed_normals, *found)
+        row = {"face": face, **{k: v for k, v in fit.items() if k != "normal"}}
+        if fit["verdict"] == "fitted":
+            cosine = abs(float(np.dot(fit["normal"], datum_normal)))
+            deviation = abs(math.degrees(math.acos(min(cosine, 1.0))) - 90.0)
+            row["deviation_degrees"] = deviation
+            row["verdict"] = "pass" if deviation <= 2.0 else "fail"
+        rows.append(row)
+    return rows
 
 
 def fuse(capture: Path, workers: int) -> np.ndarray:
@@ -221,7 +428,12 @@ def place(cad: np.ndarray, scan: np.ndarray, seed: int = 5) -> tuple[np.ndarray,
 
     for width, radius in REFINE_SCHEDULE:
         for step in range(PASSES_PER_WIDTH):
-            before = float(np.median(nearest(placed[::4], near[::5])))
+            # Against the FULL near set, not a subsample. Measured against
+            # near[::5] this line read 1.99mm while the gate's own figure over
+            # the whole cloud was 1.29mm, and that gap was read as the
+            # refinement stalling when it was the progress metric thinning its
+            # own reference. The k-d tree makes the honest version affordable.
+            before = float(np.median(nearest(placed[::4], near)))
             chosen = near[nearest(near, placed[::6]) < radius]
             if len(chosen) < 800:
                 log.append(f"refine @{width:g}mm: only {len(chosen)} points near model, stopping")
@@ -238,7 +450,7 @@ def place(cad: np.ndarray, scan: np.ndarray, seed: int = 5) -> tuple[np.ndarray,
                 keep_fraction=0.85,
             )
             placed = np.array([fit.transform.apply(tuple(p)) for p in placed])
-            after = float(np.median(nearest(placed[::4], near[::5])))
+            after = float(np.median(nearest(placed[::4], near)))
             if step == 0 or abs(after - before) >= 0.02:
                 log.append(
                     f"refine @{width:g}mm: {before:.2f} -> {after:.2f} mm, "
@@ -332,6 +544,19 @@ def main(argv: list[str] | None = None) -> int:
         surfaces.append(row)
 
     judged = [r for r in surfaces if r["rms_mm"] is not None]
+
+    # The CAD normals carried into the scan's frame. place() applies a rigid
+    # transform, so the rotation is recoverable from where the points ended up,
+    # and normals rotate with it.
+    centred_cad = cad - cad.mean(0)
+    centred_placed = placed - placed.mean(0)
+    u, _, vt = np.linalg.svd(centred_placed.T @ centred_cad)
+    if np.linalg.det(u @ vt) < 0:
+        u[:, -1] *= -1
+    placed_normals = ((u @ vt) @ read_reference_ply_normals().T).T
+
+    faces = orthogonality(scan, placed, sid, placed_normals, names)
+    angled = [f for f in faces if "deviation_degrees" in f]
     report = {
         "capture": str(args.capture),
         "tolerance_file": "gates/tolerance-v1.json",
@@ -339,6 +564,17 @@ def main(argv: list[str] | None = None) -> int:
             "ready_for_formal_physical_gate"
         ],
         "observed_radius_mm": OBSERVED_RADIUS,
+        "orthogonality": {
+            "gate_degrees": 2.0,
+            "datum": GATE_DATUM,
+            "faces": faces,
+            "worst_deviation_degrees": (
+                max(f["deviation_degrees"] for f in angled) if angled else None
+            ),
+            "verdict": "pass"
+            if angled and all(f["verdict"] == "pass" for f in angled)
+            else ("fail" if angled else "not_observed"),
+        },
         "accuracy": {
             "gate_mm": tol,
             "rms_mm": float(np.sqrt((d[observed] ** 2).mean())),
@@ -395,6 +631,27 @@ def main(argv: list[str] | None = None) -> int:
                 f"{r['surface']:<20} {r['cad_points']:>5} {r['observed_fraction']:>5.0%}"
                 f" {r['rms_mm']:>7.2f} {r['p95_mm']:>7.2f}   {r['accuracy_verdict'].upper()}"
             )
+    o = report["orthogonality"]
+    print(f"\n{'face':<20} {'scan pts':>8} {'plane RMS':>10} {'vs base_top':>12}   verdict")
+    for f in o["faces"]:
+        angle = f"{f['deviation_degrees']:.2f} deg" if "deviation_degrees" in f else ""
+        rms = f"{f['plane_rms_mm']:.2f} mm" if "plane_rms_mm" in f else ""
+        print(
+            f"{f['face']:<20} {f['scan_points']:>8} {rms:>10} {angle:>12}   {f['verdict'].upper()}"
+        )
+    if o["worst_deviation_degrees"] is not None:
+        print(
+            f"ORTHOGONALITY  worst {o['worst_deviation_degrees']:.2f} deg against a "
+            f"{o['gate_degrees']:.0f} deg gate, {len(angled)}/{len(GATE_FACES)} faces "
+            f"resolvable  -> {o['verdict'].upper()}"
+        )
+    else:
+        print(
+            f"ORTHOGONALITY  not evaluable: 0/{len(GATE_FACES)} outer faces were seen as "
+            "surfaces rather than slivers. A single-axis sweep grazes them; see "
+            "FACE_FLATNESS_RATIO in this tool."
+        )
+
     print(
         f"\nACCURACY  RMS {a['rms_mm']:.2f} mm, p95 {a['p95_mm']:.2f} mm, "
         f"{a['surfaces_passing']}/{a['surfaces_judged']} surfaces inside {tol} mm  "
