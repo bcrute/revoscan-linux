@@ -247,6 +247,21 @@ class DepthProfile:
             return None
         return first
 
+    @property
+    def dominant(self) -> DepthCluster | None:
+        """The cluster most of the returns came from - the subject, when there is one.
+
+        Distinct from ``clusters[0]``, which is merely the NEAREST group and on
+        a real frame is routinely a handful of stray near returns: measured on
+        ``20260901-201341`` frame 0, the nearest group held 14 of 77,764
+        returns while the target sat in the fourth. Anything describing "where
+        the returns are" wants this one; anything describing "what is in front
+        of the subject" wants :attr:`detached`.
+        """
+        if not self.clusters:
+            return None
+        return max(self.clusters, key=lambda cluster: cluster.samples)
+
     def as_dict(self) -> dict[str, object]:
         return {
             "schema_version": SCHEMA_VERSION,
@@ -262,6 +277,7 @@ class DepthProfile:
             "clusters": [cluster.as_dict() for cluster in self.clusters],
             "widest_gap": self.widest_gap,
             "detached": None if self.detached is None else self.detached.as_dict(),
+            "dominant": None if self.dominant is None else self.dominant.as_dict(),
         }
 
 
@@ -822,14 +838,25 @@ def plausibility(
             ),
         )
 
-    return Plausibility(
-        verdict=PLAUSIBLE,
-        detail=(
-            f"{profile.returned} returns in one group at "
-            f"{profile.clusters[0].near:.0f}-{profile.clusters[0].far:.0f}"
-        ),
-        advice="",
-    )
+    # The dominant group, not the nearest one. Pairing the TOTAL return count
+    # with ``clusters[0]``'s range - which this did until 2026-09-02 - reads as
+    # "77764 returns in one group at 1-14" on a frame whose subject is at
+    # 161-274 and whose nearest group holds 14 of those returns. That sentence
+    # sends an operator to look at the wrong distance, which is the one thing
+    # every message in this module exists to get right.
+    main = profile.dominant
+    if main is None:  # unreachable: `returned > 0` was established above
+        return Plausibility(verdict=PLAUSIBLE, detail=f"{profile.returned} returns", advice="")
+    others = len(profile.clusters) - 1
+    if others == 0:
+        detail = f"{profile.returned} returns in one group at {main.near:.0f}-{main.far:.0f}"
+    else:
+        detail = (
+            f"{main.samples} of {profile.returned} returns at "
+            f"{main.near:.0f}-{main.far:.0f}, the rest in "
+            f"{others} smaller group{'' if others == 1 else 's'}"
+        )
+    return Plausibility(verdict=PLAUSIBLE, detail=detail, advice="")
 
 
 LIMITATIONS: Final = (
