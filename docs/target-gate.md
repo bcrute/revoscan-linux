@@ -142,6 +142,113 @@ The consequence for this gate is concrete: **a per-surface verdict is not
 trustworthy from a single placement.** Either report per-surface numbers with a
 spread across seeds, or report only the aggregate.
 
+## What the gate's number is made of, and why it is not the declared one
+
+Five measurements, in the order they were forced. Each was provoked by the one
+before disagreeing with what it was supposed to show.
+
+**The fused surface is thin.** Local plane RMS in a 2 mm neighbourhood of the
+fused cloud is **0.669 mm**, p90 0.787 - essentially the 0.65 mm per-point noise
+floor, with no heavy tail. There is no ghosting and no doubled surface. Whatever
+separates the reconstruction from the CAD is systematic, not smear.
+
+**More laps make it worse, not better.** The plan was that loop closure limits
+accuracy and revisit constraints improve closure, so a longer sweep should help.
+A 450-frame, 3.5-lap capture reconstructs *worse* than a 190-frame, 1.5-lap one:
+1.40 mm against 1.22 mm, 12/23 surfaces against 20/24, completeness 70% against
+80%, and the support-plane margin collapses from 1.05x to 1.01x. Sequential
+drift accumulates faster than the graph's revisit constraints remove it. This
+route is closed.
+
+**Freeing the scale buys nothing.** Registering with a similarity rather than a
+rigid transform changes RMS by 0.001 mm (1.304 -> 1.303) while pulling the scale
+to 0.986. A -1.4% shrink that improves no residual is ICP's shrink-to-fit
+degeneracy, not a depth-scale error. The tolerance file's *conclusion* - that
+nothing here tests the depth scale - is correct. Its stated *reason* is not:
+"rigid registration absorbs any global scale error" is false, because a rigid
+transform has no scale parameter to absorb one with. The right reason is that
+the residual is insensitive to scale at this magnitude.
+
+**The gate's metric is not the declared metric, and it is biased.** The file
+declares "RMS deviation of registered scan points from their own CAD *surface*"
+- a point-to-surface distance. `target_gate.py` measures CAD-point to nearest
+scan-*point* Euclidean distance. Against a synthetic scan carrying a *known*
+perpendicular error, the two behave very differently:
+
+| true perpendicular error | euclidean (gate) | scan-side perpendicular |
+| --- | --- | --- |
+| 0.00 mm | 0.34 / 0.64 | 0.143 / 0.144 |
+| 0.30 mm | 0.41 / 0.70 | 0.325 / 0.325 |
+| 0.60 mm | 0.49 / 0.79 | 0.590 / 0.592 |
+| 1.00 mm | 0.57 / 0.90 | 0.938 / 0.928 |
+
+(two figures per cell: scan sampled at 4x and 1x the CAD density)
+
+The declared quantity is recovered by the scan-side form and overstated by the
+gate's. Worse, the gate's number **nearly doubles when the scan is made denser
+at zero true error** (0.338 -> 0.639): part of what it reports is point density,
+which is a property of the sampling and not of the scanner.
+
+**But the declared metric cannot be measured on this scene.** Scan-side means
+deciding which scan points are on the target, and the numbers say that decision
+is not available here. The scan-side RMS is a fixed fraction of whatever
+observation radius is chosen - 1.56 mm at 3 mm, 1.05 at 2 mm, 0.77 at 1.5 mm,
+0.48 at 1.0 mm, a ratio of 0.48-0.53 throughout - which is the signature of a
+shell filled with scenery rather than a surface. An orientation filter, which
+fixed exactly this problem for the orthogonality gate, does **not** fix it here:
+the worst contaminant is coplanar with the surface it contaminates, because a
+turntable top is horizontal and so is `base_top`.
+
+Two CAD-side substitutes were tried and both are biased, in opposite directions.
+Projecting the nearest scan point onto the CAD normal *understates* by about
+half (0.32 where the truth is 1.00), because choosing the nearest point
+preferentially chooses one whose perpendicular offset is small. Averaging signed
+offsets over a neighbourhood understates worse (0.19 where truth is 1.00),
+because averaging zero-mean noise measures the surface's *bias* rather than its
+spread.
+
+So the position is: **the gate's current number overstates the declared quantity
+by an unknown amount, and no unbiased substitute is available without segmenting
+the target from the turntable.** Segmentation has failed twice here (see Method
+below). This is the blocker, and it is a measurement problem rather than a
+scanner problem.
+
+## Repeatability, and what the bar has to clear
+
+Two captures were taken three minutes apart with identical settings - 190 frames
+at decimate 2, same object, same lighting - specifically to remove the confound
+in an earlier comparison that used captures of different lengths.
+
+They disagree with each other more than the gate's tolerance would suggest is
+comfortable:
+
+| | RMS vs CAD | surfaces inside 1.5 mm | completeness |
+| --- | --- | --- | --- |
+| A (`20260902-224455`) | 1.46 mm | 16/25 | 65% |
+| B (`20260902-224804`) | 1.11 mm | 21/25 | 79% |
+
+B is the best result this project has produced and A is among the worst, three
+minutes apart. Session-to-session variation is larger than any improvement
+pursued in this session.
+
+Measured properly - at each CAD point, the difference between the two captures'
+signed surface offsets, so that the placement error they share cancels -
+**scan-to-scan disagreement is RMS 1.024 mm, median 0.592 mm**. That is coherent
+with each capture sitting 0.6-0.8 mm from CAD by the same construction, since
+sqrt(0.8^2 + 0.6^2) = 1.0.
+
+Repeatability at ~1.0 mm sits *below* the 1.5 mm bar, so the gate is not
+arithmetically impossible. But a single capture's verdict is not reproducible at
+the per-surface level, which the placement sweep says independently:
+
+| seed | 5 | 11 | 23 | 42 | 97 |
+| --- | --- | --- | --- | --- | --- |
+| RMS mm | 1.22 | 1.24 | 1.22 | 1.26 | 1.26 |
+| surfaces inside 1.5 mm | 20/24 | 21/25 | 22/25 | 17/24 | 19/25 |
+
+The aggregate is stable to +/-0.02 mm. The per-surface count swings by five
+surfaces on the same capture and the same code.
+
 ## Method
 
 Isolation was the wrong problem and two attempts at it failed before that was
