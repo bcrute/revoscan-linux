@@ -139,3 +139,51 @@ captured.
 
 Not shown: anything about a physical scan. The gates' thresholds were chosen against
 constructed scenes, and the first real capture may well want them retuned.
+
+
+## Measured on real captures: it has never applied
+
+Status added 2026-09-02. This filter has now been checked against every kind of
+capture this machine has taken, and **it has fired on none of them**.
+
+`docs/tracking.md` already records that it "applied to none of its 176 frames"
+on the hand-carried chassis capture `20260828-105933`. That was read at the time
+as conservatism doing its job on an ambiguous scene. The turntable case is the
+one this filter was written for — a stationary bed under a rotating object, the
+exact arrangement in the "What problem it solves" section above — so it should
+be where the filter earns its keep.
+
+Sampled across `20260901-201341`, a 190-frame turntable sweep of the
+reconstruction target, correctly framed and tracking 190/190:
+
+| frames sampled | applied | refusal reasons |
+| --- | --- | --- |
+| 8 | **0** | `off-plane-geometry-on-both-sides` (3), `too-few-inliers` (3), `spread-too-narrow` (2) |
+
+`off-plane-geometry-on-both-sides` is the interesting one, and it is most likely
+the filter working **correctly** rather than failing: the target's own `base_top`
+is a large flat surface, so the dominant plane in these frames is plausibly the
+target's face rather than the turntable, and geometry above it (the ramp, the
+plateau) and below it (the turntable) is exactly what that refusal describes.
+Removing that plane would take the object's own top off, which is the failure
+this filter's conservatism exists to prevent — "losing a bed costs one frame,
+removing a panel costs the scan".
+
+So this is not necessarily a defect. But it is a fact worth stating plainly:
+
+**Every downstream consumer that assumes the support surface has been removed is
+running on clouds that still contain it.** Measured on the sweep above, the
+turntable and the room are the majority of the fused cloud: 405,310 points
+total, of which the target's own 92 x 82 x 56 mm accounts for a small minority,
+and a connected-component search at 4 mm cells returns **one component of
+404,379 points spanning 385 mm** — target, turntable and background are one
+touching body and no cell size separates them.
+
+That is why `docs/coverage-and-subject.md` finds the coverage gate outvoted
+three-to-one by scenery, and why the CAD comparison gate had to be reconstructed
+to query from the reference side rather than isolate the subject first.
+
+**Not changed here.** Loosening the gates to make the filter fire is the wrong
+repair and would risk exactly the panel removal the thresholds were chosen to
+prevent. What this section records is that the filter's real-world hit rate is
+zero, so no other module may assume its effect.

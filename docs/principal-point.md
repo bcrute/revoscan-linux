@@ -81,6 +81,35 @@ The curve has one clear basin. **The factory value sits in it and the frame
 centre is 5.5× worse.** The 0.05° between the factory value and the sampled
 minimum is far inside this measurement's own precision.
 
+## The fine sweep, and a positive control
+
+Repeated on 26 frames with a denser grid, and with `cy` swept the same way while
+`cx` was held at the factory value:
+
+| cx | median \|angle − 90°\| | | cy | median \|angle − 90°\| |
+| --- | --- | --- | --- | --- |
+| 0.0 | 0.67° | | 100.0 | 1.64° |
+| 15.0 | 0.42° | | 150.0 | 1.47° |
+| 30.0 | 0.47° | | **192.8** | **0.29°** ← factory |
+| **42.4** | **0.37°** ← factory | | 230.0 | 1.15° |
+| 70.0 | 0.36° ← best | | 270.0 | 2.46° |
+| 100.0 | 0.91° | | 320.0 | 3.40° |
+| 175.0 | 1.94° | | | |
+
+**`cx`: the best sampled value and the factory value differ by 0.01°.**
+Indistinguishable at this precision, on better statistics than the coarse pass —
+the residual floor itself fell from 0.64° to 0.37° with more frames.
+
+**`cy` is the control, and it is the more valuable half of this table.** `cy =
+192.83` sits 7 px from the frame's 200 px centre and was never in doubt. The
+sweep finds it with a **sharp, deep minimum** — 0.29° at the factory value
+against 1.15–1.47° just 40 px away, a 4–5× penalty.
+
+That matters because it establishes the method has real discriminating power on
+this data. A test that could not locate a parameter known to be right would say
+nothing about one suspected of being wrong. It locates `cy` decisively, and it
+places `cx` in a basin whose floor is the factory value.
+
 ## What this establishes, and what it does not
 
 **Establishes.** The sensor really does present an offset window: `cx = 42.44`
@@ -89,8 +118,10 @@ hypothesis is dead — had it been real, deprojecting at `cx = 320` would have
 *removed* it and produced the minimum there, and instead that is the worst
 sampled value outside the frame edges.
 
-**Does not establish.** That the intrinsics are *correct*, only that `cx` is
-close to right. `fx`, `fy` and `cy` were held fixed. The depth scale is
+**Does not establish.** That the intrinsics are *correct*, only that `cx` and
+`cy` are close to right. `fx` and `fy` were held fixed throughout, and this
+construction is blind to them: a focal-length error scales the reconstruction
+without rotating any plane normal, so every angle here is unchanged by it. The depth scale is
 untouched by this — rigid geometry tests are blind to a global scale error, and
 the −0.49% to −2.26% spread across distances is still open. And lens distortion
 remains unmodelled and unfetched: `/data/camparam/Distort.bin` has never been
