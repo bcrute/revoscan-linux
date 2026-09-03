@@ -218,6 +218,61 @@ the target from the turntable.** Segmentation has failed twice here (see Method
 below). This is the blocker, and it is a measurement problem rather than a
 scanner problem.
 
+## The ceiling is per-frame geometry, not registration
+
+This is the finding that reorganises the rest. Every route pursued in this
+session assumed the error was accumulated across frames - better closure, more
+laps, tighter refinement. A single frame carries no pose graph at all, so
+comparing one against the CAD separates the two.
+
+Registered through the fusion (the fused cloud places on the CAD at 0.96 mm, and
+a single frame registers to the fused cloud because it is the same scene at full
+coverage), so the frame's own points reach CAD coordinates having undergone
+exactly ONE rigid motion:
+
+| | residual RMS vs CAD | by image column (axis at column 42) |
+| --- | --- | --- |
+| frame 47 | 1.686 mm | 1.26 / 1.40 / 1.57 |
+| frame 95 | 1.823 mm | 1.66 / 1.59 / 1.60 / 1.76 |
+| frame 142 | 1.921 mm | - / 1.71 / 1.82 / 2.63 |
+| **fused, 190 frames** | **1.767 mm** | |
+
+(all scan-to-CAD Euclidean over points within 3 mm, so the rows are comparable)
+
+**A single frame is as far from the CAD as the entire fusion.** The three frames
+bracket the fused figure rather than sitting below it. Fusion adds no error and
+removes none, which means registration quality is not what limits agreement -
+and that retrospectively explains two results that were otherwise puzzling: why
+a 450-frame sweep reconstructs *worse* than a 190-frame one, and why
+coarse-to-fine refinement bought 0.08 mm. Both were working on a term that is
+not the dominant one.
+
+**The residual grows with distance from the optical axis.** `cx = 42.44` puts
+the axis near the frame's left edge, so column is the axis-distance proxy, and
+all three frames rise left to right - most sharply on frame 142, 1.71 to 2.63 mm.
+That is the signature of an unmodelled radial term.
+
+What this does NOT establish, and the caveats are load-bearing:
+
+- **The frame-to-fusion registration is loose** - median 1.6-2.3 mm at matched
+  fraction 0.67-0.77 - so the absolute residuals carry registration error of the
+  same order as the quantity being measured. The comparison between single frame
+  and fusion is sound because both are measured the same way; the absolute
+  values are not a calibration result.
+- **Column is confounded with geometry.** Points at high column are also further
+  from the object's centre and at more grazing incidence, and this construction
+  cannot separate a radial distortion term from an incidence-angle effect.
+- **`fx` and `fy` remain untested.** `docs/principal-point.md` settles `cx` and
+  `cy` and says explicitly that it is blind to focal length, because a focal
+  error scales the reconstruction without rotating any plane normal.
+
+The actionable consequence is narrow and specific: **lens distortion is
+completely unmodelled and has never been read from the device.**
+`/data/camparam/Distort.bin` has not been fetched, because reading it detaches
+interface 0 from `uvcvideo` and that is a separate authorisation from streaming.
+It is now the highest-value unknown in the metric chain, and no amount of
+tracking, cadence or pose-graph work will move the gate while it is open.
+
 ## Repeatability, and what the bar has to clear
 
 Two captures were taken three minutes apart with identical settings - 190 frames
