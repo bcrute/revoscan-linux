@@ -502,6 +502,49 @@ written is stricter than it reads**, and the honest fix is a target with a large
 uninterrupted flat face to measure against - not a change to the bar, and not an
 estimator this session could defend.
 
+## The route the correction opens, and how far it got
+
+If the fusion turns surfaces into a volume, the fix is a representation that
+averages frames instead of stacking them. A truncated signed-distance field is
+exactly that - each frame votes on the distance to the surface at each voxel and
+the votes are averaged, so pose disagreement blurs the zero crossing rather than
+thickening a cloud - and this repository already has one, with the same
+resolution chooser and constants the export path uses.
+
+It runs. On `20260902-224804`: 190 poses, a 253 x 205 x 277 field at 0.96 mm
+voxels, all 190 raw frames integrated, and a surface of 102,063 vertices and
+167,289 faces. The extracted surface **is measurably thinner** than the stacked
+cloud by the same neighbourhood-shape statistic:
+
+| cloud | λ3/λ2 | |
+| --- | --- | --- |
+| stacked point cloud | 0.783 | nearly a volume |
+| TSDF extracted surface | **0.525** | between, and about half of what remains is the 0.96 mm voxel grid |
+
+**But it does not yet measure against the CAD, and the reason is not settled.**
+The gate refused to place the CAD onto it at all - 23.2% of CAD points reached
+the surface, under the 25% the tool requires - which is the registration guard
+working, since a closed isosurface carries a front and a back face on every thin
+structure and the placement search is seeded from a support plane and a density
+peak. Holding the placement fixed from the stacked cloud instead, so only the
+representation changes, the surface is in the right frame (extents agree to a
+few mm) and 45,494 of its vertices sit within 60 mm of the target centre - yet
+CAD-to-surface distance has a **median of 18.80 mm**, with p10 5.38 and a
+minimum of 0.07.
+
+So the surface is present near the object and mostly not *on* it. That is a
+structural fault in how the field is being driven, not a quality difference, and
+the candidates are specific: `extract_surface` documents itself as returning the
+**connected** zero-level surface, so a component other than the target may be
+what came back; and a turntable sweep is a case where the subject rotates while
+the room does not, so free-space carving sees a background that is inconsistent
+between frames in the model frame.
+
+Recorded as unfinished rather than as a result. What it does establish is that
+the machinery runs end to end on a real capture at a usable resolution, and that
+the representation really is thinner - which is the premise the correction above
+predicts.
+
 ## Method
 
 Isolation was the wrong problem and two attempts at it failed before that was
