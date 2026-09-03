@@ -88,10 +88,11 @@ diluted three-to-one by turntable and room (see
 `docs/coverage-and-subject.md`). Querying from the reference side cannot be
 diluted: scenery is never queried.
 
-## `outer_west` at 0% is not explained, and one explanation was wrong
+## `outer_west` at 0% was an artefact of the placement, and two explanations were wrong
 
-The sweep is roughly 1.5 revolutions, so every face passed the camera. Two
-explanations have been tested and neither survived.
+The sweep is roughly 1.5 revolutions, so every face passed the camera. Three
+explanations were considered; the first two were tested and failed, and the
+third turned out to be the answer.
 
 **Registration yaw is ruled out.** A wrong yaw would map CAD-west onto a
 different physical face — but the target is deliberately asymmetric, so it would
@@ -121,16 +122,25 @@ by this scanner at any distance inside its working range" and used that to
 justify not gating completeness. **The claim was false.** Completeness is still
 not gated, but for the honest reason: what limits it is unknown.
 
-**Untested candidates**, in rough order of plausibility:
+**It was the placement.** Re-running the same capture through the same gate with
+a different seed for the placement search reads `outer_west` at **96%**, not 0%.
+Nothing about the scan changed. The per-surface figures move with where the
+search happens to land, while the aggregate barely does (1.29 against 1.32 mm
+across two independent registrations), because a small residual yaw redistributes
+error between opposite faces without changing the total.
 
-- **Projector shadowing.** The projector and camera are separate apertures, so
-  geometry visible to the camera can be unlit. The target's ramp rises to 56 mm
-  and could shadow a side face at the rotations where that face turns toward the
-  camera. This would be asymmetric between faces, which matches `outer_east` at
-  86% against `outer_west` at 0%.
-- **Grazing incidence** on a near-vertical face, which returns little from a
-  structured-light sensor. Does not by itself explain the east/west asymmetry.
-- **Something in the capture geometry** specific to this session's placement.
+An earlier draft of this section spent three paragraphs theorising about
+projector shadowing — the projector and camera being separate apertures, the
+ramp rising to 56 mm and occluding a side face — and offered the east/west
+asymmetry as supporting evidence. **That was explaining an artefact.** The
+asymmetry it set out to explain was not a property of the scanner at all, and
+the theory was plausible enough to have survived unchallenged had the seed never
+been varied. It is recorded here rather than deleted because the failure mode is
+the point: a coherent physical story fitted to one registration's output.
+
+The consequence for this gate is concrete: **a per-surface verdict is not
+trustworthy from a single placement.** Either report per-surface numbers with a
+spread across seeds, or report only the aggregate.
 
 ## Method
 
