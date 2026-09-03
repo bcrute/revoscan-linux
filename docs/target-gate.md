@@ -218,6 +218,45 @@ the target from the turntable.** Segmentation has failed twice here (see Method
 below). This is the blocker, and it is a measurement problem rather than a
 scanner problem.
 
+## CORRECTION: the fusion produces a volume, and registration is a dominant term
+
+**The section below is wrong and is kept because the way it went wrong is the
+useful part.** It concluded that per-frame geometry, not registration, limits
+agreement with the CAD. That rested on a single frame's residual against the CAD
+being as large as the whole fusion's - measured through a frame-to-fusion
+registration whose own median was 1.6-2.3 mm, which is the same size as the
+quantity it was measuring. The caveat was written down at the time and then
+relied on anyway.
+
+The direct test is the SHAPE of a local neighbourhood, not the size of one
+extent. Median principal extents of a 2 mm neighbourhood, against two
+references measured the same way:
+
+| cloud | extents (mm) | λ3/λ2 | |
+| --- | --- | --- | --- |
+| reference: thin surface, 0.15 mm | 1.019 / 0.956 / 0.148 | **0.155** | what a surface reads |
+| reference: isotropic volume | 0.738 / 0.731 / 0.645 | **0.883** | what a blob reads |
+| one prepared frame (r = 6 mm) | 3.047 / 2.370 / 0.483 | **0.204** | a surface |
+| fused, `20260902-224804` | 0.972 / 0.866 / 0.679 | **0.784** | nearly a volume |
+| fused, `20260901-201341` | 0.982 / 0.851 / 0.683 | **0.803** | nearly a volume |
+
+A single depth frame *cannot* be volumetric - one depth per pixel makes it a
+surface by construction, and it measures 0.204. **The fusion is what turns it
+into a volume**, so the frames are being placed inconsistently and registration
+is a dominant error term.
+
+This also retires an earlier claim in this document: the fused cloud was
+reported "locally 0.669 mm thin" because that number sits near the 0.65 mm
+per-point noise floor. The comparison was against the wrong reference. Points
+filling a 2 mm ball uniformly give about 0.89 mm by that statistic and a genuine
+surface gives 0.1-0.2 mm, so 0.669 was always much closer to a blob. One extent
+cannot tell a thin surface from a thick one; only the ratio can.
+
+Everything that follows from "registration is not the limiter" is affected,
+including the reading that the 450-frame sweep and the coarse-to-fine schedule
+failed because they addressed a non-dominant term. What they show is narrower:
+those particular interventions did not thin the cloud.
+
 ## The ceiling is per-frame geometry, not registration
 
 This is the finding that reorganises the rest. Every route pursued in this
