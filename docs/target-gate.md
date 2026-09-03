@@ -88,12 +88,49 @@ diluted three-to-one by turntable and room (see
 `docs/coverage-and-subject.md`). Querying from the reference side cannot be
 diluted: scenery is never queried.
 
-**`outer_west` at 0% is not yet explained.** The sweep is roughly 1.5
-revolutions, so every face should have passed the camera. A gross registration
-yaw error would explain it, but is ruled out by the accuracy of everything else:
-the target is deliberately asymmetric, so a wrong yaw would degrade every
-surface, not one. Occlusion by the ramp at the angles where west faces the
-camera is the leading hypothesis and is untested.
+## `outer_west` at 0% is not explained, and one explanation was wrong
+
+The sweep is roughly 1.5 revolutions, so every face passed the camera. Two
+explanations have been tested and neither survived.
+
+**Registration yaw is ruled out.** A wrong yaw would map CAD-west onto a
+different physical face — but the target is deliberately asymmetric, so it would
+degrade every surface, and the ramp, pocket and bump all sit at 1.30–1.47 mm.
+
+**A limited sensor band is ruled out, and this one was asserted before it was
+checked.** The measurement behind it divided returns by all 400 rows of each
+column, which plots *the object's silhouette*, not the sensor's sensitivity: the
+target spans 329 rows at column 220 and 74 rows at column 460, so of course the
+ratio falls off toward its edges. Dividing instead by the rows the object
+actually occupies gives a flat **71–79% fill across columns 80–400**, continuing
+to ~520. There is no narrow usable band. The whole object is imaged.
+
+| columns | object height (rows) | fill within silhouette |
+| --- | --- | --- |
+| 80–119 | 207 | 74% |
+| 160–199 | 298 | 79% |
+| 200–239 | 329 | 78% |
+| 280–319 | 312 | 75% |
+| 360–399 | 228 | 71% |
+| 400–439 | 149 | 62% |
+| 440–479 | 74 | 41% |
+
+That correction matters beyond this one face: an earlier version of this
+document and of `tools/target_gate.py` claimed the target "cannot be fully imaged
+by this scanner at any distance inside its working range" and used that to
+justify not gating completeness. **The claim was false.** Completeness is still
+not gated, but for the honest reason: what limits it is unknown.
+
+**Untested candidates**, in rough order of plausibility:
+
+- **Projector shadowing.** The projector and camera are separate apertures, so
+  geometry visible to the camera can be unlit. The target's ramp rises to 56 mm
+  and could shadow a side face at the rotations where that face turns toward the
+  camera. This would be asymmetric between faces, which matches `outer_east` at
+  86% against `outer_west` at 0%.
+- **Grazing incidence** on a near-vertical face, which returns little from a
+  structured-light sensor. Does not by itself explain the east/west asymmetry.
+- **Something in the capture geometry** specific to this session's placement.
 
 ## Method
 
