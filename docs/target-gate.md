@@ -309,6 +309,71 @@ the per-surface level, which the placement sweep says independently:
 The aggregate is stable to +/-0.02 mm. The per-surface count swings by five
 surfaces on the same capture and the same code.
 
+## The depth scale is linear, and one feature dimension is very good
+
+Two more candidates closed, one firmly and one only partly.
+
+**Depth linearity.** A scale that varies with `z` is not a global scale error -
+rigid registration cannot absorb it and neither can pose work, because it
+deforms every frame identically. That made it a strong candidate for the
+per-frame ceiling above, and the repository records a −0.49% to −2.26% depth
+scale spread *across distances* as an open question. Swept registration-free by
+the plane-angle test, under `z' = z·(1 + a·(z − 200)/100)`:
+
+| a (%/100 mm) | −1.0 | −0.5 | **0.0** | +0.5 | +1.0 |
+| --- | --- | --- | --- | --- | --- |
+| median \|angle − 90°\| | 0.677° | 0.323° | **0.279°** | 0.586° | 0.959° |
+
+One basin at a = 0. **The depth scale is linear** to the resolution of this test,
+roughly 0.5% per 100 mm. (The plane-fit residual falls monotonically toward
+negative `a` rather than forming a basin, so it does not discriminate here - the
+same shrink-everything behaviour the `fx` sweep shows. The angle metric is the
+one with a basin, and it is the one the `cy` control validated.)
+
+**Feature dimensions.** A step height is the separation of two parallel planes
+*both taken from the same scan*, so a rigid registration error is common to both
+and cancels exactly. That measures printed geometry and scanner scale together
+with the placement search removed - and it is `tolerance-v1.json`'s third gate,
+`feature_survival`, declared "reported, not gated" and never computed until now.
+
+On `20260902-224804`, plateau-to-base against the CAD's own separation:
+
+| scan-side selection | scan points | CAD | scan | error |
+| --- | --- | --- | --- | --- |
+| 1.5 mm | 1070 | 15.957 | 15.981 | **+0.024 mm** |
+| 2.5 mm | 2195 | 15.957 | 15.999 | **+0.042 mm** |
+
+A 16 mm feature reproduced to within 0.04 mm, and stable under a large change to
+its own selection rule.
+
+**This is one feature on one capture, and it is not corroborated.** The same
+measurement on three other captures - `20260901-201341`, `20260902-224455` and
+the 450-frame sweep - reports `plateau_top` not observed densely enough to fit,
+because their placements are looser (1.14, 1.85 and 1.60 mm against 0.96 mm) and
+fewer scan points fall near the face. Every other feature pair fails the
+200-point bar too: the step tops are small, and a 25-point plane read 0.199 mm
+against a 2.553 mm feature, which is not a measurement of that step.
+
+Two earlier versions of this measurement were wrong and are worth recording,
+because both produced confident numbers:
+
+- The CAD reference planes were selected **by radius** rather than by each
+  face's own point mask, so widening the scan-side radius also pulled
+  neighbouring faces into the *reference* plane. The quantity being compared
+  against moved with a tuning parameter - CAD plateau-to-base read 15.823 mm at
+  one radius and 15.649 mm at another - and the reported error swung from
+  +0.158 to +0.399 mm.
+- `ramp_top` was paired against `base_top` as though it were a step. It is a
+  **sloped** face, so a centroid separation along the base normal is not a
+  height at all; on 75 points it read −5.447 mm against a nominal 27.323 mm.
+
+What the surviving measurement supports is narrow: at this scale the print and
+the scanner's dimensional accuracy are both good, so **the ~1.1 mm the gate
+reports is not dimensional error**. What it cannot support is that surfaces sit
+where the CAD says, because a bias shared by both faces of a pair cancels in
+their difference - which is exactly the quantity this construction discards in
+order to remove the registration.
+
 ## Method
 
 Isolation was the wrong problem and two attempts at it failed before that was
