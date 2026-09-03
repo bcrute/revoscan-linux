@@ -1,0 +1,43 @@
+{
+  "declared": "2026-09-02",
+  "declared_before_any_comparison": true,
+  "target_id": "reconstruction-target-v1",
+  "why_now": "The checklist requires a tolerance declared BEFORE the comparison. A bar chosen after seeing the result is not a gate. Nothing in this repository has yet compared a physical scan against this target's CAD, so this file is written first and is not revised to fit an outcome.",
+  "reference": {
+    "geometry": "reconstruction-target-v1-reference.ply, 12000 CAD points with normals and surface_id",
+    "scale_adjustment": "the scale_x/y/z in prints/physical-print-20260831.json, predeclared for this print before its first scan",
+    "not_yet_available": [
+      "caliper resolution",
+      "printer, material, nozzle and layer height",
+      "repeat dimension readings"
+    ],
+    "consequence": "These are ready_for_formal_physical_gate=false in the print record. Results under this file are a DEVELOPMENT metric against CAD-plus-predeclared-shrinkage. They are not a published accuracy claim and must not be quoted as one."
+  },
+  "gates": [
+    {
+      "id": "orthogonality",
+      "what": "Angle between each outer side face (outer_east, outer_west, outer_north, outer_south) and base_top, fitted as planes on the registered scan.",
+      "nominal_degrees": 90.0,
+      "tolerance_degrees": 2.0,
+      "why_this_bar": "This is the principal-point test and it needs no calipers and no sphere. A shear x += k*z leaves a plane a plane but rotates its normal: the east/west faces tilt by atan(k) against the top while north/south are untouched. At k=0.3089 - the shear implied if the true cx were the frame centre rather than the factory 42.44 - east-vs-top reads 107.2 rather than 90. A 2-degree bar detects k>=0.035, about a 31-pixel cx error, and is wider than the 1.20-degree loop closure this scan carries.",
+      "diagnostic": "east/west failing while north/south pass is a shear in x, which is a principal-point or distortion fault, NOT a registration fault."
+    },
+    {
+      "id": "planar_rms",
+      "what": "RMS deviation of registered scan points from their own CAD surface, per planar surface_id.",
+      "tolerance_mm": 1.5,
+      "why_this_bar": "About 2.3x the 0.65 mm measured per-point noise floor, and above the 1.29 mm that this capture's 1.20-degree held-out loop closure contributes at the target's corner. Tighter would fail on registration error already accounted for; looser would not see an 8%-of-radius shape error."
+    },
+    {
+      "id": "feature_survival",
+      "what": "Whether each of the three rails (1.5, 3, 6 mm) and four steps (2, 5, 10, 20 mm) is resolvable in the registered scan.",
+      "tolerance": "reported, not gated on this pass",
+      "why_this_bar": "Ungated deliberately. 1.5 mm is 2.3 TSDF voxels and 86% of it is consumed by current loop-closure error, so a fail here would measure known upstream error rather than anything new. It is recorded so the number moves when closure improves."
+    }
+  ],
+  "limitations": [
+    "Rigid registration to CAD absorbs any global scale error, so nothing here tests the depth scale. The measured -0.49% to -2.26% scale spread is a separate, unclosed question.",
+    "A comparison against CAD-plus-predeclared-shrinkage inherits whatever the print actually did. Without repeat caliper readings the ground truth's own uncertainty is unmeasured.",
+    "Passing every gate here does not establish dimensional accuracy. It establishes that the scanned shape agrees with the intended shape to the stated bars."
+  ]
+}
