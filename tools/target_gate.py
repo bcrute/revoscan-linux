@@ -50,6 +50,7 @@ from pathlib import Path
 from typing import Final
 
 import numpy as np
+from scipy.spatial import cKDTree
 
 ROOT: Final = Path(__file__).resolve().parent.parent
 TARGET: Final = ROOT / "reference/targets/reconstruction_v1"
@@ -63,12 +64,33 @@ TARGET: Final = ROOT / "reference/targets/reconstruction_v1"
 #: was measured at, so a missing surface is not mistaken for a bad one.
 OBSERVED_RADIUS: Final = 3.0
 
-#: Scan points this far from the placed model join the refinement. Wide enough
-#: to pull in the surface either side of a 1.5 mm registration error, narrow
-#: enough to exclude the turntable the model stands on.
-REFINE_RADIUS: Final = 5.0
+#: Correspondence distance and selection radius for each refinement pass, wide
+#: to narrow.
+#:
+#: Coarse-to-fine, and the schedule is the point. A single wide pass converges
+#: to a fit limited by its own correspondence distance: run at a flat 8 mm this
+#: registration settled at 1.99 mm median and stopped improving, because at that
+#: width every point on a surface can pair with a neighbour a millimetre or two
+#: off and the solve has no reason to prefer the right one. Narrowing after each
+#: pass removes those pairings once the model is close enough not to need them.
+#:
+#: The last pass at 2.0 mm is deliberately below the 3 mm observation radius:
+#: the fit is then decided only by points that would count as observed, so the
+#: registration and the measurement agree about which surface they are talking
+#: about.
+REFINE_SCHEDULE: Final = ((8.0, 5.0), (5.0, 4.0), (3.5, 3.0), (2.0, 2.5))
 
-MAX_REFINEMENTS: Final = 6
+#: Passes at each width before moving on.
+PASSES_PER_WIDTH: Final = 3
+
+#: Share of CAD points that must land within :data:`OBSERVED_RADIUS` before any
+#: per-surface number is reported at all.
+#:
+#: A quarter. Well under the 79% a good capture reaches, so a genuinely
+#: incomplete scan is still judged and its gaps named; far above the ~0% a failed
+#: registration produces, which is what this exists to catch. There is no useful
+#: value in between: a placement either found the target or it did not.
+MIN_OBSERVED_TO_JUDGE: Final = 0.25
 
 
 def load_reference() -> tuple[np.ndarray, np.ndarray, dict[int, str], dict]:
@@ -107,13 +129,22 @@ def load_reference() -> tuple[np.ndarray, np.ndarray, dict[int, str], dict]:
 
 
 def nearest(a: np.ndarray, b: np.ndarray, chunk: int = 400) -> np.ndarray:
-    """Distance from every row of ``a`` to the closest row of ``b``."""
-    out = np.empty(len(a))
-    for i in range(0, len(a), chunk):
-        out[i : i + chunk] = np.linalg.norm(a[i : i + chunk, None, :] - b[None, :, :], axis=2).min(
-            axis=1
-        )
-    return out
+    """Distance from every row of ``a`` to the closest row of ``b``.
+
+    Exact, via a k-d tree. The brute-force form this replaced computed the full
+    |a| x |b| distance matrix in chunks, which on the refinement's own inner call
+    - every scan point near the model against the placed CAD - is order 10^9
+    products per pass and made a single placement several minutes of the gate's
+    runtime. The answer is identical; only the time is different, and it is the
+    difference between a repeatability sweep over several seeds being routine
+    and being unaffordable.
+
+    ``chunk`` is retained and ignored so existing callers keep working.
+    """
+    del chunk
+    if len(b) == 0:
+        return np.full(len(a), np.inf)
+    return cKDTree(b).query(a, workers=-1)[0]
 
 
 def fuse(capture: Path, workers: int) -> np.ndarray:
@@ -142,7 +173,8 @@ def place(cad: np.ndarray, scan: np.ndarray, seed: int = 5) -> tuple[np.ndarray,
 
     sample = scan[rng.choice(len(scan), min(40000, len(scan)), replace=False)]
     best = (0, None, None)
-    for _ in range(1200):
+    runner_up = 0
+    for _ in range(4000):
         tri = sample[rng.choice(len(sample), 3, replace=False)]
         n = np.cross(tri[1] - tri[0], tri[2] - tri[0])
         length = np.linalg.norm(n)
@@ -151,13 +183,17 @@ def place(cad: np.ndarray, scan: np.ndarray, seed: int = 5) -> tuple[np.ndarray,
         n = n / length
         inliers = int((np.abs((sample - tri[0]) @ n) < 1.5).sum())
         if inliers > best[0]:
+            runner_up = best[0]
             best = (inliers, n, tri[0])
     up = best[1]
     if up is None:
         raise SystemExit("no dominant plane: the target must stand on one")
     if np.dot(up, np.array([0.0, 0.0, -1.0])) < 0:
         up = -up
-    log.append(f"support plane: {best[0]}/{len(sample)} inliers")
+    log.append(
+        f"support plane: {best[0]}/{len(sample)} inliers "
+        f"(runner-up {runner_up}, margin {best[0] / max(runner_up, 1):.2f}x)"
+    )
 
     helper = np.array([1.0, 0, 0]) if abs(up[0]) < 0.9 else np.array([0, 1.0, 0])
     e1 = np.cross(up, helper)
@@ -183,28 +219,42 @@ def place(cad: np.ndarray, scan: np.ndarray, seed: int = 5) -> tuple[np.ndarray,
             placed, score = q, float(np.median(d))
     log.append(f"coarse placement: median {score:.2f} mm")
 
-    for step in range(MAX_REFINEMENTS):
-        before = float(np.median(nearest(placed[::4], near[::5])))
-        chosen = near[nearest(near, placed[::6]) < REFINE_RADIUS]
-        if len(chosen) < 800:
-            log.append(f"refine {step}: only {len(chosen)} points near the model, stopping")
-            break
-        fit = icp_point_to_plane(
-            [tuple(p) for p in placed[::3]],
-            [tuple(p) for p in chosen[:: max(1, len(chosen) // 6000)]],
-            max_correspondence_distance=8.0,
-            voxel_size=1.0,
-            keep_fraction=0.85,
-        )
-        placed = np.array([fit.transform.apply(tuple(p)) for p in placed])
-        after = float(np.median(nearest(placed[::4], near[::5])))
-        log.append(
-            f"refine {step}: {before:.2f} -> {after:.2f} mm, matched {fit.matched_fraction:.2f}"
-        )
-        if abs(after - before) < 0.02:
-            break
+    for width, radius in REFINE_SCHEDULE:
+        for step in range(PASSES_PER_WIDTH):
+            before = float(np.median(nearest(placed[::4], near[::5])))
+            chosen = near[nearest(near, placed[::6]) < radius]
+            if len(chosen) < 800:
+                log.append(f"refine @{width:g}mm: only {len(chosen)} points near model, stopping")
+                break
+            fit = icp_point_to_plane(
+                [tuple(p) for p in placed[::3]],
+                [tuple(p) for p in chosen[:: max(1, len(chosen) // 6000)]],
+                max_correspondence_distance=width,
+                # Fixed: the CORRESPONDENCE width is what narrows here. Shrinking the
+                # downsample with it asks for a 0.5 mm grid over a 92 mm model, which
+                # is 5.3M cells against registration.py's 4M ceiling - a cell per point,
+                # reducing nothing.
+                voxel_size=1.0,
+                keep_fraction=0.85,
+            )
+            placed = np.array([fit.transform.apply(tuple(p)) for p in placed])
+            after = float(np.median(nearest(placed[::4], near[::5])))
+            if step == 0 or abs(after - before) >= 0.02:
+                log.append(
+                    f"refine @{width:g}mm: {before:.2f} -> {after:.2f} mm, "
+                    f"matched {fit.matched_fraction:.2f}"
+                )
+            if abs(after - before) < 0.02:
+                break
 
-    return placed, log
+    # Back to the caller's frame. Everything above works in the support-plane
+    # frame, because 'standing on the plane' and 'the density peak' only mean
+    # anything there; `frame` is orthonormal, so its transpose is its inverse.
+    # Returning plane-frame coordinates silently compared the model against a
+    # scan in a different basis, which read as 0% of the CAD observed while the
+    # refinement's own median said 1.99 mm - the two disagreeing is what caught
+    # it.
+    return placed @ frame, log
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -212,16 +262,53 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("capture", type=Path, help="capture directory (read-only)")
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--json", action="store_true")
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=5,
+        help="placement search seed; vary it to measure how much of a per-surface "
+        "result is the scan and how much is where the search happened to land",
+    )
+    parser.add_argument(
+        "--cache",
+        type=Path,
+        help="reuse the fused cloud at this path, writing it first if absent. The "
+        "fusion is the expensive half and is independent of --seed, so a "
+        "repeatability sweep should not pay for it more than once.",
+    )
     args = parser.parse_args(argv)
 
     gates = json.loads((TARGET / "gates/tolerance-v1.json").read_text())
     tol = next(g for g in gates["gates"] if g["id"] == "planar_rms")["tolerance_mm"]
     cad, sid, names, print_record = load_reference()
 
-    scan = fuse(args.capture, args.workers)
-    placed, log = place(cad, scan)
+    if args.cache is not None and args.cache.exists():
+        scan = np.load(args.cache)
+        print(f"fused cloud from {args.cache} ({len(scan)} points)", file=sys.stderr)
+    else:
+        scan = fuse(args.capture, args.workers)
+        if args.cache is not None:
+            np.save(args.cache, scan)
+    placed, log = place(cad, scan, seed=args.seed)
     d = nearest(placed, scan)
     observed = d < OBSERVED_RADIUS
+
+    # A placement that reached almost nothing is a failed registration, not a
+    # scan that missed the object. Judging it would report per-surface numbers
+    # for a model sitting somewhere the target is not - the exact "plausible
+    # number from a broken measurement" this repository refuses everywhere else.
+    if observed.mean() < MIN_OBSERVED_TO_JUDGE:
+        for line in log:
+            print(f"  {line}", file=sys.stderr)
+        print(
+            f"\nREGISTRATION FAILED: only {observed.mean():.1%} of CAD points landed within "
+            f"{OBSERVED_RADIUS} mm of any scan point, under the {MIN_OBSERVED_TO_JUDGE:.0%} this "
+            "tool requires before it will judge anything. Nothing is reported. The placement "
+            "search is seeded from the largest plane in the scene; check the margin on the "
+            "support-plane line above, and see docs/target-gate.md.",
+            file=sys.stderr,
+        )
+        return 2
 
     surfaces = []
     for s in sorted({int(x) for x in sid}):
