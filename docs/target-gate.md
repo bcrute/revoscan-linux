@@ -423,6 +423,46 @@ CAD-side perpendicular estimator, which this session did not find: projecting th
 nearest scan point understates by half through selection bias, and averaging a
 neighbourhood understates worse by cancelling the noise it is meant to measure.
 
+## Five estimators, and why the declared metric is not measurable on this target
+
+`tolerance-v1.json` declares "RMS deviation of registered scan points from their
+own CAD **surface**" - a point-to-surface distance. The tool measures
+point-to-nearest-point instead. Five constructions were tried to measure the
+declared quantity, each validated against a synthetic scan whose perpendicular
+error is *chosen* so the right answer is known. All five fail, and the pattern
+is what matters.
+
+| estimator | behaviour at known error | why it fails |
+| --- | --- | --- |
+| Euclidean nearest point (current) | 0.34 at true 0.00 | overstates; adds lateral sampling, and nearly doubles at zero error when the scan is made denser |
+| nearest point projected on normal | 0.32 at true 1.00 | understates by half - choosing the nearest point preferentially chooses small perpendicular offset |
+| neighbourhood mean of signed offsets | 0.19 at true 1.00 | understates worse - averaging zero-mean noise measures bias, not spread |
+| scan-side, plane through nearest CAD point | recovers truth on synthetic | unbiased, but on a real scan cannot be separated from the scene the target stands in |
+| normal-aligned cylinder, lateral selection only | 2.02 at true 0.00 (h=5) | the cylinder punches through the object into other surfaces |
+| cylinder + orientation filter | 0.29/0.30/0.47/0.62 at true 0.00/0.30/0.60/1.00 | flat in h, and correct at 0.30 - but truncates larger errors while a wider cylinder returns a floor at zero |
+
+The fourth is unbiased and the sixth is close, and both are defeated by the same
+property: **this target is deliberately feature-dense.** Its whole purpose is
+steps of 2, 5, 10 and 20 mm and rails of 1.5, 3 and 6 mm, so no local
+neighbourhood of a CAD point contains only that point's surface. Every attempt
+to exclude the intruders either truncates the distribution being measured
+(understating) or leaves a floor of them behind (overstating), and no cylinder
+half-height does neither: at 1.5-2.0 mm it truncates, at 3.0 mm it leaves 0.289
+where the truth is zero.
+
+**So the declared metric is not measurable on this target by any construction
+found here**, and the tool keeps the Euclidean CAD-side distance, which the four
+failures above establish is at least the right *direction*: extra scan content
+cannot inflate it. Its known defect stands - it overstates by a median 0.6 mm
+lateral term and varies with scan density - and it is stated in the tool's own
+output rather than silently corrected.
+
+The consequence for the gate is worth being plain about. The 1.5 mm bar was set
+against a metric that overstates by an unquantified amount, so **the gate as
+written is stricter than it reads**, and the honest fix is a target with a large
+uninterrupted flat face to measure against - not a change to the bar, and not an
+estimator this session could defend.
+
 ## Method
 
 Isolation was the wrong problem and two attempts at it failed before that was
