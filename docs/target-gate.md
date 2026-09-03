@@ -193,11 +193,16 @@ which is a property of the sampling and not of the scanner.
 deciding which scan points are on the target, and the numbers say that decision
 is not available here. The scan-side RMS is a fixed fraction of whatever
 observation radius is chosen - 1.56 mm at 3 mm, 1.05 at 2 mm, 0.77 at 1.5 mm,
-0.48 at 1.0 mm, a ratio of 0.48-0.53 throughout - which is the signature of a
-shell filled with scenery rather than a surface. An orientation filter, which
-fixed exactly this problem for the orthogonality gate, does **not** fix it here:
-the worst contaminant is coplanar with the surface it contaminates, because a
-turntable top is horizontal and so is `base_top`.
+0.48 at 1.0 mm, a ratio of 0.48-0.53 throughout. An orientation filter, which
+fixed exactly this problem for the orthogonality gate, does **not** fix it here.
+
+Scenery was the obvious explanation and it is **wrong**. If the contaminant were
+the turntable, surfaces standing clear of it would behave differently, and they
+do not: `ramp_top`, 17.2 mm above the support plane, tracks the cutoff at
+x0.55/x0.54/x0.53 while `base_top`, 9.8 mm below it, tracks it at
+x0.50/x0.51/x0.50. Every surface tested gives the same ratio at every cutoff
+regardless of height. A uniform result across the whole object is not
+contamination from one part of the scene.
 
 Two CAD-side substitutes were tried and both are biased, in opposite directions.
 Projecting the nearest scan point onto the CAD normal *understates* by about
