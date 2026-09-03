@@ -119,9 +119,24 @@ hypothesis is dead — had it been real, deprojecting at `cx = 320` would have
 sampled value outside the frame edges.
 
 **Does not establish.** That the intrinsics are *correct*, only that `cx` and
-`cy` are close to right. `fx` and `fy` were held fixed throughout, and this
-construction is blind to them: a focal-length error scales the reconstruction
-without rotating any plane normal, so every angle here is unchanged by it. The depth scale is
+`cy` are close to right. `fx` and `fy` were held fixed throughout.
+
+> **Correction, 2026-09-03.** This section claimed the construction is *blind*
+> to focal length - "a focal-length error scales the reconstruction without
+> rotating any plane normal". **That is false in general, and it cost this
+> project the assumption that `fx` was untestable.** Deprojection is
+> `X = (u - cx)·Z/fx`, so a wrong `fx` scales x and y but *not* z: an
+> anisotropic `diag(s, s, 1)` in **camera** space, under which normals transform
+> by `diag(1/s, 1/s, 1)` and angles between them do change.
+>
+> The claim is true only for an object whose faces are axis-aligned with the
+> camera, which is why it survived: checked on the CAD in the CAD's own frame,
+> where the target's faces *are* axis-aligned, a 5% `fx` error moves every
+> face-to-`base_top` angle by exactly 0.000°. Rotate the same CAD to a general
+> orientation - which is the only way it ever sits in front of a camera - and a
+> 1% error moves them by 0.377°.
+>
+> So `fx` is identifiable by exactly this method, and is now measured below. The depth scale is
 untouched by this — rigid geometry tests are blind to a global scale error, and
 the −0.49% to −2.26% spread across distances is still open. And lens distortion
 remains unmodelled and unfetched: `/data/camparam/Distort.bin` has never been
@@ -132,6 +147,60 @@ separate from print tolerance and plane-fit noise.
 combined precision of plane fitting on real returns, the printed target's own
 flatness, and any unmodelled distortion. It bounds how sharply this method can
 locate a principal point; it is not a claim about the scanner's accuracy.
+
+## `fx`, measured the same way
+
+Swept on 36 frames of `20260902-224804`, `fy` tied to `fx`, `cx` and `cy` held
+at the factory values. The surfaces are extracted **once** at the factory
+intrinsics and their inlier indices reused for every candidate: re-running
+RANSAC per candidate lets different candidates lock onto different surfaces,
+which mixes the parameter's effect with the extraction's instability.
+
+| fx | % of factory | median \|angle − 90°\| | |
+| --- | --- | --- | --- |
+| 808.8 | 90% | 3.560° | |
+| 844.8 | 94% | 1.993° | |
+| 871.7 | 97% | 0.942° | |
+| 889.7 | 99% | **0.273°** | sampled minimum |
+| **898.7** | **100%** | **0.279°** | **factory** |
+| 907.7 | 101% | 0.539° | |
+| 925.6 | 103% | 1.213° | |
+| 988.6 | 110% | 2.450° | |
+
+One basin, and the factory value sits at its floor. The sampled minimum is one
+grid step away at 99% and differs by 0.006°, far inside this measurement's own
+precision. **The factory `fx` is right to within about 1%**, which at the
+target's 92 mm extent is under 1 mm.
+
+With this, every parameter of the pinhole model on this unit has been measured
+on this unit: `cx` and `cy` above, `fx` and `fy` here.
+
+## Radial distortion is real, and small
+
+The same sweep applied to a single radial coefficient, correcting in normalised
+image coordinates as `x' = x·(1 + k1·r²)`:
+
+| k1 | median \|angle − 90°\| | plane RMS |
+| --- | --- | --- |
+| −0.30 | 1.320° | 0.371 |
+| −0.10 | 0.605° | 0.326 |
+| −0.05 | 0.432° | 0.317 |
+| **0.00** | **0.279°** | 0.313 |
+| **0.05** | **0.235°** | **0.311** |
+| 0.10 | 0.339° | 0.311 |
+| 0.20 | 0.494° | 0.321 |
+| 0.30 | 0.737° | 0.340 |
+
+One basin again, minimum at **k1 ≈ 0.05**, monotone either side, and the
+plane-fit residual agrees rather than fighting it. Distortion on this lens is
+therefore real, positive, and modest.
+
+Whether it *matters* is a question about magnitude, not existence. The object
+reaches a normalised radius of about 0.5 (it spans columns ~80-500 and `cx` is
+42), so k1 = 0.05 displaces points about 1.3% radially - roughly **1.3 mm at
+200 mm depth**, which is the order the reconstruction gate cares about. Squaring
+up right angles and agreeing with CAD are different questions, and the second is
+tested end to end in `docs/target-gate.md`.
 
 ## Why it matters
 
