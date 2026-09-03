@@ -374,6 +374,55 @@ where the CAD says, because a bias shared by both faces of a pair cancels in
 their difference - which is exactly the quantity this construction discards in
 order to remove the registration.
 
+## Why the CAD-side direction is right, established by four failures
+
+The scan-side measurement is heavy-tailed and its RMS tracks whatever cutoff is
+chosen. Four explanations were tested and all four failed, and the pattern of
+failure is what finally settles the direction the gate should query from.
+
+**Not scenery by height.** `ramp_top`, 17.2 mm clear of the support plane,
+tracks the cutoff at x0.55/x0.54/x0.53; `base_top`, 9.8 mm below it, at
+x0.50/x0.51/x0.50. Every surface behaves alike regardless of height.
+
+**Not an outlier halo.** Points with fewer than 5 neighbours within 1 mm read
+1.542 mm; points with 20 or more read **1.588** - the dense core is no closer to
+the CAD than the strays.
+
+**Not the estimator.** On a synthetic scan with a *known* perpendicular error,
+a well-measured surface gives a CONSTANT RMS across cutoffs, not a constant
+ratio: true 0.30 reads 0.32/0.32/0.32/0.31 at 3.0/2.5/2.0/1.5 mm. Only as the
+true error approaches the cutoff does RMS begin to track it. The real captures
+track harder than synthetic σ = 1.5 mm, so the spread is real and heavy-tailed.
+
+**Not edge mis-assignment**, which was the best remaining candidate, since this
+target is deliberately covered in steps and rails and a scan point near an edge
+pairs with a CAD point on the adjacent perpendicular face. Edge-ness computed on
+the CAD alone - a point whose 2.5 mm neighbourhood swings more than 20° - covers
+45% of the model, and excluding it changes nothing:
+
+| edge exclusion | cut 3.0 | cut 2.0 | cut 1.5 | n |
+| --- | --- | --- | --- | --- |
+| none | 1.55 | 1.05 | 0.77 | 61926 |
+| swing < 20° | 1.60 | 1.09 | 0.78 | 36962 |
+| swing < 5° | 1.60 | 1.09 | 0.78 | 35508 |
+
+**What the four failures jointly establish is the asymmetry.** Querying from the
+CAD reads 1.11 mm; querying from the scan reads 1.55 mm and worse. Every CAD
+point has a scan point near it, and many scan points are not near the CAD
+surface. That is extra scan content - the scene the target stands in - and it is
+precisely the thing a CAD-side query cannot be inflated by and a scan-side query
+cannot be separated from without segmentation.
+
+So the gate's **direction** is correct and is not the defect. The defect is
+narrower than the earlier sections suggested: within the CAD-side direction, the
+tool measures a Euclidean point-to-point distance where the tolerance file
+declares point-to-surface, which overstates by a lateral term of median 0.6 mm
+and varies with scan density. Correcting only that would put the aggregate near
+sqrt(1.11² − 0.6²) ≈ 0.93 mm, and the honest way to do it is an unbiased
+CAD-side perpendicular estimator, which this session did not find: projecting the
+nearest scan point understates by half through selection bias, and averaging a
+neighbourhood understates worse by cancelling the noise it is meant to measure.
+
 ## Method
 
 Isolation was the wrong problem and two attempts at it failed before that was
