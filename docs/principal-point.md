@@ -191,16 +191,43 @@ image coordinates as `x' = x·(1 + k1·r²)`:
 | 0.20 | 0.494° | 0.321 |
 | 0.30 | 0.737° | 0.340 |
 
-One basin again, minimum at **k1 ≈ 0.05**, monotone either side, and the
-plane-fit residual agrees rather than fighting it. Distortion on this lens is
-therefore real, positive, and modest.
+One basin, minimum at **k1 ≈ 0.05**, monotone either side, and the plane-fit
+residual agrees rather than fighting it.
 
-Whether it *matters* is a question about magnitude, not existence. The object
-reaches a normalised radius of about 0.5 (it spans columns ~80-500 and `cx` is
-42), so k1 = 0.05 displaces points about 1.3% radially - roughly **1.3 mm at
-200 mm depth**, which is the order the reconstruction gate cares about. Squaring
-up right angles and agreeing with CAD are different questions, and the second is
-tested end to end in `docs/target-gate.md`.
+**And applying it end to end makes the reconstruction worse, so the basin is not
+a calibration.** Squaring up right angles and describing the geometry correctly
+are different claims, and only the second one matters. Re-fusing
+`20260902-224804` through the pipeline's own preparation with k1 = 0.05 applied,
+against an otherwise identical k1 = 0 control:
+
+| | result |
+| --- | --- |
+| k1 = 0 (control) | all 190 frames placed, gate RMS 1.15 mm |
+| k1 = 0.05 | **frame 162 unplaceable**, sweep refused |
+
+Tracking refused the frame because two independent references - adjacent and
+keyframe - each placed it acceptably and then disagreed about where it went by
+**6.258 mm against a 5.200 mm gate**, in two equally large groups that agree
+inside themselves and not with each other. The correction makes frames disagree
+with *each other* more, which is a direct statement about geometry and does not
+depend on the CAD, the placement search, or the gate's metric.
+
+The likely reason is that the model is wrong for this device rather than the
+coefficient being mistuned. On a structured-light depth camera the depth value
+is computed by the device through its own calibration; scaling the deprojected
+x and y by a radial term while leaving z untouched is not what an uncorrected
+lens does, and it introduces an inconsistency that varies with where a surface
+sits in the frame - which is exactly what the two references disagreed about.
+
+So: **the plane-angle sweep is not sufficient to calibrate distortion**, even
+though it is sufficient to locate `cx`, `cy` and `fx`. Those three change the
+geometry coherently across the frame; a radial term does not. What the basin
+establishes is that *something* varies radially in this data. What it does not
+establish is that this correction is the description of it.
+
+The factory `/data/camparam/Distort.bin` has still never been read - it needs an
+authorisation that streaming does not, because the read detaches interface 0
+from `uvcvideo`. It would settle the model rather than leaving it fitted.
 
 ## Why it matters
 
