@@ -208,7 +208,9 @@ def test_a_cancellation_seen_during_deprojection_skips_alignment_and_the_model(
     aligned, built = alignments(set()), models(set())
     window = CaptureWindow(frames=4)
 
-    def load(path: Path, _target_points: int) -> tuple[tuple[float, float, float], ...]:
+    def load(
+        path: Path, _target_points: int, _depth_band: object = None
+    ) -> tuple[tuple[float, float, float], ...]:
         window.worker.cancelled = True
         return ((0.0, 0.0, 100.0),)
 

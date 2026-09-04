@@ -68,8 +68,9 @@ from scanner3d.depth_plausibility import StaticRegionTracker
 from scanner3d.geometry import Point, Rigid, rotation_about_axis
 from scanner3d.gui import ScannerWindow
 from scanner3d.pipeline import SweepReconstruction
-from scanner3d.preparation import PreparedCloud
+from scanner3d.preparation import DepthBand, PreparedCloud
 from scanner3d.preview_provenance import ModelPicture, SurfaceEvidence
+from scanner3d.project import adopt_capture
 from scanner3d.reconstruction_readiness import (
     DEFAULT_POLICY,
     CoverageEvidence,
@@ -350,6 +351,9 @@ class FakeSpin:
     def value(self) -> int:  # Qt's name
         return self._value
 
+    def setValue(self, value: int) -> None:  # Qt's name
+        self._value = value
+
 
 class FakeCheck:
     def __init__(self, checked: bool) -> None:
@@ -570,6 +574,8 @@ class CaptureWindow:
         serial: str | None = None,
         workers: int = 1,
         hold_cadence: bool = False,
+        depth_near: int = 60,
+        depth_far: int = 300,
     ) -> None:
         self.logged: list[str] = []
         self.busy: list[bool] = []
@@ -654,6 +660,10 @@ class CaptureWindow:
         self.pause_states: list[gui.PauseState] = []
         self._frames_spin = FakeSpin(frames)
         self._decimate_spin = FakeSpin(decimate)
+        #: The depth controls. The sensor's own interval by default, which is
+        #: what every capture and reconstruction test here was written against.
+        self._depth_near = FakeSpin(depth_near)
+        self._depth_far = FakeSpin(depth_far)
         #: Whether the capture is allowed to move the spacing above while it
         #: runs. Off by default, exactly as the window's own control is, so
         #: every existing capture test still describes a fixed cadence.
@@ -670,6 +680,7 @@ class CaptureWindow:
         self._coverage_summary = FakeLabel()
         self._cloud = FakeCloud()
         self._capture_dir: Path | None = None
+        self._project_path: Path | None = None
         self._resume_preview_after = False
         self._saved_frames = 0
         self._model_refreshes = 0
@@ -687,6 +698,30 @@ class CaptureWindow:
     # -- what the window does to itself ------------------------------------
     def _log(self, message: str) -> None:
         self.logged.append(message)
+
+    # The real ones, on the stand-in: the band is read by the real
+    # ``_start_capture`` and ``_start_reconstruct`` through this method.
+    def _depth_band(self) -> DepthBand:
+        return ScannerWindow._depth_band(cast(ScannerWindow, self))
+
+    # The project file, through the real methods: written by the real
+    # ``_start_capture`` and finished by the real ``_capture_done`` and
+    # ``_was_stopped``, which the stand-in delegates to above.
+    def _write_project(self, target: Path, capture: dict[str, object]) -> Path | None:
+        return ScannerWindow._write_project(cast(ScannerWindow, self), target, capture)
+
+    def _finish_project(
+        self, *, frames: int | None, stopped: bool, tracking_lost: bool = False
+    ) -> None:
+        ScannerWindow._finish_project(
+            cast(ScannerWindow, self), frames=frames, stopped=stopped, tracking_lost=tracking_lost
+        )
+
+    def _load_depth_band(self) -> None:
+        ScannerWindow._load_depth_band(cast(ScannerWindow, self))
+
+    def _remember_depth_band(self) -> None:
+        ScannerWindow._remember_depth_band(cast(ScannerWindow, self))
 
     def _busy(self, on: bool) -> None:
         """Recorded, and then the one thing the real ``_busy`` does that matters.
@@ -926,10 +961,15 @@ def start_reconstruct(window: CaptureWindow, frames_dir: Path, monkeypatch) -> N
     the real method.
     """
 
+    # The window asks for the scan's PROJECT FILE now, so the folder is given
+    # one first - exactly what the window itself does for an older capture -
+    # and the chooser answers with it.
+    project = adopt_capture(frames_dir)
+
     class FakeFileDialog:
         @staticmethod
-        def getExistingDirectory(*_a: object, **_k: object) -> str:  # Qt's name
-            return str(frames_dir)
+        def getOpenFileName(*_a: object, **_k: object) -> tuple[str, str]:  # Qt's name
+            return str(project), ""
 
     monkeypatch.setattr(gui, "QFileDialog", FakeFileDialog)
     ScannerWindow._start_reconstruct(cast(ScannerWindow, window))
@@ -1118,7 +1158,9 @@ def deprojected(monkeypatch) -> list[int]:
     """
     sizes: list[int] = []
 
-    def load(path: Path, _target_points: int) -> tuple[tuple[float, float, float], ...]:
+    def load(
+        path: Path, _target_points: int, _depth_band: object = None
+    ) -> tuple[tuple[float, float, float], ...]:
         sizes.append(path.stat().st_size)
         # A cloud, not an empty tuple. A frame that deprojects to NOTHING is now
         # a tracking failure in its own right - three in a row end the capture -
@@ -1155,7 +1197,9 @@ def clouds(monkeypatch) -> list[int]:
     """
     seen: list[int] = []
 
-    def load(path: Path, _target_points: int) -> tuple[tuple[float, float, float], ...]:
+    def load(
+        path: Path, _target_points: int, _depth_band: object = None
+    ) -> tuple[tuple[float, float, float], ...]:
         index = int(path.stem.split("_")[1])
         seen.append(index)
         base = float(index)
@@ -1259,7 +1303,7 @@ def meshable_clouds(monkeypatch) -> list[int]:
     """
     read: list[int] = []
 
-    def load(_raw: bytes, _target_points: int) -> PreparedCloud:
+    def load(_raw: bytes, _target_points: int, _depth_band: object = None) -> PreparedCloud:
         index = len(read)
         read.append(index)
         return PreparedCloud.of_points(shell_cloud(spin=0.01 * index))
@@ -1714,7 +1758,7 @@ def tentative_clouds(monkeypatch) -> list[int]:
     """
     seen: list[int] = []
 
-    def load(raw: bytes, _target_points: int) -> tuple[Point, ...]:
+    def load(raw: bytes, _target_points: int, _depth_band: object = None) -> tuple[Point, ...]:
         fill = raw[0]
         seen.append(fill)
         return (

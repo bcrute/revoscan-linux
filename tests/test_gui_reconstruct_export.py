@@ -59,6 +59,7 @@ from scanner3d.preparation import (
 from scanner3d.preparation import (
     SCHEMA_VERSION as PREPARATION_SCHEMA_VERSION,
 )
+from scanner3d.project import PROJECT_NAME, adopt_capture
 from scanner3d.reconstruction_export import (
     CLOUD_NAME,
     MESH_OBJ_NAME,
@@ -222,11 +223,15 @@ def test_the_report_and_the_chooser_say_which_folder_is_read_and_which_is_writte
     window = CaptureWindow(frames=1)
     captions: list[str] = []
 
+    project = adopt_capture(frames_dir)
+
     class FakeFileDialog:
         @staticmethod
-        def getExistingDirectory(_parent: object, caption: str, _start: str) -> str:  # Qt's name
+        def getOpenFileName(  # Qt's name
+            _parent: object, caption: str, _start: str, _filter: str
+        ) -> tuple[str, str]:
             captions.append(caption)
-            return str(frames_dir)
+            return str(project), ""
 
     monkeypatch.setattr(gui, "QFileDialog", FakeFileDialog)
     gui.ScannerWindow._start_reconstruct(window)  # type: ignore[arg-type]
@@ -234,6 +239,7 @@ def test_the_report_and_the_chooser_say_which_folder_is_read_and_which_is_writte
     assert captions == [gui.RECONSTRUCT_DIALOG_CAPTION]
     assert "input" in captions[0].lower()
     assert "frames" in captions[0].lower()
+    assert PROJECT_NAME in captions[0]
     assert "INPUT" in window.report
     assert "NEW folder" in window.report
     # The running commentary is the worker's progress signal, which the real
@@ -277,8 +283,8 @@ def test_cancelling_the_chooser_writes_nothing_and_starts_nothing(
 
     class Cancelled:
         @staticmethod
-        def getExistingDirectory(*_a: object, **_k: object) -> str:  # Qt's name
-            return ""
+        def getOpenFileName(*_a: object, **_k: object) -> tuple[str, str]:  # Qt's name
+            return "", ""
 
     monkeypatch.setattr(gui, "QFileDialog", Cancelled)
     gui.ScannerWindow._start_reconstruct(window)  # type: ignore[arg-type]
@@ -457,7 +463,7 @@ def test_the_export_uses_every_frame_and_every_point_not_the_live_previews_sampl
     per_frame = 1200
     seen: list[int] = []
 
-    def load(_raw: bytes, _target: int) -> PreparedCloud:
+    def load(_raw: bytes, _target: int, _depth_band: object = None) -> PreparedCloud:
         # Frames are told apart by CALL ORDER: _prepare_frame takes bytes, not a
         # path, and the reconstruct job reads its frames in one ordered pass, so
         # the call count is the same index a filename would have given.
@@ -524,7 +530,7 @@ def test_the_exported_record_says_which_frames_kept_their_support_plane(
     before = {path.name: path.read_bytes() for path in sorted(frames_dir.glob("frame_*.raw"))}
     prepared: list[PreparedCloud] = []
 
-    def load(_raw: bytes, target: int) -> PreparedCloud:
+    def load(_raw: bytes, target: int, _depth_band: object = None) -> PreparedCloud:
         # Alternating, so the record has to distinguish the two outcomes rather
         # than report one of them for the whole sweep.
         scene = bed_scene() if len(prepared) % 2 == 0 else panel_scene()
@@ -823,7 +829,7 @@ def test_a_withdrawn_frame_is_fused_exactly_as_it_was_captured(
     raw = (frames_dir / "frame_0000.raw").read_bytes()
     prepared: list[PreparedCloud] = []
 
-    def load(_frame: bytes, target: int) -> PreparedCloud:
+    def load(_frame: bytes, target: int, _depth_band: object = None) -> PreparedCloud:
         # A frame that is almost nothing but plane: the filter runs, finds its
         # plane and withdraws, which is the case under test.
         record = prepare_points(panel_scene(), target_points=target)

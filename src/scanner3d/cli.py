@@ -11,7 +11,7 @@ import struct
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any, Final, TextIO, cast
+from typing import TYPE_CHECKING, Any, Final, TextIO, cast
 
 from scanner3d import __version__, paired_capture
 from scanner3d.cloud_export import CloudExport, export_depth_frame
@@ -19,7 +19,9 @@ from scanner3d.config import (
     CAPTURES_DIR_ENV_VAR,
     CAPTURES_KEY,
     CAPTURES_TABLE,
+    DEPTH_BAND_KEY,
     GUI_CAPTURE_COMMAND,
+    REGISTRATION_TABLE,
     CaptureDirUnavailable,
     ConfigFileUnreadable,
     ConfigWriteRefused,
@@ -27,11 +29,15 @@ from scanner3d.config import (
     captures_dir_for,
     captures_dir_source,
     clear_captures_dir,
+    clear_depth_band,
     config_path,
     configured_captures_dir,
+    configured_depth_band,
     configured_serial,
+    depth_band_source,
     serial_source,
     set_captures_dir,
+    set_depth_band,
 )
 from scanner3d.control import (
     FIRMWARE_ALGORITHM_VERSION_READ,
@@ -83,6 +89,9 @@ from scanner3d.errors import (
     TraceFormatError,
     V4l2CaptureNotAllowed,
 )
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from scanner3d.preparation import DepthBand
 from scanner3d.illumination_shutdown import (
     EMITTER_STATE_LINE,
     IlluminationShutdownOutcome,
@@ -410,7 +419,22 @@ def _cmd_config(args: argparse.Namespace) -> int:
     action: str | None = None
     file_value: str | None = None
     file_changed = False
+    band_change: str | None = None
     try:
+        if args.set_depth_band is not None:
+            near, far = args.set_depth_band
+            wrote = set_depth_band(near, far)
+            band_change = (
+                f"registration depth band {'recorded as' if wrote else 'already recorded as'} "
+                f"{near:g}-{far:g} in {config_path()}"
+            )
+        elif args.unset_depth_band:
+            band_change = (
+                "registration depth band cleared; registration is back to the sensor's own "
+                "60-300 interval"
+                if clear_depth_band()
+                else "no registration depth band was recorded, so nothing changed"
+            )
         if args.set_captures_dir is not None:
             action = "set"
             recorded = set_captures_dir(args.set_captures_dir)
@@ -432,6 +456,8 @@ def _cmd_config(args: argparse.Namespace) -> int:
         captures = configured_captures_dir()
         source = captures_dir_source()
         plan = _captures_plan(captures)
+        band = configured_depth_band()
+        band_source = depth_band_source()
     except ConfigFileUnreadable as exc:
         print(f"cannot read configuration: {exc}", file=sys.stderr)
         return EXIT_CODES[exc.status]
@@ -454,7 +480,13 @@ def _cmd_config(args: argparse.Namespace) -> int:
             "exists": captures is not None and captures.is_dir(),
         },
         "capture_output_directories": dict(plan),
+        "registration_depth_band": {
+            "value": None if band is None else [band[0], band[1]],
+            "source": band_source,
+        },
     }
+    if band_change is not None:
+        payload["depth_band_change"] = band_change
     if action is not None:
         payload["changed"] = changed
         # The same facts as the sentence above, taken apart, so a script does
@@ -470,6 +502,8 @@ def _cmd_config(args: argparse.Namespace) -> int:
         }
 
     if not args.json:
+        if band_change is not None:
+            print(band_change)
         if changed is not None:
             print(changed)
         print("scanner3d configuration")
@@ -483,6 +517,10 @@ def _cmd_config(args: argparse.Namespace) -> int:
         else:
             missing = "" if captures.is_dir() else "  (does not exist yet)"
             print(f"  captures directory: {captures} (from {source}){missing}")
+        if band is None:
+            print("  registration depth band: not set - the sensor's own 60-300 interval is used")
+        else:
+            print(f"  registration depth band: {band[0]:g}-{band[1]:g} (from {band_source})")
         print("  capture output directories:")
         width = max(len(name) for name, _ in plan)
         for name, where in plan:
@@ -2580,9 +2618,37 @@ def _cmd_sweep(args: argparse.Namespace) -> int:
         (args.output / "colour-index.json").write_text(
             json.dumps({"frames": colour_index}, indent=2) + "\n", encoding="utf-8"
         )
+    # The scan's own record, beside its frames: how they were taken, so the
+    # window and the reconstruct command can be pointed at one file.
+    from scanner3d.project import ProjectError, write_project
+
+    project_file: str | None
+    try:
+        project_file = str(
+            write_project(
+                args.output,
+                source=SWEEP_COMMAND,
+                capture={
+                    "frames_requested": args.frames,
+                    "decimate": args.decimate,
+                    "duration_s": args.duration,
+                    "frames_written": written,
+                    "delivered": result.delivered,
+                    "dropped_by_sequence": result.dropped_by_sequence,
+                    "short_frames": result.short_frames,
+                    "stopped_early": result.stopped_early,
+                    "stop_reason": result.stop_reason,
+                    "colour_frames": colour_written,
+                },
+            )
+        )
+    except (ProjectError, OSError) as exc:
+        project_file = None
+        print(f"project file not written: {exc}; the frames are still captured", file=sys.stderr)
 
     payload: dict[str, object] = {
         "command": {"name": SWEEP_COMMAND, "output": str(args.output)},
+        "project_file": project_file,
         "kept": written,
         "colour_frames": colour_written,
         "delivered": result.delivered,
@@ -2594,6 +2660,8 @@ def _cmd_sweep(args: argparse.Namespace) -> int:
     }
     if not args.json:
         print(f"kept {written} of {result.delivered} delivered frames to {args.output}")
+        if project_file is not None:
+            print(f"  project file: {project_file}")
         print(f"  dropped_by_sequence {result.dropped_by_sequence}  short {result.short_frames}")
         print(f"  stopped_early {result.stopped_early}: {result.stop_reason}")
         if result.dropped_by_sequence:
@@ -2605,19 +2673,57 @@ def _cmd_sweep(args: argparse.Namespace) -> int:
     return 0
 
 
+def resolve_depth_band(explicit: Sequence[float] | None) -> tuple[DepthBand, str]:
+    """The depth band a registration clips to, and where it came from.
+
+    The command line wins over the config file, which wins over the sensor's
+    own interval. The source travels with the value because a band recorded
+    in the file for one setup and forgotten looks, a month later, exactly
+    like a scanner that has moved: the clip silently keeps the wrong part of
+    the scene and the registration reports plausible numbers about it.
+
+    Raises :class:`ConfigFileUnreadable` for a stated band the file cannot
+    honour and :class:`~scanner3d.preparation.DepthBandUnusable` for one the
+    clip cannot apply.
+    """
+    from scanner3d.preparation import DepthBand, ensure_depth_band
+
+    if explicit is not None:
+        near, far = explicit
+        return ensure_depth_band(DepthBand(near=float(near), far=float(far))), "--depth-band"
+    stated = configured_depth_band()
+    if stated is not None:
+        return ensure_depth_band(DepthBand(near=stated[0], far=stated[1])), (
+            depth_band_source() or str(config_path())
+        )
+    return DepthBand.default(), "default"
+
+
 def _cmd_reconstruct(args: argparse.Namespace) -> int:
     """Register a captured sweep offline and report what the evidence says."""
     from scanner3d.capture_sequence import CaptureSequenceUnreadable, read_capture_sequence
+    from scanner3d.coherence import check_coherence
     from scanner3d.pipeline import reconstruct_sweep
     from scanner3d.preparation import (
         PREPARATION_ORDER,
         RECONSTRUCT_POINTS,
+        DepthBandUnusable,
         PreparationSummary,
         PreparedCloud,
         filter_statement,
         prepare_frame,
     )
+    from scanner3d.project import ProjectError, resolve_capture_input
     from scanner3d.reconstruction_readiness import ReconstructionRefused, evaluate_readiness
+    from scanner3d.simulate import FACTORY_INTRINSICS
+
+    # A capture folder, its project file, or any frame inside it: the frames
+    # directory is what the reader below is given either way.
+    try:
+        frames_dir, project_path = resolve_capture_input(args.frames)
+    except ProjectError as exc:
+        print(f"{args.frames} cannot be reconstructed: {exc}", file=sys.stderr)
+        return EXIT_CODES[exc.status]
 
     # One reader, shared with the window. A capture that was repositioned
     # mid-sweep keeps its later frames in the boundary directories and carries a
@@ -2625,27 +2731,35 @@ def _cmd_reconstruct(args: argparse.Namespace) -> int:
     # register only the first half of such a capture, and striding it uniformly
     # would silently drop a boundary and align across the reposition instead.
     try:
-        sequence = read_capture_sequence(args.frames).strided(max(1, args.stride))
+        sequence = read_capture_sequence(frames_dir).strided(max(1, args.stride))
     except CaptureSequenceUnreadable as exc:
-        print(f"{args.frames} cannot be read as a capture: {exc}", file=sys.stderr)
+        print(f"{frames_dir} cannot be read as a capture: {exc}", file=sys.stderr)
         return EXIT_CODES[getattr(exc, "status", DoctorStatus.INTERNAL_ERROR)]
     paths = sequence.paths
     boundaries = sequence.boundaries()
     if len(paths) < 3:
         print(
-            f"{args.frames} holds {len(paths)} usable frames at stride {args.stride}; "
+            f"{frames_dir} holds {len(paths)} usable frames at stride {args.stride}; "
             "a sweep needs at least three",
             file=sys.stderr,
         )
         return EXIT_CODES[DoctorStatus.INTERNAL_ERROR]
 
+    try:
+        band, band_source = resolve_depth_band(args.depth_band)
+    except (ConfigFileUnreadable, DepthBandUnusable) as exc:
+        print(f"reconstruction refused: {exc}", file=sys.stderr)
+        return EXIT_CODES[exc.status]
+
     # The same function the window calls, at the same target, so the same
     # capture reconstructs into the same clouds from either entry point. The
     # order the steps run in, and why, is stated once in
-    # scanner3d.preparation rather than restated here.
+    # scanner3d.preparation rather than restated here. The raw bytes are kept
+    # because the coherence check below judges the images themselves.
+    raws = [path.read_bytes() for path in paths]
     prepared: list[PreparedCloud] = []
-    for path in paths:
-        prepared.append(prepare_frame(path.read_bytes(), target_points=RECONSTRUCT_POINTS))
+    for raw in raws:
+        prepared.append(prepare_frame(raw, target_points=RECONSTRUCT_POINTS, depth_band=band))
     clouds: list[tuple[tuple[float, float, float], ...]] = [frame.points for frame in prepared]
     summary = PreparationSummary.of(prepared)
 
@@ -2655,6 +2769,7 @@ def _cmd_reconstruct(args: argparse.Namespace) -> int:
             f"preparation: {' -> '.join(PREPARATION_ORDER)}",
             flush=True,
         )
+        print(f"registration depth band: {band.describe()} (from {band_source})", flush=True)
         print(
             f"{summary.speckle_removed_points} isolated points rejected across the sweep by "
             "scanner3d.denoise.strip_speckle; some of them were sparsely sampled surface and "
@@ -2688,6 +2803,21 @@ def _cmd_reconstruct(args: argparse.Namespace) -> int:
         print(f"reconstruction refused: {exc}", file=sys.stderr)
         return EXIT_CODES[getattr(exc, "status", DoctorStatus.INTERNAL_ERROR)]
 
+    # Judged by the images themselves, before the readiness gates and whether
+    # or not they refuse. Closure is scored on the constraints the optimiser
+    # was given, so a trajectory bent between them reads as healthy there;
+    # frames one turntable revolution apart have the same image, and their
+    # poses either agree or they do not. See scanner3d.coherence.
+    coherence = check_coherence(
+        raws,
+        result.poses,
+        intrinsics=FACTORY_INTRINSICS,
+        depth_scale=DEPTH_SCALE_METRES,
+        depth_band=band,
+    )
+    if not args.json:
+        print(f"coherence: {coherence.statement()}", flush=True)
+
     # The same gates, the same policy and the same words the window and the
     # export boundary use. This command writes no cloud and no mesh, so nothing
     # here can leave a plausible artifact behind - but it does print numbers an
@@ -2697,15 +2827,18 @@ def _cmd_reconstruct(args: argparse.Namespace) -> int:
     # Ahead of --poses-out deliberately: a refused reconstruction produces no
     # file of any kind, so there is nothing on disk afterwards that a later
     # reader could mistake for an accepted trajectory.
-    readiness = evaluate_readiness(args.frames, clouds, result.poses)
+    readiness = evaluate_readiness(frames_dir, clouds, result.poses)
     if not readiness.ready:
         print(readiness.refusal_text(), file=sys.stderr)
         _emit(
             {
                 "readiness": readiness.as_dict(),
+                "coherence": coherence.as_dict(),
                 "command": {
                     "name": RECONSTRUCT_COMMAND,
-                    "frames_directory": str(args.frames),
+                    "frames_directory": str(frames_dir),
+                    "project_file": None if project_path is None else str(project_path),
+                    "depth_band": {**band.as_dict(), "source": band_source},
                     "exported": False,
                     "refused": True,
                 },
@@ -2726,12 +2859,15 @@ def _cmd_reconstruct(args: argparse.Namespace) -> int:
         # evidence that these numbers describe a scan and not forty views of
         # one place, and it states the policy it was judged under.
         "readiness": readiness.as_dict(),
+        "coherence": coherence.as_dict(),
         "command": {
             "name": RECONSTRUCT_COMMAND,
-            "frames_directory": str(args.frames),
+            "frames_directory": str(frames_dir),
+            "project_file": None if project_path is None else str(project_path),
             "stride": args.stride,
             "backend": args.backend,
             "workers": args.workers,
+            "depth_band": {**band.as_dict(), "source": band_source},
             "per_frame_filter": {
                 "module": "scanner3d.denoise",
                 "function": "strip_speckle",
@@ -2904,6 +3040,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--unset-captures-dir",
         action="store_true",
         help="remove the recorded captures directory; commands return to their own defaults",
+    )
+    captures_setting.add_argument(
+        "--set-depth-band",
+        nargs=2,
+        type=float,
+        metavar=("NEAR", "FAR"),
+        help=(
+            f"record the registration depth band, written as {DEPTH_BAND_KEY} under "
+            f"[{REGISTRATION_TABLE}] in {config_path()}: the interval the SUBJECT occupies, "
+            "in the deprojection's scale (millimetres on this unit). reconstruct, "
+            "tools/target_gate.py and the desktop application all read it"
+        ),
+    )
+    captures_setting.add_argument(
+        "--unset-depth-band",
+        action="store_true",
+        help="remove the recorded depth band; registration returns to the sensor's own 60-300",
     )
     configure.add_argument("--json", action="store_true", help="emit JSON instead of text")
     configure.add_argument("--json-out", type=Path, help="also write the JSON result to this path")
@@ -3659,7 +3812,12 @@ def build_parser() -> argparse.ArgumentParser:
             "device node."
         ),
     )
-    recon.add_argument("frames", type=Path, help="directory of raw depth frames")
+    recon.add_argument(
+        "frames",
+        type=Path,
+        help="the capture: its folder of raw depth frames, its scan.scanner3d project file, "
+        "or any frame inside it",
+    )
     recon.add_argument(
         "--stride",
         type=int,
@@ -3687,6 +3845,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-robust",
         action="store_true",
         help="do not reject closure constraints that disagree with the consensus",
+    )
+    recon.add_argument(
+        "--depth-band",
+        nargs=2,
+        type=float,
+        metavar=("NEAR", "FAR"),
+        help="keep only depths inside this interval for registration, in the deprojection's "
+        "scale (millimetres on this unit). Overrides depth_band under [registration] in the "
+        "config file; the default is the sensor's own 60-300. State the interval the SUBJECT "
+        "occupies: anything static in the room inside it registers as a second rigid body "
+        "and bends the trajectory without any closure score noticing (docs/target-gate.md)",
     )
     recon.add_argument("--poses-out", type=Path, help="write the registered poses here as JSON")
     recon.add_argument("--json", action="store_true", help="emit JSON instead of text")

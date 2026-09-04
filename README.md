@@ -12,6 +12,7 @@ scanner3d-gui                                    # desktop application
 scanner3d config --set-captures-dir ~/scans      # where captures go, once
 scanner3d sweep                                  # capture into ~/scans/sweep/<date>-<time>
 scanner3d reconstruct FRAMES_DIR --backend scipy # register and score it
+scanner3d reconstruct FRAMES_DIR --depth-band 130 275   # clip to the subject; see Configuration
 ```
 
 The window shows three things at once: the colour camera for positioning, the depth camera for
@@ -449,6 +450,47 @@ spaces are still just trimmed off, and internal spaces are kept. Cancelling the
 name prompt cancels the scan before the preview stops or the scanner is touched. With no
 captures folder recorded, Start capture asks for one — and what you pick is the *root*, with the
 per-scan folder allocated under `scan/` inside it just as if it had been recorded.
+
+The registration depth band is read from `--depth-band NEAR FAR` on `reconstruct` and
+`tools/target_gate.py`, then the config file (`depth_band` under `[registration]`):
+
+```toml
+[registration]
+depth_band = [130, 275]   # the interval the SUBJECT occupies, in the deprojection's scale
+```
+
+```bash
+scanner3d config --set-depth-band 130 275   # recorded; reconstruct, the gate tool and the app use it
+scanner3d config --unset-depth-band         # back to the sensor's own 60-300
+```
+
+In the desktop application the same interval is the **keep depths … to … mm** pair in the
+technical bar: it applies to the live preview, to tracking during a capture and to Reconstruct
+as soon as it is typed, and **Remember** records it in the config file for the command line and
+the next session.
+
+With nothing stated, preparation keeps the sensor's own 60-300 interval, as it always did.
+State the band the subject occupies rather than the sensor's range: anything static in the room
+inside the clip - a bottle behind the turntable, the wall - registers as a second rigid body that
+does not turn with the subject, and point-to-plane ICP fits a compromise between them. Measured
+on 2026-09-03, that compromise registered smoothly, closed its loops at 1.3 degrees and passed
+the target gate while frames one revolution apart disagreed by up to 24 cm; the same frames
+clipped to 130-275 agreed to a fraction of a millimetre. `scanner3d config` prints the band and
+where it came from, every reconstruction record carries the band it was prepared with, and
+`reconstruct` reports a **coherence** verdict read from the images themselves (frames one
+turntable revolution apart have the same image, so their poses must agree). See
+[docs/target-gate.md](docs/target-gate.md).
+
+### The scan's project file
+
+Every capture writes `scan.scanner3d` beside its frames: a small JSON record of how the frames
+were taken (the depth band, the frame spacing, how many frames, whether it stopped early), and,
+after each Reconstruct, which output folder that run wrote and where its record is. **Reconstruct +
+export** asks for that one file rather than for a folder. An older capture that has none can be
+picked by any of its frames, and the file is written beside them first; `scanner3d reconstruct`
+accepts the folder, the file, or a frame inside it the same way. The file describes and never
+contains: frames and outputs stay where they are, named by relative paths, so a scan folder can be
+moved whole.
 
 ## Requirements
 

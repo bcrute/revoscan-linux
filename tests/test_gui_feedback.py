@@ -234,7 +234,9 @@ def test_the_heartbeat_is_never_behind_the_frames_on_disk(
     models(set())
     seen: list[tuple[int, int]] = []
 
-    def load(path: Path, _target_points: int) -> tuple[tuple[float, float, float], ...]:
+    def load(
+        path: Path, _target_points: int, _depth_band: object = None
+    ) -> tuple[tuple[float, float, float], ...]:
         # The GUI gets a slice of time, exactly as it would between frames.
         window.worker.drain(window.worker.saved)
         seen.append((len(window.frames_on_disk()), window._saved_frames))
@@ -269,7 +271,9 @@ def test_the_panel_describes_the_model_it_is_showing_not_the_frame_that_just_lan
     #: The panel, read at the instant the twelve-frame-old model is drawn.
     drawn: list[str] = []
 
-    def load(path: Path, _target_points: int) -> tuple[tuple[float, float, float], ...]:
+    def load(
+        path: Path, _target_points: int, _depth_band: object = None
+    ) -> tuple[tuple[float, float, float], ...]:
         index = int(path.stem.split("_")[1])
         # The heartbeat is cheap and always gets through; the model is the
         # expensive one and is not drawn until the last frame of the sweep.
@@ -453,7 +457,9 @@ def test_produced_applied_and_superseded_are_three_separable_log_lines(
     alignments(set())
     models(set())
 
-    def load(path: Path, _target_points: int) -> tuple[tuple[float, float, float], ...]:
+    def load(
+        path: Path, _target_points: int, _depth_band: object = None
+    ) -> tuple[tuple[float, float, float], ...]:
         index = int(path.stem.split("_")[1])
         window.worker.drain(window.worker.saved)
         # Drawn once, early. Every later snapshot is superseded by the next.

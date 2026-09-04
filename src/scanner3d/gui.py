@@ -148,6 +148,7 @@ from PySide6.QtWidgets import (
 from scanner3d import preparation
 from scanner3d.cadence import REFUSAL_REASON, CadenceController
 from scanner3d.capture_sequence import (
+    FRAME_GLOB,
     TRACKING_LOSS_RECORD_NAME,
     TRACKING_LOSS_STREAK,
     CaptureSequenceUnreadable,
@@ -162,9 +163,12 @@ from scanner3d.config import (
     ConfigWriteRefused,
     allocate_capture_dir,
     captures_dir_source,
+    config_path,
     configured_captures_dir,
+    configured_depth_band,
     resolve_serial,
     set_captures_dir,
+    set_depth_band,
     validate_capture_name,
 )
 from scanner3d.coverage import coverage_map
@@ -182,10 +186,13 @@ from scanner3d.logs import get_logger, timed
 from scanner3d.mesh import Mesh, SurfaceAccumulator
 from scanner3d.pipeline import travel_verdict
 from scanner3d.preparation import (
+    DepthBand,
+    DepthBandUnusable,
     FusionFrame,
     FusionMaskSummary,
     PreparationSummary,
     PreparedCloud,
+    ensure_depth_band,
     filter_statement,
     mask_support_band,
 )
@@ -201,7 +208,18 @@ from scanner3d.preview_provenance import (
     surface_control,
     surface_summary,
 )
+from scanner3d.project import (
+    PROJECT_NAME,
+    PROJECT_SUFFIX,
+    ProjectError,
+    adopt_capture,
+    record_reconstruction,
+    resolve_capture_input,
+    update_capture,
+    write_project,
+)
 from scanner3d.reconstruction_export import (
+    RECORD_NAME,
     ReconstructionExport,
     export_reconstruction,
     upright_pose,
@@ -253,6 +271,27 @@ FRAME_HEIGHT: Final = 400
 #: kept frames on a turntable turning once in two minutes, the density measured
 #: to register well. Large steps make alignment fail silently.
 DEFAULT_DECIMATE: Final = 3
+
+#: The depth controls' range, in the deprojection's scale. Wide enough for any
+#: standoff this scanner can focus at; the sensor's own interval sits inside.
+DEPTH_BAND_MIN: Final = 20
+DEPTH_BAND_MAX: Final = 1000
+
+DEPTH_BAND_TOOLTIP: Final = (
+    "Keep only depths inside this interval when registering - for the live\n"
+    "preview, for tracking during a capture, and for Reconstruct. State the\n"
+    "interval the SUBJECT occupies, not the sensor's range.\n\n"
+    "Anything static in the room inside the interval - a bottle behind the\n"
+    "turntable, the wall - registers as a second rigid body that does not\n"
+    "turn with the subject, and the trajectory bends to fit both without any\n"
+    "closure score noticing. Measured with the subject 215 mm out, 130 to 275\n"
+    "made every frame agree; the sensor's own 60 to 300 did not."
+)
+
+REMEMBER_BAND_TOOLTIP: Final = (
+    "Record the interval to the left in the config file, so the command line\n"
+    "and the next session use it too. Until then it applies to this window only."
+)
 
 #: Delivered-frame budget for one capture: a little over four minutes at the
 #: measured 4.6 fps, enough for two full revolutions.
@@ -363,17 +402,26 @@ PREVIEW_POINTS: Final = 900
 RECONSTRUCT_TITLE: Final = "Reconstruct + export..."
 RECONSTRUCT_TOOLTIP: Final = (
     "Turn a capture you have already taken into files you can open elsewhere.\n\n"
-    "You are asked to pick the folder of CAPTURED FRAMES to read - the input.\n"
-    "Every frame in it is registered, and then a NEW folder is created inside\n"
-    "it holding the registered point cloud (PLY), the surface as a mesh (PLY\n"
-    "and OBJ), and a record naming all three with their checksums and what\n"
-    "they do not establish.\n\n"
-    "An earlier reconstruction of the same capture is never overwritten: each\n"
-    "run makes its own folder. Cancelling the chooser writes nothing."
+    f"You are asked to pick the scan's project file, {PROJECT_NAME}, which sits\n"
+    "beside the CAPTURED FRAMES to read - the input. Every frame is registered,\n"
+    "and then a NEW folder is created inside the capture holding the registered\n"
+    "point cloud (PLY), the surface as a mesh (PLY and OBJ), and a record naming\n"
+    "all three with their checksums and what they do not establish; the project\n"
+    "file then lists that folder too.\n\n"
+    "An older capture that has no project file yet: pick any of its frames and\n"
+    "one is written beside them first. An earlier reconstruction of the same\n"
+    "capture is never overwritten: each run makes its own folder.\n"
+    "Cancelling the chooser writes nothing."
 )
 
 #: The folder chooser's own caption, for the same reason and asserted with it.
-RECONSTRUCT_DIALOG_CAPTION: Final = "Choose a capture folder of frames to reconstruct (input)"
+RECONSTRUCT_DIALOG_CAPTION: Final = (
+    f"Choose the scan's project file ({PROJECT_NAME}) - the captured frames to reconstruct (input)"
+)
+
+#: The chooser's filter: project files first, then anything, so an older
+#: capture can be picked by one of its frames.
+RECONSTRUCT_DIALOG_FILTER: Final = f"Scan project (*{PROJECT_SUFFIX});;All files (*)"
 
 #: Points kept per frame when Reconstruct reads a capture back off disk.
 #:
@@ -1115,7 +1163,9 @@ def _depth_unit() -> DepthUnitAssumption:
     return preparation_unit()
 
 
-def _prepare_frame(raw: bytes, target_points: int) -> PreparedCloud:
+def _prepare_frame(
+    raw: bytes, target_points: int, depth_band: DepthBand | None = None
+) -> PreparedCloud:
     """One raw depth frame through the shared preparation path, with its evidence.
 
     This window and ``scanner3d reconstruct`` each used to write the steps out
@@ -1133,10 +1183,12 @@ def _prepare_frame(raw: bytes, target_points: int) -> PreparedCloud:
     """
     from scanner3d.preparation import prepare_frame
 
-    return prepare_frame(raw, target_points=target_points)
+    return prepare_frame(raw, target_points=target_points, depth_band=depth_band)
 
 
-def _cloud_from_bytes(raw: bytes, target_points: int) -> tuple[tuple[float, float, float], ...]:
+def _cloud_from_bytes(
+    raw: bytes, target_points: int, depth_band: DepthBand | None = None
+) -> tuple[tuple[float, float, float], ...]:
     """The prepared cloud alone, for the capture paths that need no record.
 
     Split out from :func:`_load_cloud` for the frames a resumed capture holds
@@ -1147,11 +1199,13 @@ def _cloud_from_bytes(raw: bytes, target_points: int) -> tuple[tuple[float, floa
     one function - and the same arithmetic again as the reconstruction path,
     which differs only in keeping the record :func:`_prepare_frame` returns.
     """
-    return _prepare_frame(raw, target_points).points
+    return _prepare_frame(raw, target_points, depth_band).points
 
 
-def _load_cloud(path: Path, target_points: int) -> tuple[tuple[float, float, float], ...]:
-    return _cloud_from_bytes(path.read_bytes(), target_points)
+def _load_cloud(
+    path: Path, target_points: int, depth_band: DepthBand | None = None
+) -> tuple[tuple[float, float, float], ...]:
+    return _cloud_from_bytes(path.read_bytes(), target_points, depth_band)
 
 
 def _coloured_cloud(
@@ -1847,6 +1901,22 @@ class _FrameCounts:
         return self.frames + self.excluded
 
 
+def _raw_frames_on_disk(directory: Path) -> int:
+    """Every raw frame under a capture folder, with no reader in between.
+
+    Recursive, because a capture repositioned mid-sweep keeps its later frames
+    in each boundary's own directory; and counted whether or not the reader
+    would hand them over, because this is the number the live counter showed
+    and the frames written after a loss are still frames on disk.
+    """
+    return sum(1 for _ in directory.rglob(FRAME_GLOB))
+
+
+def _has_tracking_loss_record(directory: Path | None) -> bool:
+    """Whether the capture folder itself records that tracking was lost."""
+    return directory is not None and (directory / TRACKING_LOSS_RECORD_NAME).is_file()
+
+
 def _frame_counts(directory: Path | None) -> _FrameCounts:
     """What a finished capture left, counted authoritatively.
 
@@ -2006,6 +2076,9 @@ class ScannerWindow(QMainWindow):
         self._previous_stream: Worker | None = None
         self._resume_preview_after = False
         self._capture_dir: Path | None = None
+        #: The project file of the running capture, or of the capture last
+        #: reconstructed; what the reconstruct chooser opens on.
+        self._project_path: Path | None = None
         self._firmware = "reading..."
         # The heartbeat's counters. All live on the GUI thread and are written
         # only by its slots; the worker sends numbers, not state.
@@ -2281,7 +2354,11 @@ class ScannerWindow(QMainWindow):
             "The point is spacing, not quality: frames arrive faster than the object\n"
             "turns, and near-identical frames add capture time without adding\n"
             "information. At the measured cadence, 3 gives roughly two degrees\n"
-            "between kept frames on a turntable turning once in two minutes."
+            "between kept frames on a turntable turning once in two minutes.\n\n"
+            "For a HAND-CARRIED sweep set this to 1. The scanner delivers about\n"
+            "4.5 depth frames a second, so keeping one in three triples the motion\n"
+            "between the frames the tracker sees, and a hand moves the whole\n"
+            "surface where a turntable moves it only near its rim."
         )
         ScannerWindow._register_technical_widget(self, bar.addWidget(self._decimate_spin))
 
@@ -2305,6 +2382,27 @@ class ScannerWindow(QMainWindow):
             "sweep so slow that each alignment measures noise rather than motion."
         )
         ScannerWindow._register_technical_widget(self, bar.addWidget(self._hold_cadence))
+        ScannerWindow._register_technical_widget(self, bar.addSeparator())
+
+        depth_label = QLabel(" keep depths ")
+        ScannerWindow._register_technical_widget(self, bar.addWidget(depth_label))
+        self._depth_near = QSpinBox()
+        self._depth_near.setRange(DEPTH_BAND_MIN, DEPTH_BAND_MAX)
+        self._depth_near.setSuffix(" mm")
+        self._depth_near.setToolTip(DEPTH_BAND_TOOLTIP)
+        ScannerWindow._register_technical_widget(self, bar.addWidget(self._depth_near))
+        to_label = QLabel(" to ")
+        ScannerWindow._register_technical_widget(self, bar.addWidget(to_label))
+        self._depth_far = QSpinBox()
+        self._depth_far.setRange(DEPTH_BAND_MIN, DEPTH_BAND_MAX)
+        self._depth_far.setSuffix(" mm")
+        self._depth_far.setToolTip(DEPTH_BAND_TOOLTIP)
+        ScannerWindow._register_technical_widget(self, bar.addWidget(self._depth_far))
+        self._remember_band = QPushButton("Remember")
+        self._remember_band.setToolTip(REMEMBER_BAND_TOOLTIP)
+        self._remember_band.clicked.connect(self._remember_depth_band)
+        ScannerWindow._register_technical_widget(self, bar.addWidget(self._remember_band))
+        self._load_depth_band()
         ScannerWindow._register_technical_widget(self, bar.addSeparator())
 
         compute_label = QLabel(" compute ")
@@ -3178,6 +3276,7 @@ class ScannerWindow(QMainWindow):
         self._finish_progress()
         if self._tracking_loss is not None:
             LOG.info("capture stopped by the operator after tracking was lost")
+            self._finish_project(frames=None, stopped=True, tracking_lost=True)
             self._log(_tracking_loss_epilogue(self._capture_dir, "Stopped."))
             self._replace_scan_statuses(
                 ScanStatus(
@@ -3192,6 +3291,7 @@ class ScannerWindow(QMainWindow):
             )
         else:
             counts = _frame_counts(self._capture_dir)
+            self._finish_project(frames=counts.frames, stopped=True)
             LOG.info(
                 "capture stopped by the operator with %d reconstructable frames written and "
                 "%d excluded frame(s) kept as evidence",
@@ -3861,6 +3961,96 @@ class ScannerWindow(QMainWindow):
         except ConfigFileUnreadable:
             return None, None
 
+    def _write_project(self, target: Path, capture: dict[str, object]) -> Path | None:
+        """Write the capture's project file beside its frames, saying how they are taken.
+
+        A failure is logged and the capture goes on: the frames are the
+        evidence and a folder without a project file can still be adopted
+        later, whereas a capture refused for a metadata file it could not
+        write is a scan nobody asked to lose.
+        """
+        try:
+            path = write_project(target, source="desktop-application", capture=capture)
+        except (ProjectError, OSError) as exc:
+            LOG.error("project file not written: %s", exc)
+            self._log(f"Project file NOT written ({exc}); the frames are still captured.")
+            return None
+        self._log(f"Project file: {path.name} (pick this file to reconstruct the scan).")
+        return path
+
+    def _finish_project(
+        self, *, frames: int | None, stopped: bool, tracking_lost: bool = False
+    ) -> None:
+        """Record how the capture ended in its project file, if it has one.
+
+        Two of the facts come from the capture folder rather than from the
+        window, because the two have disagreed. Capture 20260904-164506 ended
+        with a ``tracking-loss.json`` on disk and a project file saying
+        ``tracking_lost: false`` and ``frames_written: 0``: Stop was pressed
+        before the loss had reached the window, and the reader refused the
+        folder, so the authoritative count came back as nothing. The folder is
+        the evidence and the record has to agree with it. So the loss is also
+        read from the folder, ``frames_written`` counts the raw frames on disk
+        (the number the operator watched climb), and the reader's own count -
+        the frames that form one reconstructable sequence - is recorded
+        separately as ``reconstructable_frames`` when there is one.
+        """
+        if self._project_path is None:
+            return
+        folder = self._capture_dir
+        lost = tracking_lost or _has_tracking_loss_record(folder)
+        fields: dict[str, object] = {"stopped_early": stopped, "tracking_lost": lost}
+        if folder is not None:
+            fields["frames_written"] = _raw_frames_on_disk(folder)
+        if frames is not None:
+            fields["reconstructable_frames"] = frames
+        try:
+            update_capture(self._project_path, **fields)
+        except (ProjectError, OSError) as exc:
+            LOG.error("project file not updated: %s", exc)
+
+    def _load_depth_band(self) -> None:
+        """Seed the depth controls from the config file, or the sensor's own interval.
+
+        A file that cannot be read is logged and the controls fall back to the
+        default: the window must still open, and the tooltip on the controls
+        says what they mean either way.
+        """
+        try:
+            stated = configured_depth_band()
+        except ConfigFileUnreadable as exc:
+            LOG.error("registration depth band not read: %s", exc)
+            stated = None
+        band = DepthBand.default() if stated is None else DepthBand(near=stated[0], far=stated[1])
+        self._depth_near.setValue(round(band.near))
+        self._depth_far.setValue(round(band.far))
+
+    def _depth_band(self) -> DepthBand:
+        """The interval every frame of the next capture or reconstruction is clipped to.
+
+        Raises :class:`~scanner3d.preparation.DepthBandUnusable` when the two
+        controls are not in order, because two spin boxes cannot express an
+        interval's order themselves and guessing which end the operator meant
+        would clip every frame to nothing.
+        """
+        return ensure_depth_band(
+            DepthBand(near=float(self._depth_near.value()), far=float(self._depth_far.value()))
+        )
+
+    def _remember_depth_band(self) -> None:
+        """Record the depth controls in the config file, so every entry point shares them."""
+        try:
+            band = self._depth_band()
+            changed = set_depth_band(band.near, band.far)
+        except (DepthBandUnusable, ConfigFileUnreadable, ConfigWriteRefused) as exc:
+            LOG.error("depth band not recorded: %s", exc)
+            QMessageBox.warning(self, "3D Scanner", str(exc))
+            return
+        recorded = "recorded in" if changed else "already recorded in"
+        message = f"depth band {band.describe()} mm {recorded} {config_path()}"
+        self._log(message)
+        self.statusBar().showMessage(message, 8000)
+
     def _refresh_captures_action(self) -> None:
         """Keep the toolbar honest about where the next capture will land."""
         try:
@@ -3992,6 +4182,13 @@ class ScannerWindow(QMainWindow):
 
     # -- capture -----------------------------------------------------------
     def _start_capture(self) -> None:
+        # Before a capture directory exists: a band the clip cannot apply is
+        # the operator's to fix, and an empty dated folder is not a capture.
+        try:
+            band = self._depth_band()
+        except DepthBandUnusable as exc:
+            QMessageBox.warning(self, "3D Scanner", str(exc))
+            return
         target = self._capture_target()
         if target is None:
             return
@@ -4054,6 +4251,17 @@ class ScannerWindow(QMainWindow):
         backend = self._backend.currentText()
         self._report.clear()
         self._log(f"Capturing to {target}")
+        self._project_path = self._write_project(
+            target,
+            {
+                "frames_requested": frames,
+                "decimate": decimate,
+                "hold_cadence": hold_cadence,
+                "depth_band": band.as_dict(),
+                "backend": backend,
+            },
+        )
+        self._log(f"Registering depths from {band.describe()} mm only.")
         self._log("Move all the way around, and come BACK to where you started.")
         self._busy(True)
         # Read here rather than on the worker, once, and used for both things
@@ -5430,7 +5638,7 @@ class ScannerWindow(QMainWindow):
                     abandon_recovery(expired)
                     return
                 try:
-                    cloud = _cloud_from_bytes(buf, PREVIEW_POINTS)
+                    cloud = _cloud_from_bytes(buf, PREVIEW_POINTS, band)
                 except Exception as exc:
                     note_failure("relocalization", exc)
                     return
@@ -5652,7 +5860,7 @@ class ScannerWindow(QMainWindow):
                 #
                 # Cancellation is checked at each step and is never one of them.
                 try:
-                    cloud = _load_cloud(path, PREVIEW_POINTS)
+                    cloud = _load_cloud(path, PREVIEW_POINTS, band)
                 except Exception as exc:
                     note_failure("alignment", exc)
                     note_tracking_failure(
@@ -5907,6 +6115,7 @@ class ScannerWindow(QMainWindow):
         # "press Reconstruct" would be the same silent lie in the last sentence
         # of the run, so the loss owns this ending too.
         if self._tracking_loss is not None:
+            self._finish_project(frames=None, stopped=False, tracking_lost=True)
             self._log(_tracking_loss_epilogue(self._capture_dir, "\nThe capture ended."))
             self._replace_scan_statuses(
                 ScanStatus(
@@ -5921,6 +6130,7 @@ class ScannerWindow(QMainWindow):
             )
             return
         counts = _frame_counts(self._capture_dir)
+        self._finish_project(frames=counts.frames, stopped=False)
         self._log(f"\nCaptured {counts.frames} frames to {self._capture_dir}")
         excluded = _excluded_note(counts)
         if excluded:
@@ -5966,15 +6176,31 @@ class ScannerWindow(QMainWindow):
             configured = configured_captures_dir()
         except ConfigFileUnreadable:
             configured = None
-        start = str(self._capture_dir or configured or "")
-        directory = QFileDialog.getExistingDirectory(self, RECONSTRUCT_DIALOG_CAPTION, start)
-        if not directory:
+        start = str(self._project_path or self._capture_dir or configured or "")
+        chosen, _selected_filter = QFileDialog.getOpenFileName(
+            self, RECONSTRUCT_DIALOG_CAPTION, start, RECONSTRUCT_DIALOG_FILTER
+        )
+        if not chosen:
             # Nothing has been created, opened or written at this point, and
             # nothing will be: the output folder is made by the export itself.
             return
-        frames_dir = Path(directory)
+        try:
+            frames_dir, project_path = resolve_capture_input(Path(chosen))
+            adopted = project_path is None
+            if project_path is None:
+                project_path = adopt_capture(frames_dir)
+        except ProjectError as exc:
+            LOG.error("reconstruction input refused: %s", exc)
+            QMessageBox.warning(self, "3D Scanner", str(exc))
+            return
+        self._project_path = project_path
         backend = self._backend.currentText()
         workers = self._workers.value()
+        try:
+            band = self._depth_band()
+        except DepthBandUnusable as exc:
+            QMessageBox.warning(self, "3D Scanner", str(exc))
+            return
         self._report.clear()
         self._replace_scan_statuses(
             ScanStatus(
@@ -5988,15 +6214,22 @@ class ScannerWindow(QMainWindow):
             )
         )
         self._log(f"Reading the captured frames in {frames_dir}")
+        if adopted:
+            self._log(
+                f"That capture had no project file; {project_path.name} was written beside its "
+                "frames so it can be picked directly next time."
+            )
         self._log(
             "They are the INPUT. Registering them, then writing a registered point cloud, a "
             "triangle mesh as PLY and OBJ, and a record of all three into a NEW folder inside "
             "that one. Nothing already there is changed.\n"
         )
+        self._log(f"Registering depths from {band.describe()} mm only.")
         self._busy(True)
 
         def job(worker: Worker) -> object:
             from scanner3d.cli import DEPTH_SCALE_METRES
+            from scanner3d.coherence import check_coherence
             from scanner3d.pipeline import reconstruct_sweep
             from scanner3d.simulate import FACTORY_INTRINSICS
 
@@ -6024,7 +6257,7 @@ class ScannerWindow(QMainWindow):
             for index, path in enumerate(paths):
                 worker.check()
                 raw = path.read_bytes()
-                frame = _prepare_frame(raw, RECONSTRUCT_POINTS)
+                frame = _prepare_frame(raw, RECONSTRUCT_POINTS, band)
                 prepared.append(frame)
                 clouds.append(frame.points)
                 # The SAME plane, applied a second time to the frame that will
@@ -6068,6 +6301,18 @@ class ScannerWindow(QMainWindow):
                 bridges=boundaries,
                 on_progress=report_progress,
             )
+            # Judged by the images themselves, and said before the export:
+            # closure is scored on the constraints the optimiser was given, so
+            # a trajectory bent between them reads as healthy there. See
+            # scanner3d.coherence.
+            coherence = check_coherence(
+                [frame.raw for frame in fusion_frames],
+                list(result.poses),
+                intrinsics=FACTORY_INTRINSICS,
+                depth_scale=DEPTH_SCALE_METRES,
+                depth_band=band,
+            )
+            report_progress(f"coherence: {coherence.statement()}")
             report_progress(
                 "exporting the registered cloud from the filtered points, and a mesh fused "
                 f"from all {len(raw_frames)} full-resolution frames, "
@@ -6094,6 +6339,7 @@ class ScannerWindow(QMainWindow):
                     preparation=summary.as_dict(fusion),
                     voxel_budget=RECONSTRUCT_VOXEL_BUDGET,
                     on_progress=report_progress,
+                    depth_band=band,
                 )
             except ReconstructionRefused as refusal:
                 # Every failed gate, in the report, in the same words the
@@ -6110,6 +6356,25 @@ class ScannerWindow(QMainWindow):
                 for line in refusal.readiness.refusal_text().splitlines():
                     worker.progress.emit(line)
                 raise
+            # Into the project file, so the scan's own record names this run.
+            # A failure here is reported and does not undo an export that is
+            # already on disk and verified.
+            try:
+                record_reconstruction(
+                    project_path,
+                    directory=export.directory,
+                    record_name=RECORD_NAME,
+                    details={
+                        "depth_band": band.as_dict(),
+                        "coherence": coherence.statement(),
+                        "points": export.point_count,
+                        "vertices": export.vertex_count,
+                        "faces": export.face_count,
+                    },
+                )
+                report_progress(f"recorded in {project_path.name}")
+            except (ProjectError, OSError) as exc:
+                report_progress(f"project file NOT updated ({exc}); the export is complete")
             # Every frame, every point: this is the one the operator is being
             # asked to trust, it is built once at the end rather than a dozen
             # times a minute, and nothing about the live preview's bounds

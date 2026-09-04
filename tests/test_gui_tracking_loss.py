@@ -135,7 +135,9 @@ def tracking_input(
     raising = raising or set()
     base = gui._load_cloud
 
-    def load(path: Path, target_points: int) -> tuple[tuple[float, float, float], ...]:
+    def load(
+        path: Path, target_points: int, depth_band: object = None
+    ) -> tuple[tuple[float, float, float], ...]:
         index = int(path.stem.split("_")[1])
         if stop_on is not None and index == stop_on[1]:
             stop_on[0]._stop()
@@ -144,7 +146,7 @@ def tracking_input(
             raise ValueError(f"synthetic deprojection failure on frame {index}")
         if index in empty:
             return ()
-        return base(path, target_points)
+        return base(path, target_points, depth_band)  # type: ignore[arg-type]
 
     monkeypatch.setattr(gui, "_load_cloud", load)
 

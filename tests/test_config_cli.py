@@ -580,3 +580,57 @@ def test_a_write_that_fails_mid_flight_is_a_sentence_and_a_status(
     assert "is unchanged" in err
     assert "Traceback" not in err
     assert path.read_text(encoding="utf-8") == '[captures]\ndirectory = "/old"\n'
+
+
+def test_recording_the_depth_band_is_read_back_by_every_reader(capsys) -> None:
+    assert main(["config", "--set-depth-band", "130", "275"]) == 0
+    out = capsys.readouterr().out
+    assert "registration depth band recorded as 130-275" in out
+    assert "registration depth band: 130-275" in out
+    assert main(["config", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["registration_depth_band"]["value"] == [130.0, 275.0]
+    assert payload["registration_depth_band"]["source"] == str(config_path())
+    # The same band again is a no-op, and says so.
+    assert main(["config", "--set-depth-band", "130", "275"]) == 0
+    assert "already recorded as 130-275" in capsys.readouterr().out
+
+
+def test_clearing_the_depth_band_returns_registration_to_the_sensor_interval(capsys) -> None:
+    assert main(["config", "--set-depth-band", "130", "275"]) == 0
+    capsys.readouterr()
+    assert main(["config", "--unset-depth-band"]) == 0
+    out = capsys.readouterr().out
+    assert "registration depth band cleared" in out
+    assert "registration depth band: not set" in out
+    assert main(["config", "--unset-depth-band"]) == 0
+    assert "nothing changed" in capsys.readouterr().out
+
+
+def test_a_depth_band_the_clip_could_not_apply_is_refused_with_a_sentence(capsys) -> None:
+    code = main(["config", "--set-depth-band", "275", "130"])
+    err = capsys.readouterr().err
+    assert code != 0
+    assert "configuration not changed" in err
+    assert "positive, increasing interval" in err
+
+
+def test_a_sweep_writes_the_scans_project_file_beside_its_frames(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    from scanner3d.project import PROJECT_NAME, read_project
+
+    assert main(["config", "--set-captures-dir", str(tmp_path / "scans")]) == 0
+    capsys.readouterr()
+    _stub_sweep(monkeypatch)
+
+    assert main(["sweep", "--json", "--frames", "40", "--decimate", "2"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    written = Path(str(payload["command"]["output"]))
+    assert payload["project_file"] == str(written / PROJECT_NAME)
+    project = read_project(written)
+    assert project.capture["source"] == "sweep"
+    assert project.capture["frames_requested"] == 40
+    assert project.capture["decimate"] == 2
+    assert project.capture["frames_written"] == 0
+    assert project.capture["stop_reason"] == "frame budget reached"

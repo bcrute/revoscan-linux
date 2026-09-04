@@ -465,7 +465,9 @@ def test_a_recovery_that_never_gets_a_usable_frame_still_ends_at_its_deadline(
     """
     offered: list[int] = []
 
-    def unusable(raw: bytes, _target_points: int) -> tuple[tuple[float, float, float], ...]:
+    def unusable(
+        raw: bytes, _target_points: int, _depth_band: object = None
+    ) -> tuple[tuple[float, float, float], ...]:
         offered.append(raw[0])
         return ()
 

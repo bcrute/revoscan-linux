@@ -37,6 +37,7 @@ from scanner3d.config import (
     set_captures_dir,
 )
 from scanner3d.gui import ScannerWindow
+from scanner3d.preparation import DepthBand
 
 
 class FakeStatusBar:
@@ -55,6 +56,14 @@ class FakeAction:
         self.tooltip = text
 
 
+class FakeSpin:
+    def __init__(self, value: int) -> None:
+        self._value = value
+
+    def value(self) -> int:  # Qt's name
+        return self._value
+
+
 class Window:
     """The parts of :class:`ScannerWindow` the captures methods actually touch."""
 
@@ -62,6 +71,11 @@ class Window:
         self.logged: list[str] = []
         self._captures_action = FakeAction()
         self._status = FakeStatusBar()
+        # The depth controls, at the sensor's own interval: ``_start_capture``
+        # reads them before it allocates a folder, and a band it cannot apply
+        # is refused there - which is a different subject from this module's.
+        self._depth_near = FakeSpin(60)
+        self._depth_far = FakeSpin(300)
 
     def _log(self, message: str) -> None:
         self.logged.append(message)
@@ -74,6 +88,9 @@ class Window:
     # absent on purpose, so a capture that started anyway fails loudly.
     def _refresh_captures_action(self) -> None:
         ScannerWindow._refresh_captures_action(cast(ScannerWindow, self))
+
+    def _depth_band(self) -> DepthBand:
+        return ScannerWindow._depth_band(cast(ScannerWindow, self))
 
     def _effective_captures_dir(self) -> tuple[Path | None, str | None]:
         return ScannerWindow._effective_captures_dir(cast(ScannerWindow, self))

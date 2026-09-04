@@ -422,7 +422,9 @@ def test_a_capture_shows_colour_while_it_is_recording(
     window.worker.colour.connect(lambda _jpeg: arrived.set())
     during: list[int] = []
 
-    def load(path: Path, _target_points: int) -> tuple[tuple[float, float, float], ...]:
+    def load(
+        path: Path, _target_points: int, _depth_band: object = None
+    ) -> tuple[tuple[float, float, float], ...]:
         index = int(path.stem.split("_")[1])
         if index >= 1 and not during:
             assert arrived.wait(10.0), "no colour frame arrived during the capture"
@@ -671,7 +673,9 @@ def test_a_picture_waiting_when_the_operator_stops_is_never_shown_either(
     alignments(set())
     models(set())
 
-    def load(path: Path, _target_points: int) -> tuple[tuple[float, float, float], ...]:
+    def load(
+        path: Path, _target_points: int, _depth_band: object = None
+    ) -> tuple[tuple[float, float, float], ...]:
         # From inside the capture, after the pump has offered its picture and
         # while the window is still too busy to have drawn it.
         if int(path.stem.split("_")[1]) == 2:

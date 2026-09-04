@@ -526,7 +526,9 @@ def growing_object(monkeypatch, radius: Callable[[int], float]) -> list[int]:
     """
     read: list[int] = []
 
-    def load(path: Path, _target_points: int) -> tuple[tuple[float, float, float], ...]:
+    def load(
+        path: Path, _target_points: int, _depth_band: object = None
+    ) -> tuple[tuple[float, float, float], ...]:
         index = int(path.stem.split("_")[1])
         read.append(index)
         return shell_cloud(radius=radius(index), spin=0.01 * index)

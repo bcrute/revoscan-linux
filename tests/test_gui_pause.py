@@ -90,6 +90,7 @@ from scanner3d.gui import (
 )
 from scanner3d.multiview import CoarseAlignment, coarse_align
 from scanner3d.pipeline import NOISE_FLOOR, SweepReconstruction
+from scanner3d.project import PROJECT_NAME
 from scanner3d.relocalize import (
     LOCAL_MIN_MATCHED_FRACTION,
     LOCAL_RESIDUAL_MULTIPLE,
@@ -557,7 +558,8 @@ def test_a_refused_relocalization_leaves_the_capture_folder_exactly_as_it_was(
 
     capture = cast(Path, window._capture_dir)
     assert sorted(path.name for path in capture.iterdir()) == [
-        f"frame_{index:04d}.raw" for index in range(10)
+        *(f"frame_{index:04d}.raw" for index in range(10)),
+        PROJECT_NAME,
     ]
     assert not list(capture.glob(f"{STAGING_PREFIX}*"))
     assert read_capture_sequence(capture).bridges == ()
@@ -1126,8 +1128,10 @@ def test_a_real_large_reposition_is_recognised_and_recorded_as_the_known_transfo
     def cloud_for(fill: int) -> tuple[Point, ...]:
         return tuple(placements[fill].apply_all(OBJECT))
 
-    monkeypatch.setattr(gui, "_load_cloud", lambda path, _n: cloud_for(path.read_bytes()[0]))
-    monkeypatch.setattr(gui, "_cloud_from_bytes", lambda raw, _n: cloud_for(raw[0]))
+    monkeypatch.setattr(
+        gui, "_load_cloud", lambda path, _n, _band=None: cloud_for(path.read_bytes()[0])
+    )
+    monkeypatch.setattr(gui, "_cloud_from_bytes", lambda raw, _n, _band=None: cloud_for(raw[0]))
 
     window = CaptureWindow(frames=before + 6)
     _run(window, stream_kernel, before + 6, {before: "pause", before + 1: "resume"})
@@ -1172,8 +1176,10 @@ def test_a_reposition_with_no_shared_surface_is_never_accepted(
     def cloud_for(fill: int) -> tuple[Point, ...]:
         return tuple(placements[fill].apply_all(OBJECT))
 
-    monkeypatch.setattr(gui, "_load_cloud", lambda path, _n: cloud_for(path.read_bytes()[0]))
-    monkeypatch.setattr(gui, "_cloud_from_bytes", lambda raw, _n: cloud_for(raw[0]))
+    monkeypatch.setattr(
+        gui, "_load_cloud", lambda path, _n, _band=None: cloud_for(path.read_bytes()[0])
+    )
+    monkeypatch.setattr(gui, "_cloud_from_bytes", lambda raw, _n, _band=None: cloud_for(raw[0]))
 
     window = CaptureWindow(frames=before + 6)
     _run(window, stream_kernel, before + 6, {before: "pause", before + 1: "resume"})
@@ -1213,8 +1219,10 @@ def test_a_coarse_ambiguous_reposition_publishes_no_segment_and_no_bridge(
         """The real ranking, reporting the one thing this test is about."""
         return replace(coarse_align(source, target), unambiguous=False)
 
-    monkeypatch.setattr(gui, "_load_cloud", lambda path, _n: cloud_for(path.read_bytes()[0]))
-    monkeypatch.setattr(gui, "_cloud_from_bytes", lambda raw, _n: cloud_for(raw[0]))
+    monkeypatch.setattr(
+        gui, "_load_cloud", lambda path, _n, _band=None: cloud_for(path.read_bytes()[0])
+    )
+    monkeypatch.setattr(gui, "_cloud_from_bytes", lambda raw, _n, _band=None: cloud_for(raw[0]))
     monkeypatch.setattr("scanner3d.relocalize.coarse_align", ambiguous)
 
     window = CaptureWindow(frames=before + 6)
@@ -1424,7 +1432,8 @@ def test_a_capture_that_is_never_paused_is_byte_for_byte_the_capture_it_always_w
 
     capture = cast(Path, window._capture_dir)
     assert sorted(path.name for path in capture.iterdir()) == [
-        f"frame_{index:04d}.raw" for index in range(7)
+        *(f"frame_{index:04d}.raw" for index in range(7)),
+        PROJECT_NAME,
     ]
     sequence = read_capture_sequence(capture)
     assert sequence.bridges == ()
