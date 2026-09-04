@@ -238,13 +238,14 @@ including the session the intruder first appeared. See
 scanner happens to be moving at that moment, and neither end of a fixed value is harmless: set for a
 brisk sweep it wastes a slow one, where frames a fraction of the noise floor apart measure noise
 rather than motion — the *slowest* row of the measured drift table is among its worst — and set for
-a slow sweep it loses a brisk one outright. Tick "hold spacing" and the number becomes a starting
-point: the capture moves it between 1 and 10 to hold the measured travel inside the same band the
-travel readout already shows, going finer on one over-band frame and on any frame the tracker
-refused, and coarser only after three slow ones in a row. It is deliberately not a fix for tracking
-loss — its whole range is your own setting down to 1, which you can also just set yourself — and it
-is off by default, because a capture spaced by a number you typed is one you can reason about
-afterwards. The stream selects by a countdown of deliveries rather than a modulo of the frame index,
+a slow sweep it loses a brisk one outright. With "hold spacing" ticked, as it is by default, the
+number is a starting point: the capture moves it between 1 and 10 to hold the measured travel inside
+the same band the travel readout already shows, going finer on one over-band frame and on any frame
+the tracker refused, and coarser only after three slow ones in a row. It is deliberately not a fix
+for tracking loss — its whole range is your own setting down to 1, which you can also just set
+yourself. Untick it for a capture spaced by exactly the number you typed, which is one you can
+reason about afterwards; it was off by default until a hand-held capture at the fixed one-in-three
+lost tracking on a step no registration could bridge (docs/frame-spacing.md). The stream selects by a countdown of deliveries rather than a modulo of the frame index,
 so a spacing that changes mid-run cannot make the phase jump, and the run's record carries the span
 it actually used rather than one number that was never true throughout. See
 [docs/frame-spacing.md](docs/frame-spacing.md).

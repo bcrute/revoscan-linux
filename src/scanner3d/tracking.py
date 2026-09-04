@@ -201,7 +201,7 @@ from scanner3d.relocalize import (
     local_chain_gates,
 )
 
-SCHEMA_VERSION: Final = 5
+SCHEMA_VERSION: Final = 6
 """5 lets a disjoint-reference recovery arbitrate a clearly tighter tied cluster first.
 
 Version 4 made principal-frame degeneracy evidence rather than a recovery veto.
@@ -410,6 +410,20 @@ MAX_TRAVEL_MULTIPLE: Final = 24.0
 #: enough to seed a solve from is precisely what must not be manufactured
 #: there.
 MAX_PRIOR_STEPS: Final = 3
+
+#: How far the prediction itself may carry the surface, as a multiple of the
+#: travel gate, before it is a runaway extrapolation rather than a velocity.
+#:
+#: A prediction used to be discarded the moment it crossed the travel gate,
+#: because a fit near it would have been refused as a jump anyway. That is no
+#: longer true: the travel gate is judged against the prediction where one
+#: exists (see :meth:`IncrementalTracker._judge`), which is what lets a
+#: scanner carried steadily at a speed the gate alone would call a jump keep
+#: being placed. The cap stays, because an extrapolation compounds whatever
+#: the last step got wrong: three gates is 46.8 depth units of surface travel
+#: in one delivery step, about 21 cm/s at the measured 4.5 fps, past which a
+#: fringe-projection frame is motion-corrupted before any tracker sees it.
+MAX_PRIOR_TRAVEL_MULTIPLE: Final = 3.0
 
 #: How far apart two candidate placements may put the SURFACE before they are
 #: two answers rather than one.
@@ -1480,6 +1494,11 @@ class TrackCandidate:
     #: nothing reads it back to decide anything, and an accepted candidate is
     #: accepted on the same measurements whichever seed reached it.
     seed: str = IDENTITY_SEED
+    #: How far this placement sits from where the last accepted motion
+    #: predicted the frame, in the same units as ``travel``; None where no
+    #: prediction existed. The travel gate is judged against this where it is
+    #: present, so a steady fast step reads large in ``travel`` and small here.
+    travel_from_prediction: float | None = None
 
     @property
     def rmse(self) -> float:
@@ -1495,6 +1514,11 @@ class TrackCandidate:
             "alignment": self.edge.as_dict(),
             "overlap": _json_number(self.overlap),
             "travel": _json_number(self.travel),
+            "travel_from_prediction": (
+                None
+                if self.travel_from_prediction is None
+                else _json_number(self.travel_from_prediction)
+            ),
             "accepted": self.accepted,
             "refusals": list(self.refusals),
             "failed_gates": list(self.failed_gates),
@@ -2024,6 +2048,11 @@ class IncrementalTracker:
         #: refused frame is invisible to everything downstream and the next
         #: prediction would silently under-shoot by a whole step per refusal.
         self._offers_since_accepted = 0
+        #: The prediction formed for the frame being offered, or None. Set once
+        #: per offer by :meth:`_candidates` and read by :meth:`_judge`, so every
+        #: candidate of one frame - recovery hypotheses included - is judged
+        #: against the same prediction.
+        self._offer_prior: Rigid | None = None
         #: Every ICP solve this tracker has attempted, counted where they are
         #: actually run rather than where they are promised. Read as a
         #: DIFFERENCE around one recovery to fill
@@ -2188,6 +2217,7 @@ class IncrementalTracker:
         # refused by a gate does. This is the one counter a refusal is allowed
         # to move, and it moves nothing a placement is measured against.
         self._offers_since_accepted += 1
+        self._offer_prior = None
         index = len(self._accepted)
         points = tuple(cloud)
         if len(points) < self._policy.min_track_points:
@@ -2263,6 +2293,7 @@ class IncrementalTracker:
         """
         candidates: list[TrackCandidate] = []
         prior = self._motion_prior(source)
+        self._offer_prior = prior
         adjacent = self._adjacent_candidate(index, source, previous, adjacent_fit, prior)
         if adjacent is not None:
             candidates.append(adjacent)
@@ -2355,9 +2386,11 @@ class IncrementalTracker:
           :attr:`TrackingPolicy.max_prior_steps` delivery steps, past which the
           extrapolation is multiplying an error rather than carrying a
           measurement;
-        - the extrapolation already puts the surface beyond the travel gate, in
-          which case a fit that stayed anywhere near it would be refused as a
-          jump and seeding there would spend a solve to arrive at a refusal;
+        - the extrapolation already puts the surface beyond
+          :data:`MAX_PRIOR_TRAVEL_MULTIPLE` travel gates, where it is a runaway
+          rather than a velocity. It may exceed ONE gate: the travel gate is
+          judged against the prediction where there is one, so a steady fast
+          step is a step and not a jump;
         - the extrapolation is inside the STATIONARY BAND, where the scanner
           counts as not having moved. Then this is not a different starting
           point from the identity the first adjacent attempt is already seeded
@@ -2392,7 +2425,7 @@ class IncrementalTracker:
             # which every caller already handles.
             return None
         travel = frame_travel(source, prior)
-        if travel > self._policy.max_travel_multiple * NOISE_FLOOR:
+        if travel > MAX_PRIOR_TRAVEL_MULTIPLE * self._policy.max_travel_multiple * NOISE_FLOOR:
             return None
         if travel <= STATIONARY_DISTANCE_MULTIPLE * NOISE_FLOOR:
             return None
@@ -2636,6 +2669,19 @@ class IncrementalTracker:
         overlap = overlap_fraction(source, reference, fit.transform, tolerance=tolerance)
         relative = previous.pose.inverse().compose(pose)
         travel = frame_travel(source, relative) if edge.accepted else math.inf
+        # How far the placement sits from where the last accepted motion said
+        # the frame would be. A scanner carried steadily moves the surface a
+        # long way between accepted frames and almost none from its own
+        # prediction; a solve that locked onto somewhere else on the object is
+        # far from both. The gate below refuses only the second.
+        prior = self._offer_prior
+        deviation: float | None = None
+        if edge.accepted and prior is not None:
+            try:
+                deviation = frame_travel(source, prior.inverse().compose(relative))
+            except ScannerError:
+                deviation = None
+        gate = self._policy.max_travel_multiple * NOISE_FLOOR
         if edge.accepted:
             if origin != ADJACENT_ORIGIN and overlap < self._policy.min_reference_overlap:
                 failed_gates.append(OVERLAP_GATE)
@@ -2650,15 +2696,24 @@ class IncrementalTracker:
                     f"the travel implied by the {origin} placement is not a finite distance, so "
                     "there is no step here to judge."
                 )
-            elif travel > self._policy.max_travel_multiple * NOISE_FLOOR:
+            elif travel > gate and (deviation is None or deviation > gate):
                 failed_gates.append(TRAVEL_GATE)
-                refusals.append(
-                    f"the {origin} placement moves the surface {travel:.3f} since the last "
-                    f"accepted frame, over the "
-                    f"{self._policy.max_travel_multiple * NOISE_FLOOR:.3f} gate "
-                    f"({self._policy.max_travel_multiple:g}x the {NOISE_FLOOR} noise floor). "
-                    "That is a jump to somewhere else on the object, not a step."
-                )
+                if deviation is None:
+                    refusals.append(
+                        f"the {origin} placement moves the surface {travel:.3f} since the last "
+                        f"accepted frame, over the {gate:.3f} gate "
+                        f"({self._policy.max_travel_multiple:g}x the {NOISE_FLOOR} noise "
+                        "floor), and no accepted motion predicts a step that size. That is a "
+                        "jump to somewhere else on the object, not a step."
+                    )
+                else:
+                    refusals.append(
+                        f"the {origin} placement moves the surface {travel:.3f} since the last "
+                        f"accepted frame and {deviation:.3f} from where the last accepted "
+                        f"motion predicted it, both over the {gate:.3f} gate "
+                        f"({self._policy.max_travel_multiple:g}x the {NOISE_FLOOR} noise "
+                        "floor). That is a jump to somewhere else on the object, not a step."
+                    )
         return TrackCandidate(
             origin=origin,
             reference_frames=reference_frames,
@@ -2672,6 +2727,7 @@ class IncrementalTracker:
             refusals=tuple(refusals),
             failed_gates=tuple(failed_gates),
             seed=seed,
+            travel_from_prediction=deviation,
         )
 
     # -- choosing between them ---------------------------------------------

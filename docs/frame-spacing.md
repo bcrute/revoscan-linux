@@ -147,12 +147,20 @@ Captures that were not asked to hold the spacing are completely unaffected: the
 control is off by default, the stream is handed the same plain integer it always
 was, and the summary line does not appear.
 
-## Why it is off by default
+## Why it is on by default
 
-A capture whose frame spacing is a number the operator typed is a capture they
-can reason about afterwards. One that varied is a capture whose record has to be
-read to know what it did. That is a fair trade on a hand-carried sweep and not
-one to make on somebody's behalf.
+It was off at first: a capture whose frame spacing is a number the operator
+typed is a capture they can reason about afterwards, and one that varied has a
+record that must be read to know what it did. Two hand-held captures on
+2026-09-04 settled the trade the other way (`docs/tracking.md`, "Two hand-held
+captures"). Both ran at the fixed default of one frame in three, 0.67 s apart at
+the scanner's 4.5 depth frames a second, and a hand moving at 2-5 cm/s put
+6-36 mm of camera motion between the frames the tracker saw. The second capture
+lost tracking at a step where the two frames either side shared under a third
+of their content and could not be aligned by any means, while the same motion
+seen at every frame is 2-12 mm, inside the tracker's reach. Held spacing goes
+to every frame the moment the measured travel leaves the band, and the record
+still says what it did. An operator who wants a fixed number unticks the box.
 
 ## What this deliberately does not do
 

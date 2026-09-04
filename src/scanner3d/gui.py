@@ -2364,13 +2364,16 @@ class ScannerWindow(QMainWindow):
 
         #: Whether the spacing above is a fixed setting or a starting point.
         #:
-        #: Off by default, deliberately. A capture whose frame spacing is a
-        #: number the operator typed is a capture they can reason about
-        #: afterwards; one that varied is a capture whose record has to be read
-        #: to know what it did. That is a fair trade on a hand-carried sweep and
-        #: not one to make on somebody's behalf.
+        #: On by default since 2026-09-04. It was off, on the argument that a
+        #: capture whose frame spacing is a number the operator typed is one
+        #: they can reason about afterwards. Two hand-held captures that day
+        #: settled it the other way: at the fixed one-in-three, 0.67 s apart,
+        #: a hand at 2-5 cm/s put 6-36 mm between the frames the tracker saw
+        #: and the second capture lost tracking at a step no registration
+        #: could bridge (docs/frame-spacing.md, "Why it is on by default").
+        #: The operator who wants a fixed number unticks this.
         self._hold_cadence = QCheckBox("hold spacing")
-        self._hold_cadence.setChecked(False)
+        self._hold_cadence.setChecked(True)
         self._hold_cadence.setToolTip(
             "Treats the number to the left as a starting point and then moves it,\n"
             "between 1 and 10, to hold the MEASURED travel between kept frames\n"

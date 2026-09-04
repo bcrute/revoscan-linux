@@ -55,6 +55,7 @@ from scanner3d.tracking import (
     TRACK_FRAME_EMPTY_TYPE,
     TRACK_NO_CANDIDATE_TYPE,
     TRACK_RESCUE_UNSUPPORTED_TYPE,
+    TRAVEL_GATE,
     IncrementalTracker,
     TrackingNotAllowed,
     TrackingPolicy,
@@ -2120,15 +2121,16 @@ def test_the_extrapolation_stops_at_the_step_ceiling(
     assert seeds == [Rigid.identity()]
 
 
-def test_a_prediction_already_past_the_travel_gate_is_not_formed(
+def test_a_prediction_past_one_travel_gate_is_now_formed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Seeding there would spend a solve to arrive at a refusal.
+    """The travel gate is judged against the prediction, so the prediction may cross it.
 
-    A fit that stayed anywhere near such a seed implies the surface jumped, and
-    the travel gate refuses that whatever produced it. So the prediction is
-    withheld rather than made and then refused by a gate this module has already
-    applied once.
+    Two delivery steps of a step that is inside the gate extrapolate to a
+    surface travel past it. That used to withhold the prediction, because a
+    fit near it would have been refused as a jump; it is now made, because a
+    fit near it is a steady fast step. The runaway cap three gates out is
+    tested beside the gate itself, in section 10.
     """
     gate = TrackingPolicy().max_travel_multiple * NOISE_FLOOR
     step = Rigid.of(IDENTITY_MATRIX, (0.0, 0.0, 9.0))
@@ -2143,7 +2145,7 @@ def test_a_prediction_already_past_the_travel_gate_is_not_formed(
 
     seeds.clear()
     assert not tracker.offer(_grid(offset=1.5)).accepted
-    assert seeds == [Rigid.identity()], "two steps is past it"
+    assert seeds == [Rigid.identity(), step.compose(step)], "two steps cross it, and are tried"
 
 
 def test_a_seeded_bridge_frame_establishes_no_velocity(
@@ -2297,3 +2299,108 @@ def test_a_carried_scanner_places_frames_the_identity_seed_alone_cannot() -> Non
         "the two runs must be the same run until the first solve the identity seed loses"
     )
     assert max(with_prediction) < max(without) * _PREDICTED_ERROR_ALLOWANCE
+
+
+# --- 10. the travel gate, judged against the prediction ---------------------------------------
+
+
+def _translation(z: float) -> Rigid:
+    return Rigid.of(IDENTITY_MATRIX, (0.0, 0.0, z))
+
+
+def _travel_gate() -> float:
+    return ADJACENT_ONLY_POLICY.max_travel_multiple * NOISE_FLOOR
+
+
+def test_a_steady_step_past_the_travel_gate_is_a_step_when_the_prediction_says_so() -> None:
+    """A scanner carried steadily moves the surface far between frames and hardly
+    at all from its own prediction; that is a step, however long, not a jump.
+
+    Measured on a real turntable capture replayed at 23 and 34 degrees per
+    frame: ICP placed every frame and the gate refused each one at 15.7-24.4
+    against 15.6, then the next frame was two steps away and the capture was
+    lost. The same gate ended the hand-carried capture at frame 70 at 20.662.
+    """
+    gate = _travel_gate()
+    tracker = IncrementalTracker(policy=ADJACENT_ONLY_POLICY)
+    assert tracker.offer(_grid()).accepted
+    # Two steps inside the gate establish a velocity.
+    for _ in range(2):
+        decision = tracker.offer(_grid(offset=0.5), adjacent_fit=_fit(transform=_translation(10.0)))
+        assert decision.accepted, decision.message()
+    # Then a step past the gate, but only a little past the prediction.
+    decision = tracker.offer(_grid(offset=0.5), adjacent_fit=_fit(transform=_translation(20.0)))
+    assert decision.accepted, decision.message()
+    (candidate,) = [c for c in decision.candidates if c.origin == ADJACENT_ORIGIN]
+    assert candidate.travel == pytest.approx(20.0, abs=1e-6)
+    assert candidate.travel > gate
+    assert candidate.travel_from_prediction == pytest.approx(10.0, abs=1e-6)
+    assert TRAVEL_GATE not in candidate.failed_gates
+    recorded = cast(list[dict[str, object]], decision.as_dict()["candidates"])
+    assert recorded[0]["travel_from_prediction"] == pytest.approx(10.0)
+    # And the next one, steady at that speed, deviates from its prediction by nothing.
+    decision = tracker.offer(_grid(offset=0.5), adjacent_fit=_fit(transform=_translation(20.0)))
+    assert decision.accepted, decision.message()
+    (candidate,) = [c for c in decision.candidates if c.origin == ADJACENT_ORIGIN]
+    assert candidate.travel_from_prediction == pytest.approx(0.0, abs=1e-6)
+
+
+def test_a_jump_away_from_the_prediction_is_still_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gate keeps its meaning: far from the last frame AND far from the prediction.
+
+    The solver is stubbed for the retry the refusal triggers, as every test of
+    a refusal here does: on a periodic lattice real ICP seeded from the
+    prediction can settle on a false small step, and this test is about the
+    gate, not about ICP.
+    """
+    gate = _travel_gate()
+    tracker = IncrementalTracker(policy=ADJACENT_ONLY_POLICY)
+    assert tracker.offer(_grid()).accepted
+    for _ in range(2):
+        assert tracker.offer(
+            _grid(offset=0.5), adjacent_fit=_fit(transform=_translation(10.0))
+        ).accepted
+    _recording_solver(monkeypatch, lambda initial: _fit(rmse=99.0))
+    decision = tracker.offer(_grid(offset=0.5), adjacent_fit=_fit(transform=_translation(-20.0)))
+    assert not decision.accepted
+    (candidate,) = [c for c in decision.candidates if c.origin == ADJACENT_ORIGIN]
+    assert TRAVEL_GATE in candidate.failed_gates
+    assert candidate.travel == pytest.approx(20.0, abs=1e-6)
+    assert candidate.travel_from_prediction is not None
+    assert candidate.travel_from_prediction == pytest.approx(30.0, abs=1e-6)
+    assert candidate.travel_from_prediction > gate
+    assert any("from where the last accepted motion predicted it" in r for r in decision.refusals)
+
+
+def test_a_first_step_past_the_gate_with_no_prediction_is_still_a_jump() -> None:
+    """Without a measured velocity there is nothing to judge a long step against."""
+    tracker = IncrementalTracker(policy=ADJACENT_ONLY_POLICY)
+    assert tracker.offer(_grid()).accepted
+    decision = tracker.offer(_grid(offset=0.5), adjacent_fit=_fit(transform=_translation(20.0)))
+    assert not decision.accepted
+    (candidate,) = [c for c in decision.candidates if c.origin == ADJACENT_ORIGIN]
+    assert TRAVEL_GATE in candidate.failed_gates
+    assert candidate.travel_from_prediction is None
+    assert any("no accepted motion predicts a step that size" in r for r in decision.refusals)
+
+
+def test_a_prediction_is_formed_past_one_gate_but_not_past_three() -> None:
+    """The prediction may exceed the gate it is now judged against, up to the runaway cap."""
+    gate = _travel_gate()
+    tracker = IncrementalTracker(policy=ADJACENT_ONLY_POLICY)
+    assert tracker.offer(_grid()).accepted
+    for z in (10.0, 20.0, 30.0):
+        decision = tracker.offer(_grid(offset=0.5), adjacent_fit=_fit(transform=_translation(z)))
+        assert decision.accepted, decision.message()
+    # The last accepted step moves the surface 30, nearly two gates: one delivery
+    # step of it is a prediction; three of it, 90, is past the cap and is not.
+    tracker._offers_since_accepted = 1
+    prior = tracker._motion_prior(_grid(offset=0.5))
+    assert prior is not None
+    assert frame_travel(_grid(offset=0.5), prior) == pytest.approx(30.0, abs=1e-6)
+    assert frame_travel(_grid(offset=0.5), prior) > gate
+    tracker._offers_since_accepted = 3
+    assert tracker._motion_prior(_grid(offset=0.5)) is None
+    assert tracking_module.MAX_PRIOR_TRAVEL_MULTIPLE * gate < 3 * 30.0

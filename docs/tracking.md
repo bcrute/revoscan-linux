@@ -184,6 +184,59 @@ are offered for placement rather than where a placement is started from, and it
 holds the measured travel inside the guidance band instead of widening what
 survives outside it. Neither touches a tracking gate.
 
+### The travel gate is judged against the prediction (2026-09-04)
+
+The gate that refuses a placement as "a jump to somewhere else on the object"
+measured the surface travel since the last ACCEPTED frame, and that made it the
+speed limit for a hand-carried scanner. Replaying the turntable capture
+`20260904-020845` at larger frame strides:
+
+| step per frame | median travel per accepted frame | outcome |
+| --- | --- | --- |
+| 2.8-11 deg (strides 1-4) | 1.3-5.2 | every frame placed |
+| 17 deg (stride 6) | 7.4 | 22 of 26 placed; three disagreements |
+| 23 deg (stride 8) | - | ICP placed the first step at 15.706 against the 15.600 gate; refused, and the next frame was two steps away; lost |
+| 34 deg (stride 12) | - | placed at 24.3 and refused the same way |
+
+A speed-ramp built from the same frames placed 30 frames through 20 degrees
+per frame and lost the capture at the first 23-degree step: one travel refusal
+at 16.606, then two residual refusals at the doubled gap. The hand-carried
+capture `20260828-105933` ended the same way at `frame_0070`, 20.662 against
+15.600. In every case the solver had found the frame; the gate declined it.
+
+So the gate now has a second reading. Where a motion prediction exists (the
+last accepted step carried forward, see above), a placement is refused as a
+jump only when it is far from the last accepted frame AND far from where the
+prediction put it. A scanner carried steadily moves the surface a long way
+between frames and almost none from its own prediction; a solve that locked
+onto somewhere else is far from both. The record carries the second number as
+`travel_from_prediction` beside `travel`, and the schema version moved to 6.
+The prediction itself may now exceed one gate, and is discarded past three
+(`MAX_PRIOR_TRAVEL_MULTIPLE`): 46.8 units in one delivery step is about 21 cm/s
+at the measured 4.5 fps, where a fringe-projection frame is motion-corrupted
+before any tracker sees it. A first fast step with no measured velocity is
+still a jump, so a capture has to start moving before it moves fast - which is
+what a hand does.
+
+Replayed on the new gate: the speed ramp runs to its end, 36 of 38 frames
+placed through 23 and 28 degrees per frame (13.2 units of travel on the longest
+accepted step, where the old gate stopped at 15.6 and the ramp died at 16.6),
+and the last two frames at 34 degrees are refused by reference DISAGREEMENT,
+12-13 units apart, not by travel. The constant-stride replays at 23 and 34
+degrees are unchanged, because their first step has no velocity behind it.
+The hand-carried capture places 67 frames where it placed 65 - `frame_0056`
+and `frame_0064` are now steps rather than jumps - and still ends at
+`frame_0070`, whose placement sits 20.662 from the last accepted frame and
+31.616 from the prediction: a jump by both readings, preceded by two residual
+refusals at 2.73 and 2.63 against 2.60. Past the travel gate, the residual gate
+and reference agreement are the limits, and both measure the frames
+themselves.
+
+What this does not change: the residual, overlap and agreement gates, the
+delivery rate the hardware sets (4.5 depth frames a second), and the window's
+default of keeping one frame in three, which triples the motion per kept frame
+and is the wrong setting for a hand-carried sweep.
+
 ## What "accepted" is allowed to mean
 
 Not "ICP returned". Each candidate carries the four measurements this repository
@@ -740,3 +793,28 @@ still runs no coarse search at all.
 - Nothing here has been validated against a physical scan of known dimensions.
   The synthetic numbers above are a relationship measured under conditions where
   both chains were given exactly the same data; they are not accuracy.
+
+## Two hand-held captures, 2026-09-04
+
+Both were made by the operator with the desktop application at what were then
+its defaults: one frame kept in three, spacing not held. The scanner delivers
+about 4.5 depth frames a second, so the tracker saw frames 0.67 s apart. The
+motion column is measured independently of the tracker, by a wide-reach ICP
+between consecutive kept frames (scratch script `pairmotion.py`).
+
+| capture | frames | live outcome | replay with the prediction-judged gate | motion between kept frames |
+| --- | --- | --- | --- | --- |
+| 20260904-120924 | 44 | lost at frame 13 on the old travel gate (19.9 and 25.9 mm against 15.6) | 42 of 44 placed; 2 refused for candidate disagreement (10.9 and 12.3 against the 5.2 gate) and recovered | 4-13 mm of surface travel |
+| 20260904-164506 | 27 | lost at frame 24: adjacent overlap 0.32 under the 0.55 gate | the same: 24 of 27, no reference places 24, 25 (travel 45.5 and 38.5) or 26 (model overlap 0.16) | 5-14 mm of surface travel, camera translation 6-36 mm and up to 11 deg per kept frame; 23 to 24 unfittable at 12, 25 and 40 mm reach |
+
+The first failure was the gate and is fixed. The second is the spacing: at
+0.67 s apart, a hand at 3-5 cm/s puts 20-36 mm and a turn between the frames
+the tracker sees, and the frames either side of the loss do not overlap enough
+for any registration to bridge them. Seen at every frame the same motion is
+7-12 mm. Hence held spacing is now on by default (`docs/frame-spacing.md`).
+Two other things the hand-held frames show. A hand-held view sees the room past
+the cloth: frame 23 carries a band of alias returns across the top of the image
+(`docs/phantom-aliases.md`), which the depth band clips out of the registration
+and which no cloth behind a turntable can prevent. And the tracker's own
+diagnosis was right both times; what it could not say is that the cure for the
+second was the spacing control beside it.
