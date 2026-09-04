@@ -44,6 +44,7 @@ from scanner3d.mesh import (
     EDGE_TABLE,
     INHERENT_LIMITATIONS,
     MAX_GRID_CELLS,
+    MAX_HEADER_BYTES,
     MAX_OUTPUT_BYTES,
     METHOD_LIMITATIONS,
     PAD_CELLS,
@@ -1333,7 +1334,10 @@ def test_the_byte_ceiling_cannot_be_widened_at_run_time(tmp_path, cube_mesh):
 
 def test_a_comment_block_past_the_ceiling_is_refused_rather_than_truncated(tmp_path):
     path = tmp_path / "shouty.obj"
-    wordy = provenance(limitations=tuple(f"caveat {index} " + "x" * 200 for index in range(200)))
+    # Sized from the ceiling itself, so raising the ceiling keeps this a test
+    # of the refusal rather than of one particular number.
+    count = MAX_HEADER_BYTES // 200 + 8
+    wordy = provenance(limitations=tuple(f"caveat {index} " + "x" * 200 for index in range(count)))
     with pytest.raises(MeshNotAllowed) as raised:
         write_obj(path, tetrahedron(), provenance=wordy)
     assert "refused rather than truncated" in str(raised.value)

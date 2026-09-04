@@ -23,7 +23,8 @@ The order, and why it is this order
 1. **deproject** - :func:`scanner3d.depth_metric.deproject_depth_frame` turns
    the Y16 bytes into camera-frame coordinates. It is not a filter and removes
    nothing except the samples the sensor itself marked absent.
-2. **depth clip** - keep :data:`DEPTH_CLIP_NEAR` to :data:`DEPTH_CLIP_FAR`.
+2. **depth clip** - keep :data:`DEPTH_CLIP_NEAR` to :data:`DEPTH_CLIP_FAR`, or the
+   :class:`DepthBand` the caller states for this capture.
    Outside that interval this scanner is returning the far wall and its own
    housing, not the object.
 3. **deterministic thinning** - every ``step``-th point, where ``step`` makes
@@ -85,7 +86,7 @@ from __future__ import annotations
 import math
 import struct
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final
 
 from scanner3d.denoise import FilteredCloud, strip_speckle
@@ -127,6 +128,51 @@ PREPARATION_ORDER: Final[tuple[str, ...]] = (
 #: behind the object.
 DEPTH_CLIP_NEAR: Final = 60.0
 DEPTH_CLIP_FAR: Final = 300.0
+
+
+@dataclass(frozen=True, slots=True)
+class DepthBand:
+    """The depth interval a registration cloud keeps, in the deprojection's scale.
+
+    Why this is a value rather than the two module constants
+    --------------------------------------------------------
+    The constants describe the sensor: nearer than 60 is the housing and the
+    projector's near field, further than 300 is "the room". But the room
+    starts wherever the operator put the scanner, not at 300. Measured on
+    2026-09-03 with the target 215 out, a bottle and a cylinder standing
+    250-300 out were inside the clip in every frame. Static in the room while
+    the turntable turned, they were a second rigid body, and point-to-plane
+    ICP fitted a compromise between them and the target: the sweep registered
+    smoothly, closed its loops and passed the target gate while frames one
+    revolution apart disagreed by up to 240. Clipping the same frames to
+    130-275 made every frame agree to a fraction of a unit (see
+    docs/target-gate.md). So the interval is a statement about the SCENE,
+    stated per capture and carried on the record.
+
+    ``near`` and ``far`` are exclusive bounds, exactly as the constants always
+    were. :meth:`default` is the pair the pipeline used before a band could
+    be stated, so a caller that states nothing prepares what it always did.
+    """
+
+    near: float
+    far: float
+
+    @classmethod
+    def default(cls) -> DepthBand:
+        """The sensor's own interval, :data:`DEPTH_CLIP_NEAR` to :data:`DEPTH_CLIP_FAR`."""
+        return cls(near=DEPTH_CLIP_NEAR, far=DEPTH_CLIP_FAR)
+
+    def contains(self, depth: float) -> bool:
+        """Whether a depth is strictly inside the band."""
+        return self.near < depth < self.far
+
+    def describe(self) -> str:
+        """The interval as ``near-far``, for a progress line or a log."""
+        return f"{self.near:g}-{self.far:g}"
+
+    def as_dict(self) -> dict[str, object]:
+        return {"near": self.near, "far": self.far}
+
 
 #: Points kept per frame when a capture is read back off disk to be registered.
 #:
@@ -170,6 +216,10 @@ class PreparationNotAllowed(ScannerError):
 
 class TargetPointsUnusable(PreparationNotAllowed):
     """The thinning target is not a positive whole count of points."""
+
+
+class DepthBandUnusable(PreparationNotAllowed):
+    """A stated depth band is not an interval the clip can apply."""
 
 
 class PointsUnusable(PreparationNotAllowed):
@@ -231,6 +281,33 @@ def ensure_points_preparable(points: Sequence[Point]) -> list[tuple[float, float
     return checked
 
 
+def ensure_depth_band(band: DepthBand | None) -> DepthBand:
+    """The band to clip with: the default when none is stated, else ``band`` checked.
+
+    Refuses a band whose ends are not finite numbers, are not positive, or are
+    not in order. A reversed band would clip every frame to an empty cloud
+    with nothing on the record to say why, and a NaN end compares false
+    against everything and keeps nothing for the same silent reason.
+    """
+    if band is None:
+        return DepthBand.default()
+    for name, value in (("near", band.near), ("far", band.far)):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int | float)
+            or not math.isfinite(value)
+        ):
+            raise DepthBandUnusable(
+                f"depth band {name} must be a finite number, got {value!r}; nothing was clipped"
+            )
+    if band.near <= 0.0 or band.far <= band.near:
+        raise DepthBandUnusable(
+            f"depth band {band.near!r} to {band.far!r} is not a positive, increasing interval; "
+            "nothing was clipped. The near end must be positive and the far end beyond it"
+        )
+    return DepthBand(near=float(band.near), far=float(band.far))
+
+
 def ensure_target_points(target_points: int) -> int:
     """Refuse a thinning target that is not a count, and return it unchanged."""
     if isinstance(target_points, bool) or not isinstance(target_points, int):
@@ -264,6 +341,10 @@ class PreparedCloud:
     thinned_points: int
     speckle: FilteredCloud | None
     support: SupportPlaneResult | None
+    #: The interval the clip kept. Defaulted so a record built for a cloud
+    #: that arrived already prepared claims the sensor's own interval, which
+    #: is what its counts describe.
+    depth_band: DepthBand = field(default_factory=DepthBand.default)
 
     @classmethod
     def of_points(cls, points: Sequence[Point], *, target_points: int = 0) -> PreparedCloud:
@@ -318,7 +399,7 @@ class PreparedCloud:
             "support_plane_policy_version": POLICY_VERSION,
             "order": list(PREPARATION_ORDER),
             "target_points": self.target_points,
-            "depth_clip": {"near": DEPTH_CLIP_NEAR, "far": DEPTH_CLIP_FAR},
+            "depth_clip": self.depth_band.as_dict(),
             "counts": {
                 "deprojected": self.deprojected_points,
                 "after_depth_clip": self.clipped_points,
@@ -335,8 +416,13 @@ def prepare_points(
     *,
     target_points: int,
     deprojected_points: int | None = None,
+    depth_band: DepthBand | None = None,
 ) -> PreparedCloud:
     """Clip, thin, denoise and support-plane filter an already deprojected cloud.
+
+    ``depth_band`` is the interval the clip keeps; ``None`` is the sensor's
+    own :meth:`DepthBand.default`. See :class:`DepthBand` for why a capture
+    states its own.
 
     Split from :func:`prepare_frame` so a caller holding camera-frame points -
     a test, a simulated sweep - runs exactly the arithmetic a captured frame
@@ -344,11 +430,12 @@ def prepare_points(
     missing.
     """
     ensure_target_points(target_points)
+    band = ensure_depth_band(depth_band)
     # Validated in full BEFORE the clip classifies anything, so a malformed or
     # non-finite point is a typed refusal rather than a point that quietly did
     # not survive the comparison. See :class:`PointsUnusable`.
     offered = ensure_points_preparable(points)
-    clipped = [p for p in offered if DEPTH_CLIP_NEAR < p[2] < DEPTH_CLIP_FAR]
+    clipped = [p for p in offered if band.contains(p[2])]
     step = max(1, len(clipped) // target_points)
     thinned = clipped[::step]
     counts = {
@@ -361,16 +448,24 @@ def prepare_points(
         # An empty frame is a frame. Both filters refuse an empty cloud rather
         # than answering one, and a refusal here would turn a scanner pointed at
         # air into a failed capture.
-        return PreparedCloud(points=(), speckle=None, support=None, **counts)
+        return PreparedCloud(points=(), speckle=None, support=None, depth_band=band, **counts)
     speckle = strip_speckle(thinned)
     if not speckle.points:
-        return PreparedCloud(points=(), speckle=speckle, support=None, **counts)
+        return PreparedCloud(points=(), speckle=speckle, support=None, depth_band=band, **counts)
     support = suppress_support_plane(speckle.points)
-    return PreparedCloud(points=support.points, speckle=speckle, support=support, **counts)
+    return PreparedCloud(
+        points=support.points, speckle=speckle, support=support, depth_band=band, **counts
+    )
 
 
-def prepare_frame(raw: bytes, *, target_points: int) -> PreparedCloud:
+def prepare_frame(
+    raw: bytes, *, target_points: int, depth_band: DepthBand | None = None
+) -> PreparedCloud:
     """Deproject one raw depth frame and prepare it for registration.
+
+    ``depth_band`` is the interval the clip keeps for this capture; ``None``
+    is the sensor's own. Every registration entry point passes the band it
+    resolved so the record says which interval the cloud describes.
 
     Takes bytes rather than a path because the frames a resumed capture holds
     TENTATIVELY have been delivered and selected but must not be written as
@@ -392,7 +487,7 @@ def prepare_frame(raw: bytes, *, target_points: int) -> PreparedCloud:
         unit=preparation_unit(),
     )
     points = [(p.x, p.y, p.z) for p in conversion.points]
-    return prepare_points(points, target_points=target_points)
+    return prepare_points(points, target_points=target_points, depth_band=depth_band)
 
 
 # --- the same plane, at full resolution ---------------------------------------

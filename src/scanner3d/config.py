@@ -93,6 +93,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import math
 import os
 import re
 import stat
@@ -100,6 +101,7 @@ import string
 import tempfile
 import tomllib
 import unicodedata
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Final, NamedTuple, overload
@@ -122,6 +124,13 @@ CONFIG_RELATIVE_PATH: Final = Path("scanner3d") / "config.toml"
 #: that tells someone how to set it by hand, so the two cannot drift apart.
 CAPTURES_TABLE: Final = "captures"
 CAPTURES_KEY: Final = "directory"
+
+#: Where the registration depth band is stated: ``depth_band = [near, far]``
+#: under ``[registration]``, in the deprojection's scale. Read by every
+#: registration entry point; :class:`scanner3d.preparation.DepthBand` says why
+#: the sensor's fixed clip is not enough once a room stands inside it.
+REGISTRATION_TABLE: Final = "registration"
+DEPTH_BAND_KEY: Final = "depth_band"
 
 #: Stands in when nothing is configured. Deliberately a serial no device has:
 #: a call that reaches hardware with this value fails naming it, which points
@@ -380,6 +389,52 @@ def captures_dir_source() -> str | None:
     return None
 
 
+def configured_depth_band() -> tuple[float, float] | None:
+    """``[registration] depth_band`` as ``(near, far)``, if the file states one.
+
+    None means "not stated", and every registration keeps the sensor's own
+    interval. A stated value that is not two increasing positive finite
+    numbers is refused as :class:`ConfigFileUnreadable`, for the reason
+    malformed TOML is: silently ignoring it would hide the very setting the
+    file exists to make, and a registration clipped to the wrong interval
+    reports plausible numbers.
+    """
+    table = _load_config().get(REGISTRATION_TABLE)
+    if not isinstance(table, dict) or DEPTH_BAND_KEY not in table:
+        return None
+    value = table[DEPTH_BAND_KEY]
+    problem = _depth_band_problem(value)
+    if problem is not None:
+        raise ConfigFileUnreadable(
+            f"{config_path()} states {DEPTH_BAND_KEY} = {value!r} under [{REGISTRATION_TABLE}], "
+            f"which {problem}. Write it as two increasing positive numbers, for example "
+            f"{DEPTH_BAND_KEY} = [130, 275], or remove it to keep the default interval."
+        )
+    near, far = value
+    return float(near), float(far)
+
+
+def _depth_band_problem(value: object) -> str | None:
+    """Why a stated depth band cannot be honoured, or None when it can."""
+    if not isinstance(value, list) or len(value) != 2:
+        return "is not a list of two numbers"
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, int | float) or not math.isfinite(item):
+            return "is not made of two finite numbers"
+    near, far = value
+    if near <= 0 or far <= near:
+        return "is not a positive, increasing interval"
+    return None
+
+
+def depth_band_source() -> str | None:
+    """Where the registration depth band is stated, in words, or None when it is not."""
+    table = _load_config().get(REGISTRATION_TABLE)
+    if isinstance(table, dict) and DEPTH_BAND_KEY in table:
+        return str(config_path())
+    return None
+
+
 @overload
 def captures_dir_for(name: str, fallback: Path) -> Path: ...
 
@@ -630,6 +685,38 @@ def set_captures_dir(directory: Path) -> CapturesWrite:
     target = _absolute(directory, base=Path.cwd())
     changed = _write_setting(CAPTURES_TABLE, CAPTURES_KEY, str(target))
     return CapturesWrite(target, changed)
+
+
+def set_depth_band(near: float, far: float) -> bool:
+    """Record the registration depth band. True if the file changed.
+
+    Refuses, before touching the file, a band the clip could not apply - the
+    same rule :func:`configured_depth_band` reads by - so the file never
+    states an interval that every reader would then refuse.
+    """
+    values: list[float] = [float(near), float(far)]
+    problem = _depth_band_problem(values)
+    if problem is not None:
+        raise ConfigWriteRefused(
+            f"a depth band of {near!r} to {far!r} {problem}; nothing was written. The near end "
+            "must be positive and the far end beyond it."
+        )
+    return _write_setting(
+        REGISTRATION_TABLE, DEPTH_BAND_KEY, values, literal=_toml_number_list(values)
+    )
+
+
+def clear_depth_band() -> bool:
+    """Remove the recorded depth band. True if the file stated one and now does not."""
+    return _write_setting(REGISTRATION_TABLE, DEPTH_BAND_KEY, None)
+
+
+def _toml_number_list(values: Sequence[float]) -> str:
+    """``[130, 275]``: integers as integers, anything else as a float literal."""
+    rendered = [
+        str(int(value)) if float(value).is_integer() else repr(float(value)) for value in values
+    ]
+    return "[" + ", ".join(rendered) + "]"
 
 
 def clear_captures_dir() -> bool:
@@ -888,8 +975,12 @@ def _everything_but(parsed: dict[str, object], table: str, key: str) -> dict[str
     return copied
 
 
-def _write_setting(table: str, key: str, value: str | None) -> bool:
+def _write_setting(table: str, key: str, value: object, *, literal: str | None = None) -> bool:
     """Set or remove one key in the config file. True if the file changed.
+
+    ``value`` is what the key must READ BACK as; a string is written as a TOML
+    basic string, and anything else must come with ``literal``, the exact TOML
+    text to write for it. ``None`` removes the key.
 
     The file is edited as text rather than reserialized from the parse tree:
     round-tripping through :mod:`tomllib` would silently drop every comment and
@@ -907,7 +998,18 @@ def _write_setting(table: str, key: str, value: str | None) -> bool:
     """
     original = _read_config_text()
     before = _load_config()  # refuse to edit a file this cannot read in the first place
-    updated = _edit_toml(original or "", table, key, value)
+    if value is None:
+        rendered = None
+    elif literal is not None:
+        rendered = literal
+    elif isinstance(value, str):
+        rendered = _toml_basic_string(value)
+    else:
+        raise ConfigWriteRefused(
+            f"{key} under [{table}] cannot be written as {value!r} without its TOML text; "
+            "nothing was written"
+        )
+    updated = _edit_toml(original or "", table, key, rendered)
     if updated == (original or ""):
         return False
 
@@ -1044,8 +1146,12 @@ def _discard(scratch: Path) -> None:
         scratch.unlink()
 
 
-def _edit_toml(text: str, table: str, key: str, value: str | None) -> str:
-    """``text`` with ``key`` in ``[table]`` set to ``value``, or removed if None.
+def _edit_toml(text: str, table: str, key: str, rendered: str | None) -> str:
+    """``text`` with ``key`` in ``[table]`` set to ``rendered``, or removed if None.
+
+    ``rendered`` is the value's exact TOML text - already quoted for a string,
+    already bracketed for an array - so this function knows nothing about
+    types and cannot mis-quote one.
 
     The file's own line ending is preserved throughout: a replaced assignment
     keeps the terminator of the line it replaces, an inserted one takes the
@@ -1054,7 +1160,7 @@ def _edit_toml(text: str, table: str, key: str, value: str | None) -> str:
     """
     lines = _split_lines(text)
     newline = _file_newline(text)
-    assignment = None if value is None else f"{key} = {_toml_basic_string(value)}"
+    assignment = None if rendered is None else f"{key} = {rendered}"
     wanted = (_key_parts(table), False)
     start = next(
         (index for index, line in enumerate(lines) if _table_header(line) == wanted),

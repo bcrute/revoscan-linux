@@ -90,7 +90,14 @@ MAX_OUTPUT_BYTES: Final = 128 * 1024 * 1024
 #: The header is comments plus a dozen fixed lines. This bounds what a caller's
 #: provenance strings can inflate it to; a header past it is refused, never
 #: truncated, because a half-stated caveat reads as a complete one.
-MAX_HEADER_BYTES: Final = 8192
+#:
+#: 64 KiB rather than the 8 KiB it was: a real turntable registration on
+#: 2026-09-04 carried five limitations (1200 characters, three of them only
+#: present when closures were rejected) and a 1645-character preparation
+#: statement, and its header measured 8965 bytes - so the first export of the
+#: best capture this project had produced was refused for its caveats being
+#: too complete. The bound is against runaway provenance, not against prose.
+MAX_HEADER_BYTES: Final = 64 * 1024
 
 #: Where comment text is wrapped. Well inside the 79 columns that make a header
 #: readable in a terminal, with room for the ``comment `` prefix.

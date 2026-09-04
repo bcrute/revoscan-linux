@@ -25,6 +25,7 @@ import pytest
 from scanner3d.pointcloud import (
     CAMERA_OPTICAL_FRAME,
     INHERENT_LIMITATIONS,
+    MAX_HEADER_BYTES,
     MAX_OUTPUT_BYTES,
     MAX_POINTS,
     RAW_UNIT_LABEL,
@@ -349,7 +350,10 @@ def test_the_documented_ceilings_are_the_ones_in_force():
 
 
 def test_a_header_inflated_past_its_ceiling_is_refused_not_truncated():
-    fat = tuple(f"limitation number {index}: " + "x" * 400 for index in range(40))
+    # Sized from the ceiling itself, so raising the ceiling keeps this a test
+    # of the refusal rather than of one particular number.
+    count = MAX_HEADER_BYTES // 400 + 8
+    fat = tuple(f"limitation number {index}: " + "x" * 400 for index in range(count))
     with pytest.raises(PointCloudNotAllowed, match="refused rather than truncated"):
         encode_ply([], provenance=provenance(limitations=fat))
 

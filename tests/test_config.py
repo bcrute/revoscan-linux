@@ -1095,3 +1095,74 @@ def test_a_hosts_own_configuration_cannot_reach_an_import_time_constant(tmp_path
         check=False,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+# --- the registration depth band ------------------------------------------------
+
+
+def test_no_stated_depth_band_reads_as_not_stated():
+    assert config_module.configured_depth_band() is None
+    assert config_module.depth_band_source() is None
+
+
+def test_the_registration_depth_band_is_read_from_the_config_file():
+    path = _write_config("[registration]\ndepth_band = [130, 275.5]\n")
+    assert config_module.configured_depth_band() == (130.0, 275.5)
+    assert config_module.depth_band_source() == str(path)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        '"130-275"',
+        "[130]",
+        "[130, 275, 300]",
+        "[275, 130]",
+        "[130, 130]",
+        "[0, 275]",
+        "[-5, 275]",
+        "[true, 275]",
+        '["130", "275"]',
+        "[nan, 275]",
+        "[130, inf]",
+    ],
+)
+def test_a_depth_band_the_clip_cannot_honour_is_refused_rather_than_ignored(value):
+    """Silently ignoring it would hide the very setting the file exists to make."""
+    _write_config(f"[registration]\ndepth_band = {value}\n")
+    with pytest.raises(ConfigFileUnreadable) as caught:
+        config_module.configured_depth_band()
+    assert "depth_band" in str(caught.value)
+
+
+def test_recording_the_depth_band_writes_a_list_the_readers_accept():
+    _write_config('[captures]\ndirectory = "/scans"  # kept\n')
+    assert config_module.set_depth_band(130, 275) is True
+    text = config_path().read_text(encoding="utf-8")
+    assert "[registration]\ndepth_band = [130, 275]\n" in text
+    assert 'directory = "/scans"  # kept' in text
+    assert config_module.configured_depth_band() == (130.0, 275.0)
+    # Recording the same band again changes nothing, and says so.
+    assert config_module.set_depth_band(130, 275) is False
+
+
+def test_a_fractional_band_is_written_as_floats_and_read_back_exactly():
+    assert config_module.set_depth_band(127.5, 262.25) is True
+    assert config_module.configured_depth_band() == (127.5, 262.25)
+
+
+def test_clearing_the_depth_band_removes_only_that_key():
+    _write_config('[registration]\ndepth_band = [130, 275]\nother = "kept"\n')
+    assert config_module.clear_depth_band() is True
+    assert config_module.configured_depth_band() is None
+    assert 'other = "kept"' in config_path().read_text(encoding="utf-8")
+    assert config_module.clear_depth_band() is False
+
+
+@pytest.mark.parametrize("near, far", [(275, 130), (0, 275), (130, 130), (-1, 100)])
+def test_a_band_the_clip_could_not_apply_is_refused_before_the_file_is_touched(near, far):
+    _write_config('[captures]\ndirectory = "/scans"\n')
+    before = config_path().read_text(encoding="utf-8")
+    with pytest.raises(ConfigWriteRefused):
+        config_module.set_depth_band(near, far)
+    assert config_path().read_text(encoding="utf-8") == before

@@ -144,6 +144,7 @@ from scanner3d.pointcloud import (
     sha256_of,
     write_ply,
 )
+from scanner3d.preparation import DepthBand
 from scanner3d.reconstruction_readiness import (
     ReconstructionReadiness,
     ReconstructionRefused,
@@ -1043,8 +1044,14 @@ def export_reconstruction(
     max_points: int = MAX_POINTS,
     tsdf_backend: str = AUTO_BACKEND,
     on_progress: Callable[[str], None] | None = None,
+    depth_band: DepthBand | None = None,
 ) -> ReconstructionExport:
     """Write one registered sweep into a fresh folder inside ``frames_dir``.
+
+    ``depth_band`` is the interval the registration clouds were clipped to;
+    when given, the field accepts exactly that interval of each frame's depths,
+    so what was fused is what was registered. ``None`` keeps the sensor's own
+    :data:`TSDF_MIN_DEPTH` to :data:`TSDF_MAX_DEPTH`.
 
     Produces a registered point-cloud PLY, one fused surface as a PLY mesh and
     as an OBJ, and a JSON record naming all three with their lengths and
@@ -1182,8 +1189,8 @@ def export_reconstruction(
             bounds=resolution.bounds,
             voxel_size=resolution.voxel_size,
             truncation=resolution.truncation,
-            min_depth=TSDF_MIN_DEPTH,
-            max_depth=TSDF_MAX_DEPTH,
+            min_depth=TSDF_MIN_DEPTH if depth_band is None else depth_band.near,
+            max_depth=TSDF_MAX_DEPTH if depth_band is None else depth_band.far,
             weight_policy=TSDF_WEIGHT_POLICY,
             max_weight=TSDF_MAX_WEIGHT,
             max_voxels=voxel_budget,

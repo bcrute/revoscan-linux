@@ -33,6 +33,8 @@ from scanner3d.preparation import (
     PREPARATION_VERSION,
     RECONSTRUCT_POINTS,
     SCHEMA_VERSION,
+    DepthBand,
+    DepthBandUnusable,
     FusionFrameUnusable,
     FusionMaskSummary,
     PointsUnusable,
@@ -202,7 +204,7 @@ def test_both_capture_paths_read_their_cloud_from_the_shared_preparation_record(
     marker = ((7.0, 8.0, 9.0),)
     asked: list[int] = []
 
-    def spy(_raw: bytes, target_points: int) -> PreparedCloud:
+    def spy(_raw: bytes, target_points: int, _depth_band: object = None) -> PreparedCloud:
         asked.append(target_points)
         return PreparedCloud.of_points(marker, target_points=target_points)
 
@@ -598,3 +600,68 @@ def test_the_statement_keeps_the_two_filters_reach_exact():
     # And it does not borrow the fusion's claim: nothing here says a removed
     # point is missing from an exported mesh, because none was written.
     assert "no masked sample reached the fused field" not in without
+
+
+# --- the depth band ---------------------------------------------------------------
+
+
+def test_a_stated_depth_band_is_the_interval_the_clip_keeps():
+    band = DepthBand(near=120.0, far=200.0)
+    inside = sheet(span=100.0, steps=12, depth=150.0)
+    nearer = [(0.0, 0.0, 100.0)] * 40  # inside the sensor's interval, outside the band
+    further = [(0.0, 0.0, 250.0)] * 40
+    prepared = prepare_points(
+        nearer + inside + further, target_points=RECONSTRUCT_POINTS, depth_band=band
+    )
+
+    assert prepared.clipped_points == len(inside)
+    assert prepared.depth_band == band
+    assert prepared.as_dict()["depth_clip"] == {"near": 120.0, "far": 200.0}
+
+
+def test_stating_no_band_keeps_the_sensor_interval_and_the_record_says_so():
+    prepared = prepare_points(
+        sheet(span=100.0, steps=12, depth=150.0), target_points=RECONSTRUCT_POINTS
+    )
+
+    assert prepared.depth_band == DepthBand.default()
+    assert DepthBand.default() == DepthBand(near=DEPTH_CLIP_NEAR, far=DEPTH_CLIP_FAR)
+    assert prepared.as_dict()["depth_clip"] == {"near": DEPTH_CLIP_NEAR, "far": DEPTH_CLIP_FAR}
+    assert PreparedCloud.of_points([(0.0, 0.0, 100.0)]).depth_band == DepthBand.default()
+
+
+@pytest.mark.parametrize(
+    "near, far",
+    [
+        (200.0, 100.0),
+        (100.0, 100.0),
+        (0.0, 100.0),
+        (-5.0, 100.0),
+        (float("nan"), 100.0),
+        (100.0, float("inf")),
+        (True, 100.0),
+        (100.0, "200"),
+    ],
+)
+def test_a_band_the_clip_cannot_apply_is_refused_before_any_point_is_read(near, far):
+    with pytest.raises(DepthBandUnusable):
+        prepare_points(
+            [(0.0, 0.0, 150.0)] * 5,
+            target_points=RECONSTRUCT_POINTS,
+            depth_band=DepthBand(near=near, far=far),
+        )
+
+
+def test_the_frame_path_carries_the_band_through_to_the_clip():
+    raw = scene_frame(shapes=[Sphere(centre=(20.0, 0.0, 150.0), radius=20.0)])
+
+    kept = prepare_frame(raw, target_points=RECONSTRUCT_POINTS, depth_band=DepthBand(100.0, 200.0))
+    excluded = prepare_frame(
+        raw, target_points=RECONSTRUCT_POINTS, depth_band=DepthBand(200.0, 300.0)
+    )
+
+    assert kept.clipped_points > 0
+    assert kept.depth_band == DepthBand(100.0, 200.0)
+    assert excluded.clipped_points == 0
+    assert excluded.points == ()
+    assert excluded.depth_band == DepthBand(200.0, 300.0)

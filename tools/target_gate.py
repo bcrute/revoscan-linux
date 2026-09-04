@@ -4,12 +4,27 @@ Run every session:
 
     .venv/bin/python tools/target_gate.py /home/ben/scans/scan/<capture>
     .venv/bin/python tools/target_gate.py <capture> --json
+    .venv/bin/python tools/target_gate.py <capture> --depth-band 130 275
+
+The depth band is the interval the SUBJECT occupies. Anything static in the
+room inside the default 60-300 clip registers as a second rigid body and
+bends the trajectory without closure noticing; see docs/target-gate.md and
+:class:`scanner3d.preparation.DepthBand`.
 
 STRICTLY READ-ONLY on the capture. Reads raw frames, writes nothing into the
 capture directory, and touches no device.
 
 What it judges, and what it refuses to judge
 --------------------------------------------
+**Coherence** is checked first and refused on. Frames one turntable
+revolution apart have the same depth image, so their poses must agree;
+:mod:`scanner3d.coherence` reads the period from the images and projects
+each revisit through both poses. A sweep whose revisits disagree is a smear
+of misplaced frames, and every number below would be measured on the smear -
+a CAD-side nearest-point query is satisfied by a dense enough smear whatever
+its shape, which is how a MIRRORED reference once fitted one as well as the
+real one. Nothing is reported for such a sweep.
+
 **Accuracy** is gated. Over the CAD points that were actually observed, how far
 is the scan from the reference? That is answerable and it is what the tolerance
 file declares a bar for.
@@ -54,6 +69,20 @@ from scipy.spatial import cKDTree
 
 ROOT: Final = Path(__file__).resolve().parent.parent
 TARGET: Final = ROOT / "reference/targets/reconstruction_v1"
+
+
+def _src() -> None:
+    """Make the package importable from a checkout without installing it."""
+    path = str(ROOT / "src")
+    if path not in sys.path:
+        sys.path.insert(0, path)
+
+
+#: A camera orbit is a turntable's when it is at least this far from its axis
+#: and this close to a circle. A handheld pass fails both, and the placement
+#: then seeds from the support plane as it always did.
+ORBIT_MIN_RADIUS: Final = 50.0
+ORBIT_MAX_RESIDUAL: Final = 2.0
 
 #: A CAD point with no scan point this close was not observed, and is excluded
 #: from accuracy rather than counted as a large error.
@@ -354,30 +383,49 @@ def orthogonality(
     return rows
 
 
-def fuse(capture: Path, workers: int) -> np.ndarray:
-    """Register the capture and return its points in one frame. READ-ONLY."""
-    sys.path.insert(0, str(ROOT / "src"))
+def fuse(capture: Path, workers: int, band: object) -> tuple[np.ndarray, list[bytes], list]:
+    """Register the capture: its points in one frame, its raw frames, its poses. READ-ONLY.
+
+    ``band`` is the :class:`scanner3d.preparation.DepthBand` the preparation
+    clips to. The raw frames and the poses come back beside the cloud because
+    the coherence check needs the images and the placement seed needs the
+    orbit; both were thrown away before, and the numbers were wrong.
+    """
+    _src()
     from scanner3d.pipeline import reconstruct_sweep
     from scanner3d.preparation import RECONSTRUCT_POINTS, prepare_frame
 
     frames = sorted(capture.glob("frame_*.raw"))
     if not frames:
         raise SystemExit(f"{capture} holds no frame_*.raw")
+    raws = [f.read_bytes() for f in frames]
     clouds = [
-        prepare_frame(f.read_bytes(), target_points=RECONSTRUCT_POINTS).points for f in frames
+        prepare_frame(raw, target_points=RECONSTRUCT_POINTS, depth_band=band).points  # type: ignore[arg-type]
+        for raw in raws
     ]
     result = reconstruct_sweep(clouds, workers=workers, backend="auto")
-    return np.array([p for c, t in zip(clouds, result.poses, strict=True) for p in t.apply_all(c)])
+    poses = list(result.poses)
+    scan = np.array([p for c, t in zip(clouds, poses, strict=True) for p in t.apply_all(c)])
+    return scan, raws, poses
 
 
-def place(cad: np.ndarray, scan: np.ndarray, seed: int = 5) -> tuple[np.ndarray, list[str]]:
-    """Put the CAD where the scan says the target is, then refine onto it."""
-    sys.path.insert(0, str(ROOT / "src"))
-    from scanner3d.icp_plane import icp_point_to_plane
+def _frame_about(up: np.ndarray) -> np.ndarray:
+    """A right-handed orthonormal frame whose third row is ``up``.
 
-    rng = np.random.default_rng(seed)
-    log: list[str] = []
+    Right-handed matters: the yaw search rotates the CAD about this frame's
+    third axis and the result is mapped back through the frame's transpose,
+    so a left-handed frame would hand back the CAD's MIRROR image.
+    """
+    helper = np.array([1.0, 0, 0]) if abs(up[0]) < 0.9 else np.array([0, 1.0, 0])
+    e1 = np.cross(up, helper)
+    e1 /= np.linalg.norm(e1)
+    return np.stack([e1, np.cross(up, e1), up])
 
+
+def _plane_seed(
+    scan: np.ndarray, rng: np.random.Generator, log: list[str]
+) -> tuple[np.ndarray, np.ndarray, float, float, float]:
+    """The original seed: the scan's dominant plane fixes up, a density peak fixes the centre."""
     sample = scan[rng.choice(len(scan), min(40000, len(scan)), replace=False)]
     best = (0, None, None)
     runner_up = 0
@@ -401,12 +449,7 @@ def place(cad: np.ndarray, scan: np.ndarray, seed: int = 5) -> tuple[np.ndarray,
         f"support plane: {best[0]}/{len(sample)} inliers "
         f"(runner-up {runner_up}, margin {best[0] / max(runner_up, 1):.2f}x)"
     )
-
-    helper = np.array([1.0, 0, 0]) if abs(up[0]) < 0.9 else np.array([0, 1.0, 0])
-    e1 = np.cross(up, helper)
-    e1 /= np.linalg.norm(e1)
-    frame = np.stack([e1, np.cross(up, e1), up])
-
+    frame = _frame_about(up)
     planar = scan @ frame.T
     height = planar[:, 2] - np.median(planar[:, 2])
     standing = planar[(height > 3.0) & (height < 60.0)]
@@ -415,15 +458,121 @@ def place(cad: np.ndarray, scan: np.ndarray, seed: int = 5) -> tuple[np.ndarray,
     cx, cy = (xe[i] + xe[i + 1]) / 2, (ye[j] + ye[j + 1]) / 2
     near = standing[(np.abs(standing[:, 0] - cx) < 70) & (np.abs(standing[:, 1] - cy) < 70)]
     log.append(f"density peak holds {len(near)} points")
+    return frame, near, float(cx), float(cy), float(np.median(standing[:, 2]))
+
+
+def _orbit_seed(
+    scan: np.ndarray, poses: list | None, rng: np.random.Generator, log: list[str]
+) -> tuple[np.ndarray, np.ndarray, float, float, float] | None:
+    """Seed from the turntable axis the camera orbit gives, or None when there is none.
+
+    A coherent turntable registration puts the camera centres on a circle
+    about the spindle. Its normal is the axis, the turntable top is the
+    dominant plane perpendicular to it among the points near it, and the
+    target is what stands on that plane within 70 of the axis. None of that
+    needs the scan's largest plane, which on a COHERENT cloud is as likely to
+    be the desk under the turntable as the turntable itself.
+    """
+    if poses is None:
+        return None
+    _src()
+    from scanner3d.coherence import camera_orbit
+
+    orbit = camera_orbit(poses)
+    if orbit is None:
+        log.append("camera centres do not describe a circle; seeding from the support plane")
+        return None
+    if orbit.radius < ORBIT_MIN_RADIUS or orbit.residual_median > ORBIT_MAX_RESIDUAL:
+        log.append(
+            f"camera orbit (radius {orbit.radius:.1f}, circle residual median "
+            f"{orbit.residual_median:.2f}) is not a turntable's; seeding from the support plane"
+        )
+        return None
+    up = np.array(orbit.axis)
+    axis_point = np.array(orbit.centre)
+    relative = scan - axis_point
+    height = relative @ up
+    radial = np.linalg.norm(relative - np.outer(height, up), axis=1)
+    near_axis = scan[radial < 110.0]
+    if len(near_axis) < 1000:
+        log.append(
+            f"only {len(near_axis)} points within 110 of the axis; seeding from the support plane"
+        )
+        return None
+    sample = near_axis[rng.choice(len(near_axis), min(30000, len(near_axis)), replace=False)]
+    best_inliers, top = 0, None
+    for _ in range(3000):
+        tri = sample[rng.choice(len(sample), 3, replace=False)]
+        n = np.cross(tri[1] - tri[0], tri[2] - tri[0])
+        length = np.linalg.norm(n)
+        if length < 1e-9:
+            continue
+        n = n / length
+        # The turntable top is perpendicular to its own spindle.
+        if abs(n @ up) < 0.9:
+            continue
+        inliers = int((np.abs((sample - tri[0]) @ n) < 1.5).sum())
+        if inliers > best_inliers:
+            best_inliers, top = inliers, float(tri[0] @ up)
+    if top is None:
+        log.append("no plane perpendicular to the axis; seeding from the support plane")
+        return None
+    # The orbit centre lies in the plane of the camera centres, ABOVE the
+    # turntable, so the turntable top sits at negative height along 'up'.
+    # The circle's normal carries no sign of its own; flip it if it came out
+    # pointing down.
+    if top - float(axis_point @ up) > 0.0:
+        up, top = -up, -top
+    frame = _frame_about(up)
+    planar = scan @ frame.T
+    standing = planar[(planar[:, 2] - top > 3.0) & (planar[:, 2] - top < 60.0)]
+    axis_2d = axis_point @ frame.T
+    near = standing[
+        (np.abs(standing[:, 0] - axis_2d[0]) < 70) & (np.abs(standing[:, 1] - axis_2d[1]) < 70)
+    ]
+    log.append(
+        f"placement seeded from the camera orbit: radius {orbit.radius:.1f}, circle residual "
+        f"median {orbit.residual_median:.2f} over {orbit.poses} poses; turntable top "
+        f"{best_inliers}/{len(sample)} inliers; {len(near)} points standing on it within 70 "
+        "of the axis"
+    )
+    return frame, near, float(axis_2d[0]), float(axis_2d[1]), float(top)
+
+
+def place(
+    cad: np.ndarray, scan: np.ndarray, seed: int = 5, poses: list | None = None
+) -> tuple[np.ndarray, list[str]]:
+    """Put the CAD where the scan says the target is, then refine onto it.
+
+    Seeded from the camera orbit when ``poses`` describe one (see
+    :func:`_orbit_seed`), else from the scan's dominant plane and its density
+    peak as before. The orbit seed is what makes a COHERENT cloud placeable:
+    measured on the first coherent sweep this repository produced, the
+    support-plane search picked between the turntable and the desk at a
+    margin of 1.0x, the density peak landed on the turntable disc, and every
+    seed converged 5-8 from the target with 40% of the CAD observed - while
+    the same search on a smeared cloud "converged" happily at 0.96.
+    """
+    _src()
+    from scanner3d.icp_plane import icp_point_to_plane
+
+    rng = np.random.default_rng(seed)
+    log: list[str] = []
+
+    seeded = _orbit_seed(scan, poses, rng, log)
+    if seeded is None:
+        seeded = _plane_seed(scan, rng, log)
+    frame, near, centre_x, centre_y, base_height = seeded
 
     placed, score = None, None
     for yaw in np.arange(0, 360, 3.0):
         t = math.radians(yaw)
         rot = np.array([[math.cos(t), -math.sin(t), 0], [math.sin(t), math.cos(t), 0], [0, 0, 1]])
-        q = cad @ rot.T + np.array([cx, cy, np.median(standing[:, 2]) - 3.0])
-        d = nearest(q[rng.choice(len(q), 900, replace=False)], near[::7])
-        if score is None or float(np.median(d)) < score:
-            placed, score = q, float(np.median(d))
+        for dx, dy in ((0.0, 0.0), (10.0, 0.0), (-10.0, 0.0), (0.0, 10.0), (0.0, -10.0)):
+            q = cad @ rot.T + np.array([centre_x + dx, centre_y + dy, base_height - 3.0])
+            d = nearest(q[rng.choice(len(q), 900, replace=False)], near[::7])
+            if score is None or float(np.median(d)) < score:
+                placed, score = q, float(np.median(d))
     log.append(f"coarse placement: median {score:.2f} mm")
 
     for width, radius in REFINE_SCHEDULE:
@@ -459,8 +608,8 @@ def place(cad: np.ndarray, scan: np.ndarray, seed: int = 5) -> tuple[np.ndarray,
             if abs(after - before) < 0.02:
                 break
 
-    # Back to the caller's frame. Everything above works in the support-plane
-    # frame, because 'standing on the plane' and 'the density peak' only mean
+    # Back to the caller's frame. Everything above works in the seed's frame,
+    # because 'standing on the plane' and 'the density peak' only mean
     # anything there; `frame` is orthonormal, so its transpose is its inverse.
     # Returning plane-frame coordinates silently compared the model against a
     # scan in a different basis, which read as 0% of the CAD observed while the
@@ -484,24 +633,85 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--cache",
         type=Path,
-        help="reuse the fused cloud at this path, writing it first if absent. The "
-        "fusion is the expensive half and is independent of --seed, so a "
-        "repeatability sweep should not pay for it more than once.",
+        help="reuse the fused cloud at this path, writing it first if absent (its poses go "
+        "beside it as <cache>.poses.json). The fusion is the expensive half and is "
+        "independent of --seed, so a repeatability sweep should not pay for it more than "
+        "once.",
+    )
+    parser.add_argument(
+        "--depth-band",
+        nargs=2,
+        type=float,
+        metavar=("NEAR", "FAR"),
+        help="clip preparation to this depth interval for registration, overriding "
+        "depth_band under [registration] in the config file and the sensor's own 60-300. "
+        "State the interval the subject occupies; see docs/target-gate.md",
     )
     args = parser.parse_args(argv)
+    _src()
+    from scanner3d.cli import DEPTH_SCALE_METRES, resolve_depth_band
+    from scanner3d.coherence import check_coherence
+    from scanner3d.geometry import Rigid
+    from scanner3d.simulate import FACTORY_INTRINSICS
 
     gates = json.loads((TARGET / "gates/tolerance-v1.json").read_text())
     tol = next(g for g in gates["gates"] if g["id"] == "planar_rms")["tolerance_mm"]
     cad, sid, names, print_record = load_reference()
 
+    band, band_source = resolve_depth_band(args.depth_band)
+    print(f"registration depth band: {band.describe()} (from {band_source})", file=sys.stderr)
+
+    raws: list[bytes] | None = None
+    poses: list | None = None
+    pose_cache = (
+        None if args.cache is None else args.cache.with_name(args.cache.name + ".poses.json")
+    )
     if args.cache is not None and args.cache.exists():
         scan = np.load(args.cache)
         print(f"fused cloud from {args.cache} ({len(scan)} points)", file=sys.stderr)
+        if pose_cache is not None and pose_cache.exists():
+            poses = [
+                Rigid.of(tuple(map(tuple, p["rotation"])), tuple(p["translation"]))
+                for p in json.loads(pose_cache.read_text())
+            ]
+            raws = [f.read_bytes() for f in sorted(args.capture.glob("frame_*.raw"))]
+            if len(raws) != len(poses):
+                print(f"{pose_cache} does not match the capture's frames; ignored", file=sys.stderr)
+                raws = poses = None
+        else:
+            print(
+                "cached cloud carries no poses: coherence is not checked and the placement is "
+                "seeded from the support plane",
+                file=sys.stderr,
+            )
     else:
-        scan = fuse(args.capture, args.workers)
-        if args.cache is not None:
+        scan, raws, poses = fuse(args.capture, args.workers, band)
+        if args.cache is not None and pose_cache is not None:
             np.save(args.cache, scan)
-    placed, log = place(cad, scan, seed=args.seed)
+            pose_cache.write_text(json.dumps([p.as_dict() for p in poses]) + "\n")
+
+    coherence = None
+    if raws is not None and poses is not None:
+        coherence = check_coherence(
+            raws,
+            poses,
+            intrinsics=FACTORY_INTRINSICS,
+            depth_scale=DEPTH_SCALE_METRES,
+            depth_band=band,
+        )
+        print(f"coherence: {coherence.statement()}", file=sys.stderr)
+        if coherence.coherent is False:
+            print(
+                "\nREGISTRATION INCOHERENT: frames one turntable revolution apart have the same "
+                "depth image but poses that disagree, so the fused cloud is a smear of misplaced "
+                "frames and nothing measured on it describes the target. Nothing is reported. "
+                "Clear the background behind the turntable, or state the subject's depth band "
+                "with --depth-band; see docs/target-gate.md.",
+                file=sys.stderr,
+            )
+            return 2
+
+    placed, log = place(cad, scan, seed=args.seed, poses=poses)
     d = nearest(placed, scan)
     observed = d < OBSERVED_RADIUS
 
@@ -600,6 +810,8 @@ def main(argv: list[str] | None = None) -> int:
         },
         "surfaces": surfaces,
         "registration": log,
+        "depth_band": {**band.as_dict(), "source": band_source},
+        "coherence": None if coherence is None else coherence.as_dict(),
         "limitations": [
             "Not an accuracy claim. The print record's formal-gate readiness is reported above; "
             "while it is false, the ground truth's own uncertainty is unmeasured.",

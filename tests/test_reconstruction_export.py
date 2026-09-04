@@ -44,6 +44,7 @@ from scanner3d.mesh import INHERENT_LIMITATIONS as OCCUPANCY_LIMITATIONS
 from scanner3d.mesh import TSDF_INHERENT_LIMITATIONS, MeshMethod, reconstruct, write_obj
 from scanner3d.pipeline import SweepReconstruction
 from scanner3d.pointcloud import MAX_POINTS, sha256_of
+from scanner3d.preparation import DepthBand
 from scanner3d.reconstruction_export import (
     CLOUD_NAME,
     MARGIN_VOXELS,
@@ -1258,3 +1259,40 @@ def test_the_export_carries_every_point_of_every_frame_it_was_given(
     assert len(read_ply_points((export.directory / CLOUD_NAME).read_bytes())) == (
         export.point_count
     )
+
+
+def test_a_stated_depth_band_is_the_interval_the_field_accepts(
+    tmp_path: Path, capture: Capture
+) -> None:
+    """What was registered is what gets fused, and the record says so.
+
+    The registration clouds were clipped to the band; a field that still
+    accepted the sensor's whole interval would fuse room the poses never
+    described. The field's own configuration is the evidence. The sphere sits
+    at 70-110, so a band of 60-150 holds all of it.
+    """
+    frames_dir = tmp_path / "capture"
+    frames_dir.mkdir()
+
+    export = run(frames_dir, capture, depth_band=DepthBand(near=60.0, far=150.0))
+    field = section(export.record, "mesh")["tsdf"]["integration"]
+
+    assert field["config"]["depth"]["min_depth"] == 60.0
+    assert field["config"]["depth"]["max_depth"] == 150.0
+
+
+def test_a_band_that_excludes_the_subject_fuses_nothing_and_says_so(
+    tmp_path: Path, capture: Capture
+) -> None:
+    """A band beyond the sphere leaves the field no surface, and the export refuses.
+
+    Refused rather than published as a mesh with no faces: the same rule the
+    export applies to a field that never saw anything, because that is exactly
+    what it is.
+    """
+    frames_dir = tmp_path / "capture"
+    frames_dir.mkdir()
+
+    with pytest.raises(TsdfSurfaceUnavailable):
+        run(frames_dir, capture, depth_band=DepthBand(near=150.0, far=250.0))
+    assert leftovers(frames_dir) == []

@@ -168,7 +168,14 @@ MAX_OUTPUT_BYTES: Final = 128 * 1024 * 1024
 #: The comment block is the only place either format can state its provenance,
 #: so it is generous - and still a ceiling. A header past it is refused, never
 #: truncated, because half a stated caveat reads like a whole one.
-MAX_HEADER_BYTES: Final = 16384
+#:
+#: 64 KiB rather than the 16 KiB it was: on 2026-09-04 the first export of a
+#: real, coherent turntable registration was refused here with a 17086-byte
+#: mesh header - the fusion and extraction evidence plus five registration
+#: limitations, every one of them true. The bound is against runaway
+#: provenance, not against complete prose; :mod:`scanner3d.pointcloud` was
+#: raised the same day for the same reason.
+MAX_HEADER_BYTES: Final = 64 * 1024
 
 #: Where comment text is wrapped, leaving room for a ``comment `` or ``# ``
 #: prefix inside 79 columns.

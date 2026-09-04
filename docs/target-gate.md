@@ -585,3 +585,109 @@ The construction that works needs no segmentation at all:
   need for the split only became clear once the gate ran. It should be declared
   before the next run.
 - **One capture, one print, one session.** Nothing here says the result repeats.
+
+
+## 2026-09-03: the smear, the room, and the first coherent sweep
+
+Everything above from "What the gate's number is made of" onward was measured on
+registrations that were not coherent. This section records how that was found, what
+it overturns, and what the repository now does about it.
+
+**The ground truth was in the images.** A turntable sweep repeats its depth images
+every revolution. Matching each sampled frame against every later one by median
+absolute depth difference finds the period - 126 frames on `20260902-224804`, 127 on
+`20260903-142612` - and frames one period apart agree to 0.15 mm, better than adjacent
+frames do (0.3-0.4 mm). Two identical images must have the same pose, so a registration
+can be judged with no CAD at all: carry frame k+P's points through pose k+P and back
+through pose k, and read frame k's own depth there.
+
+| capture | registration | step per frame | poses one period apart | frame k+P landing in frame k within 1.5 mm |
+| --- | --- | --- | --- | --- |
+| `20260902-224804` (previous best) | as committed | 2.67 deg | up to 24 cm apart | 17-99%, two of four pairs under 25% |
+| `20260902-224804` | 130-275 mm clip | 2.89 deg | up to 11 cm apart | 47-97% |
+| `20260903-142612` | as committed | 2.67 deg | up to 62 deg apart | 114 of 190 frames off the target entirely |
+| `20260903-142612` | 130-275 mm clip | 2.85 deg | 1.1 deg, 6 mm (p90) | 90-99% |
+
+The true step is 360/126.5 = 2.85 degrees. The committed pipeline recovered 2.67, 94% of
+a turn per period, and loop closure then bent the trajectory to make the revisits it was
+given agree, leaving everything between them misplaced. Held-out closure read 1.3
+degrees on the previous best capture throughout.
+
+**Why no score saw it.** Closure is scored on the revisit pairs the optimiser was handed.
+The gate queries from each CAD point to the NEAREST scan point, and a union of misplaced
+copies is dense everywhere: the MIRRORED CAD fits the committed `20260902-224804` cloud as
+well as the real one (77-80% observed, 1.13 mm, 22/25 surfaces, against 82-83%, 1.14 mm,
+22-23/25). A chiral object fitting its own mirror image means the cloud has no shape at
+the millimetre level. Per-frame "on target" shares are fooled the same way, because
+`base_top` is nearly symmetric under yaw. Overlaying the placed CAD on single frames
+shows it 5-30 mm off per face: it fits the union, not any frame.
+
+**The cause is the room.** The bottle and the cylinder standing behind the turntable at
+250-300 mm are inside the 60-300 mm clip in every frame, and their decoding phantoms at
+60 and 100 mm come and go with the revolution - the "near-field obstruction" of
+2026-08-31 was never the optics. Static in the room while the subject turns, they are a
+second rigid body, and point-to-plane ICP fits a compromise. Re-registering the SAME
+frames with the preparation clipped to 130-275 mm gives, on `20260903-142612`, a camera
+orbit that is a circle of radius 215 mm with 0.28 mm residual and poses one period apart
+within 1.1 degrees.
+
+**What the coherent sweep measures.** The support-plane seed fails on a coherent cloud -
+the desk becomes as clean a plane as the turntable, the margin reads 1.0x, and the
+density peak lands on the turntable disc - so the CAD is placed from the orbit's axis
+instead. The gate's own metric on `20260903-142612` then reads:
+
+```
+ORTHOGONALITY  worst 0.95 deg against a 2 deg gate, 4/4 faces resolvable  -> PASS
+ACCURACY  RMS 0.80 mm  p95 1.83 mm  22/24 surfaces inside 1.5 mm
+COMPLETENESS  95% of CAD points observed
+```
+
+`plateau_top` 0.16, `outer_west` 0.20, `ramp_top` 0.36, the 1.5 mm rail 0.39. The
+failures are `step_10mm_side` (1.62) and `pocket_wall` (1.65, 74% seen), and
+`pocket_floor` is unobserved (11%) from a viewpoint 20 degrees above the turntable. The
+orthogonality gate, declared first in `tolerance-v1.json` and never evaluable before
+because every outer face came back as a sliver, now fits all four faces as planes with
+0.19-0.39 mm RMS - and `base_top` at 0.25 mm over 36,822 points, which is what this
+sensor's per-point noise on a flat face actually is. The TSDF fusion of the same frames
+at 0.5 mm voxels extracts a surface at 0.93 mm RMS with 96% coverage and reads 0.10 at
+the frames' own points: the fusion was never the problem, its input was.
+
+**What this overturns.** The "fusion produces a volume" correction rested on a statistic
+that cannot tell a plane with 0.65 mm noise (it reads 0.76) from a volume; registration
+WAS the dominant term, for the reason above and not that one. The 1.1-1.4 mm
+"within-frame" scatter on `base_top` was a tilted copy of the plate crossing the 3 mm
+selection band; on the coherent registration single frames scatter 0.58 mm on
+`base_top` at 60-67 degrees incidence and 0.23-0.30 mm on `plateau_top`. The 450-frame
+comparison, the coarse-to-fine finding, the per-frame ceiling and the TSDF section were
+all measured on smears. The single-frame intrinsics work (cx, cy, fx, depth linearity)
+does not depend on registration and stands.
+
+**With the background removed (2026-09-04).** Matte grey-black cloth about 30 cm
+behind the subject took the alias points to zero (see `docs/phantom-aliases.md`),
+and on capture `20260904-020845` the DEFAULT 60-300 mm clip registered coherently
+and read the best result so far:
+
+```
+ORTHOGONALITY  worst 1.45 deg against a 2 deg gate, 4/4 faces resolvable  -> PASS
+ACCURACY  RMS 0.63 mm  p95 1.24 mm  23/24 surfaces inside 1.5 mm
+COMPLETENESS  95% of CAD points observed
+```
+
+Only `pocket_wall` (1.64 mm) fails and `pocket_floor` (16%) is unobserved, both
+the deep pocket seen from 20 degrees of elevation. The same capture clipped to
+130-275, 130-330 or 60-275 registered INCOHERENTLY (2-7% of revisit points
+within 1.5 mm at the loop's start) while every one of those runs reported a
+held-out closure of 0.5-0.8 degrees. So the band is not a cure and the
+registration is fragile in a way the closure score cannot see; the coherence
+check is the guard, and the registration itself is the next thing to fix.
+
+**What the repository now does.** Preparation takes a `DepthBand` (`--depth-band NEAR
+FAR`, or `depth_band` under `[registration]` in the config file) and records it on every
+cloud; `scanner3d.coherence` reads the image period and the revisit agreement,
+`scanner3d reconstruct` reports the verdict, and `tools/target_gate.py` refuses an
+incoherent sweep outright and seeds its placement from the camera orbit. The desktop
+application carries the band as the **keep depths** controls in its technical bar - live
+preview, tracking and Reconstruct all clip to it, the export fuses over the same
+interval, and **Remember** writes it to the config file (`scanner3d config
+--set-depth-band` does the same from a shell). What it does not yet do: crop to the
+turntable region without being told the band, or weight the fusion by incidence.
