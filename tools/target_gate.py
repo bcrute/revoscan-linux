@@ -62,13 +62,21 @@ import json
 import math
 import sys
 from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import numpy as np
 from scipy.spatial import cKDTree
 
 ROOT: Final = Path(__file__).resolve().parent.parent
 TARGET: Final = ROOT / "reference/targets/reconstruction_v1"
+
+
+if TYPE_CHECKING:
+    # For annotations only: the real imports happen inside the functions,
+    # after _src() below has put the repository's src on the path.
+    from scanner3d.geometry import Rigid
+    from scanner3d.intrinsics import IntrinsicsRecord
+    from scanner3d.preparation import DepthBand
 
 
 def _src() -> None:
@@ -383,13 +391,23 @@ def orthogonality(
     return rows
 
 
-def fuse(capture: Path, workers: int, band: object) -> tuple[np.ndarray, list[bytes], list]:
+def fuse(
+    capture: Path,
+    workers: int,
+    band: DepthBand | None,
+    *,
+    deprojection: tuple[IntrinsicsRecord, float],
+    no_turntable: bool = False,
+) -> tuple[np.ndarray, list[bytes], list[Rigid]]:
     """Register the capture: its points in one frame, its raw frames, its poses. READ-ONLY.
 
     ``band`` is the :class:`scanner3d.preparation.DepthBand` the preparation
-    clips to. The raw frames and the poses come back beside the cloud because
-    the coherence check needs the images and the placement seed needs the
-    orbit; both were thrown away before, and the numbers were wrong.
+    clips to, and ``deprojection`` the intrinsics and depth scale every point
+    is made with - the calibrated ones the product uses, unless the caller
+    asked for the factory record. The raw frames and the poses come back
+    beside the cloud because the coherence check needs the images and the
+    placement seed needs the orbit; both were thrown away before, and the
+    numbers were wrong.
     """
     _src()
     from scanner3d.pipeline import reconstruct_sweep
@@ -399,12 +417,42 @@ def fuse(capture: Path, workers: int, band: object) -> tuple[np.ndarray, list[by
     if not frames:
         raise SystemExit(f"{capture} holds no frame_*.raw")
     raws = [f.read_bytes() for f in frames]
+    intrinsics, depth_scale = deprojection
     clouds = [
-        prepare_frame(raw, target_points=RECONSTRUCT_POINTS, depth_band=band).points  # type: ignore[arg-type]
+        prepare_frame(
+            raw,
+            target_points=RECONSTRUCT_POINTS,
+            depth_band=band,
+            intrinsics=intrinsics,
+            depth_scale=depth_scale,
+        ).points
         for raw in raws
     ]
-    result = reconstruct_sweep(clouds, workers=workers, backend="auto")
-    poses = list(result.poses)
+    from scanner3d.capture_sequence import frame_times
+    from scanner3d.turntable import TurntableNotDetected, TurntableUnusable, register_turntable
+
+    poses: list[Rigid] | None = None
+    if not no_turntable:
+        # The production path: one axis and one rate when the frames prove a
+        # turn, the frame-by-frame chain otherwise - the gate measures what
+        # an operator gets.
+        try:
+            turntable = register_turntable(
+                clouds,
+                raws=raws,
+                depth_scale=depth_scale,
+                times=frame_times(frames),
+                backend="auto",
+                on_progress=lambda line: print(line, file=sys.stderr),
+            )
+        except (TurntableNotDetected, TurntableUnusable) as exc:
+            print(f"turntable model not used: {exc}", file=sys.stderr)
+        else:
+            print(turntable.statement(), file=sys.stderr)
+            poses = list(turntable.poses)
+    if poses is None:
+        result = reconstruct_sweep(clouds, workers=workers, backend="auto")
+        poses = list(result.poses)
     scan = np.array([p for c, t in zip(clouds, poses, strict=True) for p in t.apply_all(c)])
     return scan, raws, poses
 
@@ -462,7 +510,7 @@ def _plane_seed(
 
 
 def _orbit_seed(
-    scan: np.ndarray, poses: list | None, rng: np.random.Generator, log: list[str]
+    scan: np.ndarray, poses: list[Rigid] | None, rng: np.random.Generator, log: list[str]
 ) -> tuple[np.ndarray, np.ndarray, float, float, float] | None:
     """Seed from the turntable axis the camera orbit gives, or None when there is none.
 
@@ -540,7 +588,7 @@ def _orbit_seed(
 
 
 def place(
-    cad: np.ndarray, scan: np.ndarray, seed: int = 5, poses: list | None = None
+    cad: np.ndarray, scan: np.ndarray, seed: int = 5, poses: list[Rigid] | None = None
 ) -> tuple[np.ndarray, list[str]]:
     """Put the CAD where the scan says the target is, then refine onto it.
 
@@ -622,6 +670,18 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("capture", type=Path, help="capture directory (read-only)")
     parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument(
+        "--no-turntable",
+        action="store_true",
+        help="register frame by frame even when the frames prove a full turn",
+    )
+    parser.add_argument(
+        "--no-metric-correction",
+        action="store_true",
+        help="deproject with the factory intrinsics and depth scale unmodified, without "
+        "this unit's measured metric correction (scanner3d.metric_correction), which the "
+        "product applies by default. Run both to see what the correction is worth on the CAD",
+    )
     parser.add_argument("--json", action="store_true")
     parser.add_argument(
         "--seed",
@@ -649,10 +709,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     _src()
-    from scanner3d.cli import DEPTH_SCALE_METRES, resolve_depth_band
+    from scanner3d.cli import resolve_depth_band
     from scanner3d.coherence import check_coherence
     from scanner3d.geometry import Rigid
-    from scanner3d.simulate import FACTORY_INTRINSICS
+    from scanner3d.metric_correction import calibrated_deprojection
 
     gates = json.loads((TARGET / "gates/tolerance-v1.json").read_text())
     tol = next(g for g in gates["gates"] if g["id"] == "planar_rms")["tolerance_mm"]
@@ -660,9 +720,23 @@ def main(argv: list[str] | None = None) -> int:
 
     band, band_source = resolve_depth_band(args.depth_band)
     print(f"registration depth band: {band.describe()} (from {band_source})", file=sys.stderr)
+    # The same deprojection the window and `scanner3d reconstruct` use, so the
+    # gate measures what an operator gets; --no-metric-correction is the control.
+    intrinsics, depth_scale, correction = (
+        calibrated_deprojection(None) if args.no_metric_correction else calibrated_deprojection()
+    )
+    print(
+        "deprojection: "
+        + (
+            correction.statement()
+            if correction is not None
+            else "factory intrinsics and depth scale, unmodified (--no-metric-correction)"
+        ),
+        file=sys.stderr,
+    )
 
     raws: list[bytes] | None = None
-    poses: list | None = None
+    poses: list[Rigid] | None = None
     pose_cache = (
         None if args.cache is None else args.cache.with_name(args.cache.name + ".poses.json")
     )
@@ -685,7 +759,13 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
     else:
-        scan, raws, poses = fuse(args.capture, args.workers, band)
+        scan, raws, poses = fuse(
+            args.capture,
+            args.workers,
+            band,
+            deprojection=(intrinsics, depth_scale),
+            no_turntable=args.no_turntable,
+        )
         if args.cache is not None and pose_cache is not None:
             np.save(args.cache, scan)
             pose_cache.write_text(json.dumps([p.as_dict() for p in poses]) + "\n")
@@ -695,8 +775,8 @@ def main(argv: list[str] | None = None) -> int:
         coherence = check_coherence(
             raws,
             poses,
-            intrinsics=FACTORY_INTRINSICS,
-            depth_scale=DEPTH_SCALE_METRES,
+            intrinsics=intrinsics,
+            depth_scale=depth_scale,
             depth_band=band,
         )
         print(f"coherence: {coherence.statement()}", file=sys.stderr)
@@ -770,6 +850,13 @@ def main(argv: list[str] | None = None) -> int:
     report = {
         "capture": str(args.capture),
         "tolerance_file": "gates/tolerance-v1.json",
+        "deprojection": {
+            "fx": intrinsics.values["fx"],
+            "fy": intrinsics.values["fy"],
+            "depth_scale": depth_scale,
+            "metric_correction": None if correction is None else correction.as_dict(),
+            "note": "a --cache cloud was deprojected by whichever run wrote it",
+        },
         "print_record_formal_gate_ready": print_record["capture_readiness"][
             "ready_for_formal_physical_gate"
         ],

@@ -1,5 +1,13 @@
 # Preview provenance: what is measured, what is derived, and where it is said
 
+Current behavior (2026-09-06): **live captures are points-only**. Experimental
+occupancy meshing has been removed, including its accumulator and background
+builds. The surface control stays disabled until offline reconstruction
+publishes a mesh. The live-occupancy descriptions and enum remain available for
+historical/explicit snapshots; the live producer no longer emits that kind.
+The sections below record the earlier distinction between the two producers.
+See [tracking-performance.md](tracking-performance.md) for the removal and tests.
+
 ## The report this answers
 
 The appliance shows three pictures of one scan, and until this change none of

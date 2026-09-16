@@ -352,10 +352,8 @@ def ensure_request(frames: int, decimate: int | Cadence, duration_s: float) -> i
     one answer it gave here. A callable is checked by CALLING it once, at this
     point, where a bad answer can still be an exception - nothing about a
     callable can be validated from its type, and the alternative is discovering
-    mid-stream that it returns zero, which is the one place this module must not
-    raise from: a callback that raises between DQBUF and QBUF leaves userspace
-    owning a buffer, and this hardware answers that by re-enumerating. See
-    :func:`_resolve_decimate`.
+    mid-stream that it returns zero. Controller failures during a run retain
+    the last usable spacing; see :func:`_resolve_decimate`.
 
     Returning the value rather than asking again is what keeps a controller
     called exactly once per decision. Asking twice before the first delivery
@@ -398,12 +396,8 @@ def _ensure_decimate(value: object) -> int:
 def _resolve_decimate(decimate: int | Cadence, current: int) -> tuple[int, bool]:
     """The decimation now, and whether the controller had to be ignored.
 
-    NEVER raises, and that is the whole reason it exists. This is called inside
-    the streaming loop, and the module's contract is that nothing in that loop
-    may propagate: an exception there skips the ``VIDIOC_QBUF`` for the buffer
-    in flight, cleanup then runs with userspace still owning it, and on this
-    hardware the device re-enumerates - which to a caller looks exactly like the
-    scanner being unplugged.
+    NEVER raises: an advisory controller failure must not end the capture.
+    This is called after consumer callbacks and after returning the buffer.
 
     So a controller that raises, or answers with something that is not a usable
     decimation, is not obeyed and is not fatal either: the last good value
@@ -877,27 +871,18 @@ def stream_frames(
     mapping the moment it is queued again, so a caller holding a view would see
     it change underneath them.
 
-    ``after_frame`` receives the same ``(raw_bytes, record)`` as ``on_frame``,
-    for the same frames, but AFTER the buffer has been re-queued. That is the
-    difference the whole parameter exists for: work done in ``on_frame`` sits
-    between ``VIDIOC_DQBUF`` and ``VIDIOC_QBUF``, so it holds a driver buffer
-    for its whole duration and stalls both the depth deliveries behind it and
-    anything the caller draws from them. Work that is expensive and does not
-    have to happen before the buffer goes back - deprojecting a frame the caller
-    is holding in memory, a global search against a model - belongs here, where
-    it costs the device nothing and a slow one leaves every buffer queued.
+    The buffer is returned BEFORE any consumer callback. Slow processing still
+    delays the next dequeue, but the camera can use every buffer in the ring
+    while that processing runs. Even a callback exception leaves this buffer
+    returned to the driver.
 
-    The payload handed to it is the same copy ``on_frame`` was given, taken from
-    the mmap before the re-queue, so it is not affected by the buffer being
-    refilled.
+    ``after_frame`` receives the same copy and record, after ``on_frame``. It
+    remains a separate phase for callers that decide what a frame means first
+    and perform deferred work second. Both phases run after re-queueing.
 
-    ``should_stop`` is polled after each buffer has been RE-QUEUED, and ending
-    the stream there is the only safe place to end it early. A callback that
-    raises instead skips the ``VIDIOC_QBUF`` for the buffer it was handed, so
-    cleanup then runs with a buffer still owned by userspace — measured on this
-    hardware, that makes the device re-enumerate, which to a caller looks
-    exactly like the scanner being unplugged. Stopping through this flag
-    returns every buffer first and leaves the device usable immediately.
+    ``should_stop`` is polled after the callbacks, with every buffer returned.
+    Use it for an ordinary requested stop; callback exceptions still propagate
+    after stream cleanup.
 
     A run ended that way comes back with ``stopped_early`` set and
     ``stop_reason`` equal to :data:`CALLER_STOP_REASON`, which is a normal
@@ -1080,6 +1065,14 @@ def stream_frames(
                 # the instant it is queued, so a view handed out here would
                 # mutate. One copy for both consumers.
                 payload = bytes(maps[buffer_index][:used])
+
+            # The consumers use the immutable copy, so return the camera's
+            # buffer BEFORE any preview, disk write or tracking work. Keeping
+            # it until after ICP needlessly removes a buffer from the capture
+            # ring, and used to leave it outstanding if a callback raised.
+            fcntl.ioctl(fd, VIDIOC_QBUF, buf, True)
+
+            if complete and wanted:
                 # Display first, and the keep second, because the keep is the
                 # expensive one: writing the frame, deprojecting it and aligning
                 # it all happen inside ``on_frame``, and a picture that waits
@@ -1091,16 +1084,9 @@ def stream_frames(
                 if selected and on_frame is not None:
                     on_frame(payload, record)
 
-            # Unconditional, and reached by a short delivery on exactly the same
-            # path as a complete one: the buffer is the driver's either way, and
-            # a run that kept one back would leave userspace owning it at
-            # teardown - which this hardware answers by re-enumerating.
-            fcntl.ioctl(fd, VIDIOC_QBUF, buf, True)
-
-            # The buffer is the driver's again, so this is the first instant at
-            # which a caller may take as long as it likes. ``payload`` is the
-            # copy taken above - which is why the guard that makes it includes
-            # this callback - so it is unaffected by the re-queue.
+            # Kept as a second phase for consumers such as pause/recovery that
+            # make a decision in on_frame before acting here. All callbacks
+            # now run with the driver buffer returned.
             if complete and wanted and selected and after_frame is not None:
                 after_frame(payload, record)
 

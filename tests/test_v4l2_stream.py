@@ -377,21 +377,57 @@ def _after(
     return kernel, during, after, result
 
 
-def test_after_frame_runs_once_the_driver_has_its_buffer_back(stream_kernel) -> None:
-    """The whole reason the second hook exists.
-
-    ``on_frame`` runs while userspace still owns the buffer it was handed, so
-    everything it does holds the device up. ``after_frame`` runs on the far side
-    of ``VIDIOC_QBUF``, where a caller may take as long as it likes. The ledger
-    says which side of the re-queue each one was on: one buffer outstanding for
-    the first, none for the second.
-    """
+def test_all_frame_work_runs_once_the_driver_has_its_buffer_back(stream_kernel) -> None:
+    """Tracking and the deferred phase must both leave the capture ring free."""
     deliveries = tuple(whole_frame(0xE0 + index, buffer_index=index % 4) for index in range(4))
     _kernel, during, after, result = _after(stream_kernel, deliveries)
 
-    assert during == [(1, 0), (2, 1), (3, 2), (4, 3)]
+    assert during == [(1, 1), (2, 2), (3, 3), (4, 4)]
     assert after == [(1, 1), (2, 2), (3, 3), (4, 4)]
     assert result.kept == 4
+
+
+@pytest.mark.parametrize("hook", ["on_delivery", "on_frame", "after_frame"])
+def test_callback_failure_does_not_leave_a_camera_buffer_outstanding(stream_kernel, hook):
+    kernel = stream_kernel((whole_frame(0xA1, buffer_index=2),))
+
+    def broken(_raw, _record):
+        assert kernel.requeued == [2]
+        raise RuntimeError("consumer failed")
+
+    with pytest.raises(RuntimeError, match="consumer failed"):
+        stream_frames(
+            frames=1,
+            on_delivery=broken if hook == "on_delivery" else None,
+            on_frame=broken if hook == "on_frame" else None,
+            after_frame=broken if hook == "after_frame" else None,
+        )
+    assert kernel.requeued == [2]
+    assert kernel.count(VIDIOC_STREAMOFF) == 1
+
+
+def test_callbacks_keep_the_original_bytes_if_requeue_refills_the_mapping(
+    stream_kernel, monkeypatch
+):
+    kernel = stream_kernel((whole_frame(0xA1, buffer_index=2),))
+    original_contents = kernel._contents
+
+    def refilled(index, length):
+        if kernel.requeued:
+            return bytes([0xB2]) * length
+        return original_contents(index, length)
+
+    monkeypatch.setattr(kernel, "_contents", refilled)
+    seen = []
+    stream_frames(
+        frames=1,
+        on_delivery=lambda raw, record: seen.append(raw),
+        on_frame=lambda raw, record: seen.append(raw),
+        after_frame=lambda raw, record: seen.append(raw),
+    )
+    assert len(seen) == 3
+    assert seen[0] == bytes([0xA1]) * EXPECTED_FRAME_BYTES
+    assert seen[0] is seen[1] is seen[2]
 
 
 def test_after_frame_sees_the_same_frames_and_the_same_copy_as_on_frame(stream_kernel) -> None:

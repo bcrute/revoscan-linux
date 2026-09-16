@@ -97,10 +97,10 @@ measured reason a KD-tree backend can be substantially faster. It routes
 exactly the two costs :mod:`scanner3d.compute`'s own profiling identified as
 this module's dominant ones - the correspondence search
 (:func:`_correspond_via_backend`) and the k-nearest-neighbour search inside
-:func:`estimate_normals` - through the selected backend. It changes NOTHING
-else: the 6x6 linearised solve (:func:`_solve_point_to_plane`), the gate
-arithmetic, the trim, and the convergence test are the identical code,
-unconditionally, regardless of ``backend``. The default, ``"python"``, does
+:func:`estimate_normals` - through the selected backend. NumPy/SciPy also batch
+the 6x6 normal-equation products, retaining sequential addition order. The GUI
+may scope a validated FP64 GPU normal estimator to its capture worker. The gate
+arithmetic, trim and convergence test remain unchanged. The default, ``"python"``, does
 not merely produce equivalent output to the code that existed before this
 parameter did - it IS that code, unmodified, on the unmodified
 :class:`_NearestIndex` path; the backend-driven path is only ever reached by
@@ -113,8 +113,11 @@ from __future__ import annotations
 import heapq
 import itertools
 import math
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Final
 
 from scanner3d.compute import PYTHON_BACKEND, ComputeBackend
@@ -177,6 +180,12 @@ NORMAL_ISOTROPY_RATIO: Final = 0.35
 #: linearised system, before that direction is treated as unconstrained by
 #: the data rather than solved for. See :func:`_solve_6x6`.
 SINGULAR_PIVOT_RATIO: Final = 1e-9
+
+#: Repeated keyframe fits use the identical sampled target and neighbourhood.
+#: Bound both entry count and cloud size so large offline fits cannot fill
+#: memory with cached targets. No normal arithmetic changes on a cache miss.
+NORMAL_CACHE_ENTRIES: Final = 32
+NORMAL_CACHE_MAX_POINTS: Final = 2048
 
 
 class IcpPlaneNotAllowed(ScannerError):
@@ -539,6 +548,34 @@ def estimate_normals(
     )
 
 
+@lru_cache(maxsize=NORMAL_CACHE_ENTRIES)
+def _cached_normals(points: tuple[Point, ...], neighbours: int, backend_name: str) -> NormalField:
+    """Reuse the original arithmetic; even tiny pose changes can alter a chain."""
+    return estimate_normals(points, neighbours=neighbours, backend=backend_name)
+
+
+_NormalAccelerator = Callable[[tuple[Point, ...], int], NormalField]
+_NORMAL_ACCELERATOR: ContextVar[_NormalAccelerator | None] = ContextVar(
+    "scanner3d_normal_accelerator", default=None
+)
+
+
+@contextmanager
+def normal_acceleration(estimator: _NormalAccelerator) -> Iterator[None]:
+    """Worker-local acceleration with its own bounded cache, never global state.
+
+    A relocalization thread retains its CPU context. Leaving the scope restores
+    the previous provider, including after cancellation or a failed capture.
+    """
+    cached = lru_cache(maxsize=NORMAL_CACHE_ENTRIES)(estimator)
+    token = _NORMAL_ACCELERATOR.set(cached)
+    try:
+        yield
+    finally:
+        _NORMAL_ACCELERATOR.reset(token)
+        cached.cache_clear()
+
+
 # --- nearest-neighbour correspondence, with the matched normal riding along ----------
 
 
@@ -651,7 +688,9 @@ def _solve_6x6(matrix: list[list[float]], rhs: list[float]) -> list[float]:
     return [augmented[i][n] for i in range(n)]
 
 
-def _solve_point_to_plane(matched: Sequence[tuple[Point, Point, Point]], current: Rigid) -> Rigid:
+def _solve_point_to_plane(
+    matched: Sequence[tuple[Point, Point, Point]], current: Rigid, *, accelerated: bool = False
+) -> Rigid:
     """One Gauss-Newton step around ``current``, composed onto it.
 
     ``matched`` is ``(original_source_point, target_point, target_normal)``
@@ -672,17 +711,32 @@ def _solve_point_to_plane(matched: Sequence[tuple[Point, Point, Point]], current
     """
     matrix = [[0.0] * 6 for _ in range(6)]
     rhs = [0.0] * 6
+    rows: list[tuple[float, ...]] = []
+    residuals: list[float] = []
     for original, target_point, target_normal in matched:
         p = current.apply(original)
         pxn = cross(p, target_normal)
         row = (pxn[0], pxn[1], pxn[2], target_normal[0], target_normal[1], target_normal[2])
         residual = dot(target_normal, subtract(p, target_point))
+        if accelerated:
+            rows.append(row)
+            residuals.append(residual)
+            continue
         for a in range(6):
             row_a = row[a]
             if row_a != 0.0:
                 for b in range(6):
                     matrix[a][b] += row_a * row[b]
             rhs[a] += -row_a * residual
+    if accelerated and rows:
+        import numpy as np
+
+        values = np.asarray(rows, dtype=np.float64)
+        products = values[:, :, None] * values[:, None, :]
+        # Sequential accumulation, NOT BLAS or np.sum's pairwise reduction:
+        # preserve the reference's addition order and therefore its poses.
+        matrix = np.add.accumulate(products, axis=0)[-1].tolist()
+        rhs = np.add.accumulate(-values * np.asarray(residuals)[:, None], axis=0)[-1].tolist()
     solution = _solve_6x6(matrix, rhs)
     e = (solution[0], solution[1], solution[2])
     t = (solution[3], solution[4], solution[5])
@@ -810,6 +864,7 @@ def _iterate(
     threshold: float,
     keep_fraction: float,
     gate: float,
+    accelerated: bool = False,
 ) -> _FitPlane:
     """Match, trim, solve, repeat - the same shape as
     :func:`scanner3d.registration._iterate`, with a point-to-plane solve in
@@ -846,7 +901,7 @@ def _iterate(
         trimmed = len(pairs) - keep
         trim_distance = pairs[keep - 1][0]
         matched = [(pair[1], pair[2], pair[3]) for pair in pairs[:keep]]
-        transform = _solve_point_to_plane(matched, transform)
+        transform = _solve_point_to_plane(matched, transform, accelerated=accelerated)
         moved = [(transform.apply(o), q, n) for o, q, n in matched]
         rmse = _point_to_plane_rmse(moved)
         if previous is not None and abs(previous - rmse) <= threshold:
@@ -1018,16 +1073,32 @@ def icp_point_to_plane(
             f"than the {MIN_CLOUD_POINTS} a rigid transform needs"
         )
 
-    # Resolved ONCE, and the same resolved object (or its absence) is used
-    # for both the normal search below and the correspondence search in the
-    # loop, so the two never disagree about which backend is running - see
-    # the module docstring's "Selectable compute backend" section.
+    # Resolve auto before selecting a cache entry, so normal and correspondence
+    # searches use the same backend implementation. Custom backend objects are
+    # passed through unchanged and never cached by their display name.
     resolved_backend_name, compute_backend = _resolve_backend(backend)
-    normals = estimate_normals(
-        sampled_target,
-        neighbours=normal_neighbours,
-        backend=compute_backend if compute_backend is not None else PYTHON_BACKEND,
-    )
+    accelerator = _NORMAL_ACCELERATOR.get()
+    if accelerator is not None and isinstance(backend, str) and resolved_backend_name == "scipy":
+        if len(sampled_target) <= NORMAL_CACHE_MAX_POINTS:
+            normals = accelerator(tuple(sampled_target), normal_neighbours)
+        else:
+            normals = estimate_normals(
+                sampled_target, neighbours=normal_neighbours, backend=backend
+            )
+    elif (
+        isinstance(backend, str)
+        and resolved_backend_name != PYTHON_BACKEND
+        and len(sampled_target) <= NORMAL_CACHE_MAX_POINTS
+    ):
+        normals = _cached_normals(tuple(sampled_target), normal_neighbours, resolved_backend_name)
+    else:
+        # Custom backend objects must run their own normal search each time;
+        # they may carry state and are not identified by their display name.
+        normals = estimate_normals(
+            sampled_target,
+            neighbours=normal_neighbours,
+            backend=compute_backend if compute_backend is not None else PYTHON_BACKEND,
+        )
     usable = normals.usable
     if len(usable) < 6:
         raise IcpPlaneCorrespondencesInsufficient(
@@ -1065,6 +1136,7 @@ def icp_point_to_plane(
         threshold=tolerance * extent,
         keep_fraction=keep_fraction,
         gate=gate,
+        accelerated=resolved_backend_name in ("numpy", "scipy"),
     )
     return IcpPlaneResult(
         transform=fit.transform,

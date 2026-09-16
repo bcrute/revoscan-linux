@@ -20,6 +20,20 @@ what is actually being captured, and the accumulated model — orbitable, with u
 surface in soft red and the frame that has just arrived lifted towards white on top of that. A
 live readout says whether your rotation speed is in the band that registers well.
 
+Optional live GPU assistance (`.[gpu]`) offloads FP64 normal estimation while
+SciPy keeps correspondence search. **GPU normals** in technical details is on
+by default, self-tests the driver, and reports CPU fallback when unavailable.
+Coverage pictures build in a bounded helper process so they do not hold up
+tracking. Neither change alters scanner exposure or builds a live mesh.
+Shorter-exposure experiments gained acquisition speed but lost substantial
+baseline-visible depth in stationary tests; they are not enabled as defaults. See
+[live GPU throughput](docs/live-gpu-throughput.md) for measured rates and remaining limits.
+
+Tracking is still under reliability investigation; accepting every frame does
+not establish correct geometry. Start with the [living learning log](docs/reliability-learning-log.md)
+for current findings, rejected experiments, evidence archives and open work,
+then the [reliability roadmap](docs/reliability-roadmap.md) for qualification gates.
+
 **A depth frame the sensor returned nothing for no longer looks like a broken panel.** Raw code 0
 means "no depth for this pixel" and is still excluded from the stretch, the statistics, point
 preparation and reconstruction — nothing is filled in, interpolated or smeared. It is now DRAWN as
@@ -35,31 +49,12 @@ the frame to 3.60% and collapsed to the left of the sensor; that black region is
 a remaining optical limitation, not a proved defect. See
 [docs/return-health.md](docs/return-health.md).
 
-The model panel draws **the points while the scan is still running**, and offers a lit surface
-beside them as an experimental preview you tick on. Every accepted frame is folded into one voxel
-occupancy grid — a set union, so a frame costs the frame and is then forgotten — and the grid is
-marched every few alignments: measured on this machine at 0.32 s over 254k cells and 1.30 s over
-the 1M cells it is allowed at most, against the ~0.7 s each frame already costs. A refresh that
-expensive is then held off until the stream thread has had three times as long to itself, so the
-capture keeps the thread.
-
-The cell edge is measured from the scan's own point spacing rather than chosen, and the panel says
-what it is. It is never made coarser to keep the picture affordable: an object that outgrows the
-live budget **loses its surface rather than its resolution**, with the cell size, the grid it
-would have needed and the budget said beside the coverage numbers, and the panel falls back to the
-points. A coarser preview is not a cheaper version of the same shape — the occupancy surface
-stands as much as a voxel outside its samples, so doubling the edge doubles that error and
-swallows thin features.
-
-**The points are the view the panel opens on**, and the surface checkbox is off until you ask for
-it. That is a decision from the scans themselves: capture 20260827-152842 held its finest cell
-edge over 116 frames and never coarsened, and the surface still read as lumpy where the dots read
-as clean. An occupancy cell joins the surface when its neighbours are occupied, so what is marched
-is faceted at the cell size, stands as much as a cell outside the samples, and draws a small
-disagreement between two accepted poses as solid shape. The preview stays because it answers
-“what shape has this become” faster than a cloud does, not because it is the more trustworthy
-picture. Its cells were also placed by the poses accepted **as the scan ran**, and no pose
-correction reaches back into them.
+The model panel draws **points only while a scan is running**. Experimental live meshing
+has been removed: no occupancy grid is accumulated and no surface is built in the background,
+even if a surface was selected before the capture. The surface control becomes usable after
+**Reconstruct + export** publishes its final mesh. This removes repeated live mesh builds that
+took around 700 ms during the throughput test; see
+[docs/tracking-performance.md](docs/tracking-performance.md).
 
 **Reconstruct no longer calls that mesher.** It registers every frame, then fuses a *truncated
 signed-distance field* from the raw frames at the corrected poses and marches its zero level set,
@@ -68,9 +63,8 @@ against a synthetic sphere of known radius, with both methods given the same 1.0
 surface sits 0.032 from the true radius where the occupancy boundary sits 0.747 — a 23x smaller
 median error, and 9x smaller in RMS. It also stops where the evidence stops rather than closing
 over a side nobody looked at, so an open mesh there is a report about the capture. That is
-synthetic evidence about the arithmetic, not a measurement of the scanner. The live preview above
-is still the occupancy mesher and still stands outside its samples; the two are no longer the same
-surface, and only the exported one is fitted. Coverage — the red “still needs scanning”
+synthetic evidence about the arithmetic, not a measurement of the scanner. Live captures no longer
+build the occupancy surface. Coverage — the red “still needs scanning”
 colouring — is measured on the points, so it is shown there.
 
 **Each preview now says on screen what it is, without being hovered.** Under the depth image, a
@@ -80,10 +74,8 @@ carry-over is applied — and it names no distance unit, because the codes estab
 model, one line describes whichever picture is actually mounted in the viewer: the dots are
 **measured depth returns** whose placement depends on the calibration and on this scan's pose
 estimates, and whose cloud is sampled and thinned for display — one sentence that is true of the
-live preview and of a completed registered reconstruction alike. The panel has **two** surfaces
-and it no longer describes them with one sentence. While a capture runs, the shell is a **derived
-occupancy surface, not measurement**, with its triangle count and cell edge, marched from the grid
-the poses accepted during capture were folded into. Once Reconstruct has run, the same checkbox
+live preview and of a completed registered reconstruction alike. Live captures show points only.
+Once Reconstruct has run, the surface checkbox
 draws the surface it exported, and the panel says what that is: a **derived signed-distance (TSDF)
 surface, not measurement**, with its own triangle count and voxel size, fused from the captured
 full-resolution frames at the **corrected** poses. Which one it is comes from the producer that
@@ -233,19 +225,24 @@ owner's machine: no warning on a clean one, and a warning on **frame 0** of all 
 including the session the intruder first appeared. See
 [docs/depth-plausibility.md](docs/depth-plausibility.md).
 
-**Frame spacing can be decided while the capture runs, rather than typed in before it.**
+**Handheld captures now keep every depth frame by default.** The capture path returns camera
+buffers before processing, accelerates frame preparation, reuses registration normals and limits
+model-refresh work at the camera's cadence. The measurements and remaining handheld validation
+limits are in [docs/tracking-performance.md](docs/tracking-performance.md).
+
+**Frame spacing can also be decided while the capture runs.**
 "Use 1 frame in every N" is the one capture setting whose right value is a property of how fast the
 scanner happens to be moving at that moment, and neither end of a fixed value is harmless: set for a
 brisk sweep it wastes a slow one, where frames a fraction of the noise floor apart measure noise
 rather than motion — the *slowest* row of the measured drift table is among its worst — and set for
-a slow sweep it loses a brisk one outright. With "hold spacing" ticked, as it is by default, the
+a slow sweep it loses a brisk one outright. With the optional "hold spacing" ticked, the
 number is a starting point: the capture moves it between 1 and 10 to hold the measured travel inside
 the same band the travel readout already shows, going finer on one over-band frame and on any frame
 the tracker refused, and coarser only after three slow ones in a row. It is deliberately not a fix
 for tracking loss — its whole range is your own setting down to 1, which you can also just set
-yourself. Untick it for a capture spaced by exactly the number you typed, which is one you can
-reason about afterwards; it was off by default until a hand-held capture at the fixed one-in-three
-lost tracking on a step no registration could bridge (docs/frame-spacing.md). The stream selects by a countdown of deliveries rather than a modulo of the frame index,
+yourself. It starts unticked, with spacing set to 1, so a stationary interval does not discard
+the overlap needed when a hand starts moving again. The stream selects by a countdown of deliveries
+rather than a modulo of the frame index,
 so a spacing that changes mid-run cannot make the phase jump, and the run's record carries the span
 it actually used rather than one number that was never true throughout. See
 [docs/frame-spacing.md](docs/frame-spacing.md).
@@ -261,7 +258,11 @@ subtraction or a hand remover, it assumes no direction is up, and a large flat c
 deliberately kept whenever the evidence is ambiguous — losing a bed costs one frame, removing a
 panel costs the scan. The window and `scanner3d reconstruct` prepare frames through the same
 function, in the same stated order, and both report how many frames the plane was removed from,
-how many points were kept, and how many frames kept their whole cloud and why.
+how many points were kept, and how many frames kept their whole cloud and why. The plane search
+places its window by density, starting an eighth of the frame wide and narrowing to the band it
+removes, so a bed the covariance seed points twenty degrees away from is still found; until
+2026-09-11 a curved object could capture the search, and a rendered sphere on a slanted bed hid a
+bed that was three quarters of the frame on some thinnings and not others (policy version 2).
 
 The exported mesh is fused from the **full-resolution** frames rather than from those clouds, so
 for each frame the filter applied to, the same band is also masked out of an in-memory copy of
@@ -279,7 +280,21 @@ none of it establishes. The files are staged in a hidden sibling directory, read
 against their own digests, and only then published under their final name in one atomic rename —
 so a cancelled or failed run leaves no folder that looks like a result, and a second
 reconstruction of the same capture makes a second folder rather than touching the first. The
-model reaches the screen only once the export has succeeded.
+model reaches the screen only once the export has succeeded. A capture whose frames repeat as a
+full turn of a turntable is registered as one axis and one rate (`docs/turntable-registration.md`),
+which holds where the frame-by-frame chain wanders off the circle: 0.50 mm RMS against the CAD target
+where the chain managed 0.63, and a clean model of an object the chain smeared by 13 mm. Frames that
+never repeat register frame by frame as before; `scanner3d reconstruct --no-turntable` forces that.
+Every point either path makes is deprojected under this unit's measured metric correction
+(`scanner3d.metric_correction`; see *What is measured, and what is not*); `scanner3d reconstruct
+--no-metric-correction` registers under the factory record unmodified, and the report names the
+deprojection it used either way.
+While it runs, a progress bar under
+the capture heartbeat names the stage and counts it where the stage has a count (frames read,
+pairs aligned, frames placed, frames fused); it is drawn from the same lines the report shows.
+The registration stage is the long one and its **workers** box sets how many processes align
+pairs at once: it defaults to 1, and a 146-frame capture that takes twenty minutes there takes a
+few with 8.
 
 Everything shown and everything written is in one right-handed **upright** frame: the depth
 camera's optical frame counts +y down the image, so scanner3d rotates it a half turn about x —
@@ -350,6 +365,12 @@ vendor and were established here:
 
 - The depth scale is millimetres — a 58.0 mm can measured 57.705 mm at ~122.7 mm standoff
   (−0.51%). Accuracy across the range is **not** established: −0.49% to −2.26%, no correction model.
+  Update 2026-09-11: a caliper-checked cue ball (57.265 mm) reads the raw depth 0.15% short along
+  the image's x and along depth and 0.55% short along the image's y, image-fixed and the same at
+  20, 10 and 7 ms exposure. That per-unit correction (`fy` × 0.996, depth scale × 1.0015) is now
+  applied by the window and `scanner3d reconstruct` (`scanner3d.metric_correction`), and the ball
+  then reads +0.03% to +0.17% depending on range. See
+  [docs/cue-ball-scale-20260911.md](docs/cue-ball-scale-20260911.md).
 - The device **re-enumerates on the USB bus every time a depth stream closes**, disappearing for
   about 0.39 s. Anything reopening immediately sees "no such device".
 - **Coming back is not the same as being usable.** Observed on 2026-08-26: a wait that checked only

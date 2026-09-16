@@ -130,6 +130,14 @@ unimplemented.
 
 ## Verified command map
 
+2026-09-06/07 follow-up: firmware disassembly plus fresh device-side replies
+verified two useful setters, **`0x910` frame time** and **`0x911` exposure**.
+With both set to 20,000 → 15,000 → 10,000 → 7,000 µs, depth output rose from
+approximately 4.5 → 6 → 9 → 13 fps. The original 20,000/20,000 values were
+restored and verified. These are typed timing parameters, not flags to probe
+with arbitrary zero writes. See [scanner-fps-investigation.md](scanner-fps-investigation.md)
+for exact binary addresses, transport, A/B/A results and thermal testing.
+
 **Confirmed implemented** — the only ids for which a named reply was actually
 observed:
 
@@ -140,6 +148,8 @@ observed:
 | `0x9b1` | `id_msg_cam_get_exposure_time` | value read: 20000 |
 | `0x9b2` | `id_msg_cam_get_auto_expo_mode` | value read: 0 |
 | `0x9c0` | `id_msg_cam_get_value_by_id` | answers via a buffer, not the log |
+| `0x910` | `id_msg_cam_set_frame_time` | fresh named reply, projector/sensor timing adjustment, getter verification, measured cadence change |
+| `0x911` | `id_msg_cam_set_exposure_time` | fresh named reply, camera exposure adjustment and getter verification |
 | `0x483` | `id_msg_proj_stop_trigger_t` | stops an active trigger (`set_stop_flag stop trigger success`); idempotent when no trigger is active — see "The projector namespace" |
 | `0x484` | `id_msg_proj_create_one_trigger_t` | fires one projector trigger |
 | `0x485` | `id_msg_proj_catchframe_t` | captures a fringe frame; export to `ImageL0.bmp` currently fails |

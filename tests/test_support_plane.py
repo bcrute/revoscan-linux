@@ -30,6 +30,7 @@ from scanner3d.support_plane import (
     BAND_DIAGONAL_FRACTION,
     CANDIDATE_SEEDS,
     CANDIDATES,
+    COARSE_BAND_FRACTION,
     DEFAULT_THRESHOLDS,
     MAX_INPUT_POINTS,
     MAX_OBJECT_FOOTPRINT_FRACTION,
@@ -516,3 +517,123 @@ def test_a_dominant_bed_defeats_adjacent_icp_and_suppression_recovers_the_motion
     assert raw_error > 4.0
     assert cleaned_error < TRANSFORM_ERROR_GATE_DEGREES
     assert cleaned_error < raw_error / 3.0
+
+
+# --- a bed the covariance seed points well away from --------------------------
+
+#: A support surface seen at a grazing angle: ``y = GRAZING_SLOPE * z -
+#: GRAZING_DROP`` leans about nineteen degrees off the camera's line of sight
+#: and recedes through the object's own extent, the way a turntable does from a
+#: low tripod. Its normal and offset are stated so the fit can be checked
+#: against the scene rather than against whatever the fit produced.
+GRAZING_SLOPE = 0.35
+GRAZING_DROP = 45.5
+GRAZING_NORMAL = normalize((0.0, -1.0, GRAZING_SLOPE))
+GRAZING_OFFSET = -GRAZING_DROP * GRAZING_NORMAL[1]
+BALL_RADIUS = 30.0
+
+
+def grazing_bed(x_steps: int = 22, z_steps: int = 60) -> list[Point]:
+    """The slanted bed, denser near the camera the way a pixel grid samples one.
+
+    Off-centre in x on purpose: a bed and an object that are not symmetric
+    about the camera's axis give the whole cloud a smallest covariance
+    direction well away from the bed's normal, and that direction is the seed
+    the search has to recover from.
+    """
+    points: list[Point] = []
+    for i in range(x_steps):
+        x = -5.0 + 105.0 * i / (x_steps - 1)
+        for j in range(z_steps):
+            reciprocal = 1 / 80.0 + (1 / 290.0 - 1 / 80.0) * j / (z_steps - 1)
+            z = 1 / reciprocal
+            points.append((x, GRAZING_SLOPE * z - GRAZING_DROP, z))
+    return points
+
+
+def resting_ball(steps: int) -> list[Point]:
+    """The camera-facing cap of a ball resting on the grazing bed at z = 130.
+
+    ``steps`` sets how densely the cap is sampled, and so what share of the
+    cloud the ball is. A depth camera sees only the surface that faces it and
+    only what is on its side of the bed, so both halves are cut away.
+    """
+    contact = (8.0, GRAZING_SLOPE * 130.0 - GRAZING_DROP, 130.0)
+    centre = tuple(c - BALL_RADIUS * n for c, n in zip(contact, GRAZING_NORMAL, strict=True))
+    points: list[Point] = []
+    for a in range(steps):
+        theta = math.pi * (a + 0.5) / steps
+        for b in range(2 * steps):
+            phi = 2 * math.pi * (b + 0.5) / (2 * steps)
+            direction = (
+                math.sin(theta) * math.cos(phi),
+                math.sin(theta) * math.sin(phi),
+                math.cos(theta),
+            )
+            point = (
+                centre[0] + BALL_RADIUS * direction[0],
+                centre[1] + BALL_RADIUS * direction[1],
+                centre[2] + BALL_RADIUS * direction[2],
+            )
+            faces_camera = sum(-d * p for d, p in zip(direction, point, strict=True)) > 0.0
+            camera_side = (
+                sum(n * p for n, p in zip(GRAZING_NORMAL, point, strict=True)) < GRAZING_OFFSET
+            )
+            if faces_camera and camera_side:
+                points.append(point)
+    return points
+
+
+def seed_angle_degrees(points: list[Point]) -> float:
+    """How far the cloud's smallest covariance direction is from the bed's normal."""
+    import numpy as np
+
+    _, vectors = np.linalg.eigh(np.cov(np.asarray(points).T))
+    cosine = abs(float(np.dot(vectors[:, 0], GRAZING_NORMAL)))
+    return math.degrees(math.acos(min(cosine, 1.0)))
+
+
+@pytest.mark.parametrize(
+    ("ball_steps", "expected_applied"),
+    [(16, False), (20, True), (24, True), (28, True), (32, True), (36, True), (40, True)],
+)
+def test_a_grazing_bed_is_found_however_far_off_the_covariance_seed_points(
+    ball_steps: int, expected_applied: bool
+):
+    """A curved object must not capture the refinement.
+
+    The seed is the cloud's smallest covariance direction, and on every scene
+    here it is more than ten degrees off the bed's normal. A window one applied
+    band wide along such a seed catches a ribbon of the bed at best, while some
+    patch of the ball always lies square to the seed and is caught whole - and
+    a patch square to the seed refits to the seed, so the version-1 loop
+    settled on the ball and reported too few inliers, for some ball densities
+    and not others. The search now starts wide and narrows, placing the window
+    by density at each width, and the bed is found at every density down to a
+    bed that is half the cloud: the same 1320 points, to a twentieth of a
+    degree. (At 40% of the cloud it is not: the deflation rounds do not
+    recover it either, and that limit is recorded here rather than claimed
+    away.)
+
+    The gates then judge what was found. At the sparsest ball the bed is more
+    than the removal bound of the cloud, and the frame is rightly kept whole.
+    """
+    bed = grazing_bed()
+    ball = resting_ball(ball_steps)
+    scene = bed + ball
+    assert seed_angle_degrees(scene) > 10.0
+
+    result = suppress_support_plane(scene)
+
+    assert result.plane is not None
+    cosine = abs(sum(a * b for a, b in zip(result.plane.normal, GRAZING_NORMAL, strict=True)))
+    assert math.degrees(math.acos(min(cosine, 1.0))) < 0.05
+    assert abs(abs(result.plane.offset) - GRAZING_OFFSET) < 0.05
+    assert result.inlier_points == len(bed)
+    assert result.applied is expected_applied
+    if expected_applied:
+        assert as_multiset(result.removed) == as_multiset(tuple(bed))
+        assert as_multiset(result.points) == as_multiset(tuple(ball))
+    search = result.as_dict()["search"]
+    assert isinstance(search, dict)
+    assert search["coarse_band_fraction"] == COARSE_BAND_FRACTION

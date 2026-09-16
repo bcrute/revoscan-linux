@@ -17,9 +17,11 @@ from __future__ import annotations
 
 import json
 import math
+import sys
 
 import pytest
 
+import scanner3d.depth_plausibility as plausibility_module
 from scanner3d.depth_metric import NO_RETURN_SAMPLE
 from scanner3d.depth_plausibility import (
     DETACHED_CLUSTER,
@@ -46,6 +48,22 @@ from scanner3d.depth_plausibility import (
 SCALE = 1.0 / 200.0
 
 WIDTH, HEIGHT = 64, 40
+
+
+@pytest.mark.parametrize("shape", [(1, 1), (5, 3), (17, 13), (64, 40), (640, 400)])
+@pytest.mark.parametrize("fill", [0, 32000, None])
+def test_bulk_diagnostics_match_scalar_with_odd_grids_and_empty_cells(monkeypatch, shape, fill):
+    pytest.importorskip("numpy")
+    width, height = shape
+    samples = tuple(
+        (index * 997 % 65536 if index % 3 else 0) if fill is None else fill
+        for index in range(width * height)
+    )
+    expected_grid = plausibility_module._cell_medians(samples, width, height, SCALE)
+    expected_profile = depth_profile(samples, depth_scale=SCALE, bins=47)
+    monkeypatch.setitem(sys.modules, "numpy", None)
+    assert plausibility_module._cell_medians(samples, width, height, SCALE) == expected_grid
+    assert depth_profile(samples, depth_scale=SCALE, bins=47) == expected_profile
 
 
 def _code(distance: float) -> int:

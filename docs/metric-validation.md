@@ -1,5 +1,11 @@
 # Metric validation: the depth scale is millimetres
 
+Later audit, 2026-09-10: [the original procedure has now been recovered and
+replayed](can-replay-results.md). All retained per-frame diameters reproduce,
+but several historical means include additional, unretained frames; all retained
+fits remain inconclusive under the validation rules. The historical text below
+is preserved, including causal interpretations clarified by the later audit.
+
 Status: measured 2026-08-24 against a caliper-measured target, with a tolerance
 declared before each comparison. This closes the substantive part of M4. Every
 frame is committed under `tests/fixtures/metric/` with a manifest carrying the
@@ -126,3 +132,27 @@ every failure truncates at exactly the same row. **Do not use a USB hub** — 28
 link drops on one, zero after moving to a root port. Neither biased the frames
 that completed: the same can measured 56.641 through the failing hub and 56.689
 direct, inside the frame-to-frame spread.
+
+## 2026-09-11: a per-unit correction is now applied
+
+The "no correction model" above was written against a cylinder and a single
+depth-scale hypothesis. A sphere separates the axes, and the cue-ball measurement
+in [cue-ball-scale-20260911.md](cue-ball-scale-20260911.md) found this unit's raw
+depth 0.15% short along the image's x and along depth, and 0.55% short along the
+image's y - image-fixed, and identical at 20, 10 and 7 ms exposure. That is
+carried as `scanner3d.metric_correction.CUE_BALL_20260911`, measured-over-true
+factors along the camera axes bound to serial A22704522A6F00A64, and applied at
+deprojection time as `fy` × 0.9960 and depth scale × 1.0015, `fx` unchanged, by:
+
+- the window: its live preparation, its reconstruction clouds, the fusion mask,
+  the coherence check and the export's calibration provenance;
+- `scanner3d reconstruct`: its clouds, the turntable model's period detection,
+  the coherence check, and the report under `registration.deprojection`;
+- `tools/target_gate.py`, which measures what the operator gets.
+
+`scanner3d reconstruct --no-metric-correction` and `tools/target_gate.py
+--no-metric-correction` register under the factory record unmodified, and every
+report names the deprojection it used. What this does not do: check that the
+capture was taken by that unit (a capture records no serial), touch the factory
+record or anything on the device, or claim a residual smaller than the +0.03% to
++0.17% the ball itself shows after correction, which grows with range.

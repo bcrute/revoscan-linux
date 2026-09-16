@@ -4,6 +4,11 @@ Status: implemented, off by default, and tested against the fake driver and the
 real capture path. The controller's own arithmetic is measured; what a held
 spacing does to a physical scan is not, and the last section says so.
 
+As of 2026-09-06 the GUI starts at one frame in one, with this controller off.
+Full-rate capture processing and the reason for preserving every frame through
+handheld starts and stops are described in [tracking-performance.md](tracking-performance.md).
+The dated sections below retain the evidence behind previous defaults.
+
 ## What problem it solves
 
 Decimation — "use 1 frame in every N" — is the one capture setting whose right

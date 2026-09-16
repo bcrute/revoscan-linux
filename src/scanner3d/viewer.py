@@ -250,12 +250,20 @@ def frame_stats(raw: bytes) -> FrameStats:
     return _stats_from_samples(struct.unpack(SAMPLES_FORMAT, raw))
 
 
-def _stats_from_samples(samples: tuple[int, ...]) -> FrameStats:
+def _stats_from_samples(samples: Sequence[int]) -> FrameStats:
     """:class:`FrameStats` for an already-unpacked frame. Not a public entry point."""
-    spatial = spatial_returns(samples, FRAME_WIDTH, FRAME_HEIGHT)
-
-    non_zero: list[int] = [sample for sample in samples if sample != NO_RETURN_SAMPLE]
-    non_zero.sort()
+    try:
+        import numpy as np
+    except ImportError:
+        spatial = spatial_returns(samples, FRAME_WIDTH, FRAME_HEIGHT)
+        non_zero: list[int] = [sample for sample in samples if sample != NO_RETURN_SAMPLE]
+        non_zero.sort()
+    else:
+        codes = np.asarray(samples, dtype=np.uint16)
+        # ndarray implements the indexing/length used here, but NumPy's type
+        # stubs do not register it as a collections.abc.Sequence.
+        spatial = spatial_returns(cast(Sequence[int], codes), FRAME_WIDTH, FRAME_HEIGHT)
+        non_zero = np.sort(codes[codes != NO_RETURN_SAMPLE]).tolist()
     returned = spatial.returned
 
     min_code = non_zero[0] if non_zero else 0
@@ -451,6 +459,63 @@ def _pixels_from_samples(
     high: int | None,
     palette: Palette,
 ) -> tuple[bytes, ...]:
+    """Map codes in bulk when NumPy is available, retaining the exact palette."""
+    try:
+        import numpy as np
+    except ImportError:
+        return _scalar_pixels_from_samples(samples, low=low, high=high, palette=palette)
+    if palette.no_data_block <= 0:
+        return _scalar_pixels_from_samples(samples, low=low, high=high, palette=palette)
+
+    codes = np.asarray(samples, dtype=np.uint16)
+    nonzero = np.sort(codes[codes != NO_RETURN_SAMPLE])
+    # Keep the same nearest-rank rounding and color_for arithmetic.
+    lo, hi = _stretch_bounds(nonzero.tolist(), low, high)
+    span = hi - lo
+    unique = np.unique(nonzero)
+    lookup = np.empty(65536, dtype=object)
+    if palette is DEFAULT_PALETTE:
+        fractions = (
+            np.ones(len(unique))
+            if span <= 0
+            else np.clip((unique.astype(np.float64) - lo) / span, 0.0, 1.0)
+        )
+        colours = np.empty((len(unique), 3), dtype=np.uint8)
+        for (pos_a, col_a), (pos_b, col_b) in itertools.pairwise(palette.stops):
+            chosen = (fractions >= pos_a) & (fractions <= pos_b)
+            blend = (fractions[chosen] - pos_a) / (pos_b - pos_a)
+            for channel in range(3):
+                colours[chosen, channel] = np.rint(
+                    col_a[channel] + (col_b[channel] - col_a[channel]) * blend
+                ).astype(np.uint8)
+        # Void elements preserve all three bytes, including trailing NULs.
+        lookup[unique] = colours.view("V3").ravel().tolist()
+    else:
+        lookup[unique] = [
+            bytes(palette.color_for(1.0 if span <= 0 else (code - lo) / span))
+            for code in unique.tolist()
+        ]
+    primary = bytes(palette.no_data)
+    secondary = primary if palette.no_data_alt is None else bytes(palette.no_data_alt)
+    lookup[NO_RETURN_SAMPLE] = primary
+    pixels = lookup[codes].reshape(FRAME_HEIGHT, FRAME_WIDTH)
+    if secondary != primary:
+        block = palette.no_data_block
+        rows = (np.arange(FRAME_HEIGHT) // block) % 2
+        columns = (np.arange(FRAME_WIDTH) // block) % 2
+        alternate = rows[:, None] != columns[None, :]
+        missing = codes.reshape(FRAME_HEIGHT, FRAME_WIDTH) == NO_RETURN_SAMPLE
+        pixels[missing & alternate] = secondary
+    return tuple(pixels.ravel().tolist())
+
+
+def _scalar_pixels_from_samples(
+    samples: tuple[int, ...],
+    *,
+    low: int | None,
+    high: int | None,
+    palette: Palette,
+) -> tuple[bytes, ...]:
     """Colours for an already-unpacked frame. Not a public entry point.
 
     Two bounded caches, both built and dropped inside this call:
@@ -547,6 +612,86 @@ def render_frame(
         stats=_stats_from_samples(samples),
         samples=samples,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class PackedFrameRender:
+    """Desktop display payload without 256,000 Python pixel objects."""
+
+    rgb: bytes
+    stats: FrameStats
+    samples: Sequence[int]
+
+
+def render_packed_frame(raw: bytes) -> PackedFrameRender:
+    """The default palette and full statistics, with a read-only code view.
+
+    The public tuple-based renderer remains available for other consumers.
+    A desktop image needs contiguous RGB bytes, and its advisory consumers can
+    share the same uint16 array instead of repeatedly converting a huge tuple.
+    """
+    _ensure_frame(raw)
+    try:
+        import numpy as np
+    except ImportError:
+        rendered = render_frame(raw)
+        return PackedFrameRender(b"".join(rendered.pixels), rendered.stats, rendered.samples)
+    codes = np.frombuffer(raw, dtype="<u2")
+    counts = np.bincount(codes, minlength=65536)
+    counts[NO_RETURN_SAMPLE] = 0
+    unique = np.flatnonzero(counts)
+    cumulative = np.cumsum(counts)
+    returned = int(cumulative[-1])
+    lo = (
+        int(np.searchsorted(cumulative, round(STRETCH_LOW_PERCENTILE * (returned - 1)) + 1))
+        if returned
+        else 0
+    )
+    hi = (
+        int(np.searchsorted(cumulative, round(STRETCH_HIGH_PERCENTILE * (returned - 1)) + 1))
+        if returned
+        else 0
+    )
+    fractions = (
+        np.ones(len(unique))
+        if hi <= lo
+        else np.clip((unique.astype(np.float64) - lo) / (hi - lo), 0.0, 1.0)
+    )
+    palette = DEFAULT_PALETTE
+    lookup = np.zeros((65536, 3), dtype=np.uint8)
+    for (pos_a, col_a), (pos_b, col_b) in itertools.pairwise(palette.stops):
+        chosen = (fractions >= pos_a) & (fractions <= pos_b)
+        blend = (fractions[chosen] - pos_a) / (pos_b - pos_a)
+        for channel in range(3):
+            lookup[unique[chosen], channel] = np.rint(
+                col_a[channel] + (col_b[channel] - col_a[channel]) * blend
+            ).astype(np.uint8)
+    lookup[NO_RETURN_SAMPLE] = palette.no_data
+    pixels = lookup[codes].reshape(FRAME_HEIGHT, FRAME_WIDTH, 3)
+    if palette.no_data_alt is not None:
+        rows = (np.arange(FRAME_HEIGHT) // palette.no_data_block) % 2
+        columns = (np.arange(FRAME_WIDTH) // palette.no_data_block) % 2
+        alternate = rows[:, None] != columns[None, :]
+        pixels[(codes.reshape(FRAME_HEIGHT, FRAME_WIDTH) == NO_RETURN_SAMPLE) & alternate] = (
+            palette.no_data_alt
+        )
+    samples = cast(Sequence[int], codes)
+    spatial = spatial_returns(samples, FRAME_WIDTH, FRAME_HEIGHT)
+    present = codes.reshape(FRAME_HEIGHT, FRAME_WIDTH) != NO_RETURN_SAMPLE
+    stats = FrameStats(
+        samples=len(codes),
+        returned=returned,
+        yield_fraction=returned / len(codes),
+        min_code=int(unique[0]) if returned else 0,
+        max_code=int(unique[-1]) if returned else 0,
+        median_code=int(np.searchsorted(cumulative, returned // 2 + 1)) if returned else 0,
+        clipped_left=int(np.count_nonzero(present[:, 0])),
+        clipped_right=int(np.count_nonzero(present[:, -1])),
+        clipped_top=int(np.count_nonzero(present[0])),
+        clipped_bottom=int(np.count_nonzero(present[-1])),
+        spatial=spatial,
+    )
+    return PackedFrameRender(pixels.tobytes(), stats, samples)
 
 
 #: The PPM (P6, binary) header this module writes. ``tkinter.PhotoImage``

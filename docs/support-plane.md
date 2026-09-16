@@ -114,9 +114,12 @@ with `overridden_by_caller` naming any that differ from the shipped policy.
 
 No random seed, no RANSAC, no wall clock, no optional dependency, no device state. Candidate
 normals are covariance eigenvectors refined by a bounded mode-and-refit loop over a bounded
-sample; every sum is `math.fsum`, which is correctly rounded and therefore independent of the
-order the points arrived in. The same points in any order give bit-identical answers, and a
-rigidly transformed cloud gives the same decision and the same kept points.
+sample: the window starts an eighth of the cloud's diagonal wide and halves down to the band
+that is finally removed, placed at each width where it holds the most points along the current
+normal, then centred on the points it fitted once a window holds no more than the last did (see
+the 2026-09-11 section below for why). Every sum is `math.fsum`, which is correctly rounded and therefore
+independent of the order the points arrived in. The same points in any order give bit-identical
+answers, and a rigidly transformed cloud gives the same decision and the same kept points.
 
 ## What has and has not been shown
 
@@ -187,3 +190,63 @@ to query from the reference side rather than isolate the subject first.
 repair and would risk exactly the panel removal the thresholds were chosen to
 prevent. What this section records is that the filter's real-world hit rate is
 zero, so no other module may assume its effect.
+
+## 2026-09-11: a curved object could capture the search (policy version 2)
+
+Found when the reconstruction paths started deprojecting under the unit's metric
+correction ([metric-validation.md](metric-validation.md)): the rendered sphere on
+a slanted bed that `tests/test_gui_reconstruct_export.py` uses had its bed found
+under the factory record and missed under the corrected one - a 0.4% change of
+scale. Sweeping the thinning budget showed it was luck either way: the bed, three
+quarters of the frame, was missed on 1 of 7 budgets under the factory record and
+4 of 7 under the corrected one, and never for a reason the gates state - the
+search itself returned a slab through the sphere with a tenth of the points.
+
+**Mechanism.** The seeds are the cloud's covariance eigenvectors, and on that frame
+the smallest one is 14 degrees off the bed's normal. The refinement then placed a
+window one applied band wide (1% of the diagonal, about 1.5 mm) where it held the
+most points along that seed. A bed seen at a grazing angle is long, and a long
+plane projected along a direction 14 degrees off its normal is spread over some
+60 mm, so a 1.5 mm window catches a ribbon of it at best - while a sphere always
+has a patch lying square to the seed, which the same window catches whole. A patch
+square to the seed refits to the seed, so every candidate settled on the sphere
+and stayed. The deflation rounds removed one sphere patch after another and
+re-seeded on what was left, which still pointed at the sphere.
+
+**Change.** The window now starts at an eighth of the diagonal and halves down to
+the applied band, and at every width it is placed afresh where it holds the most
+points along the refitted normal. A plane is dense along its own normal and a
+curved patch is not, so the wide window is claimed by the bed's bulk, the refit
+turns towards it, and each narrower window keeps the bed and loses the object. At
+the applied band the window goes on being placed by density while each window
+holds more points than the last, and only then is the plane centred on the points
+it fitted - the version-1 loop from that point on, so the surface it describes is
+never left on its own band's edge. No gate moved. Bounded as before: at most eight
+halvings, then eight located and eight settling passes, each one linear pass over
+a sample of at most 4000 points; the sliding window is evaluated with NumPy where
+it is installed, bit for bit the scalar loop's answer (pinned in
+`tests/test_live_acceleration.py`). Cost on the real fixture frames, filter alone:
+14.6 to 19.6 ms per 900-point live frame and 36 to 40 ms per 2200-point
+reconstruction frame, on this machine.
+
+**Shown.** In `tests/test_support_plane.py`, a closed-form grazing bed with a ball
+resting on it, off-centre so the covariance seed is 10 to 23 degrees off the bed's
+normal: the bed is found as the same 1320 points, to a twentieth of a degree, at
+every ball density down to a bed that is half the cloud (the gates then withdraw
+on the sparsest ball, correctly, because the bed is more than the removal bound of
+the frame). At 40% of the cloud it is not found, and the deflation rounds do not
+recover it; that limit is recorded in the test rather than claimed away. The
+rendered scene above is found at every thinning budget under both deprojections,
+and every scene the version-1 loop did find is found again as the same plane.
+
+**On the 24 real turntable frames** in `tests/fixtures/turntable/`, at the live
+and reconstruction budgets and under both deprojections (96 runs): the filter
+applied to none of them before and applies to none of them now, as the section
+above records. What changed is what it found and why it withdrew: the winning
+candidate's population grew in 92 of the 96 runs (median 260 to 434 points), and
+the reasons moved from `too-few-inliers` (40 runs to 11) towards
+`off-plane-geometry-on-both-sides` (25 to 60). The search is no longer the reason
+those frames keep their bed; the gates are, and on those frames the dominant plane
+has geometry on both sides of it - the target's own base with the turntable
+below and the ramp above, as the section above already argued. Nothing here
+changes that judgement.

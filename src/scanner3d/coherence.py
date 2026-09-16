@@ -45,7 +45,7 @@ import math
 import statistics
 import struct
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Final
 
 from scanner3d.depth_metric import (
@@ -89,6 +89,11 @@ MIN_COVALID: Final = 200
 #: Frames a period is sampled at, spread over the first third of the sweep,
 #: which is where a 1.5-turn capture's revisits are.
 PERIOD_SAMPLES: Final = 5
+
+#: The final consistency gate needs more angular coverage than the inexpensive
+#: period finder. Five image positions plus four median-lag projections falsely
+#: passed a real 2,359-frame trajectory whose actual revisits agreed by only 31%.
+COHERENCE_IMAGE_SAMPLES: Final = 25
 
 #: Revisit pairs the agreement is measured on, spread over the frames that
 #: have one.
@@ -260,6 +265,9 @@ class CoherenceReport:
     required_agreement: float
     pairs: tuple[PeriodPair, ...]
     estimate: PeriodEstimate | None = None
+    pair_selection: str = "fixed_lag"
+    requested_image_samples: int | None = None
+    uncheckable_pairs: tuple[tuple[int, int], ...] = ()
 
     @property
     def agreement(self) -> float | None:
@@ -271,9 +279,11 @@ class CoherenceReport:
     @property
     def coherent(self) -> bool | None:
         agreement = self.agreement
-        if agreement is None:
+        if agreement is not None and agreement < self.required_agreement:
+            return False
+        if agreement is None or self.uncheckable_pairs:
             return None
-        return agreement >= self.required_agreement
+        return True
 
     def statement(self) -> str:
         """One sentence for a progress line, saying which of the three outcomes this is."""
@@ -288,24 +298,38 @@ class CoherenceReport:
                 f"not checkable: the images repeat every {self.period} frames but no sampled "
                 f"revisit pair had {MIN_COVALID} projectable points inside the depth band"
             )
+        if self.coherent is None:
+            return (
+                f"not checkable: {len(self.uncheckable_pairs)} image-matched revisit pairs "
+                f"had fewer than {MIN_COVALID} projectable points; other measured pairs "
+                "do not establish a consistency pass for them"
+            )
         weakest = min(self.pairs, key=lambda pair: pair.within_tolerance)
         detail = (
             f"weakest sampled pair (frames {weakest.frame} and {weakest.revisit}) "
             f"{weakest.within_tolerance:.0%} of points within {self.tolerance:g}, "
             f"median offset {weakest.median_offset:+.2f}; required {self.required_agreement:.0%}"
         )
+        subject = (
+            "image-matched revisit frames"
+            if self.pair_selection == "actual_image_match"
+            else f"frames one image period ({self.period} frames) apart"
+        )
         if self.coherent:
-            return f"coherent: frames one image period ({self.period} frames) apart agree; {detail}"
+            return f"coherent: {subject} agree; {detail}"
         return (
-            f"INCOHERENT: frames one image period ({self.period} frames) apart have the same "
-            f"image but poses that disagree; {detail}. Every number measured on this "
+            f"INCOHERENT: {subject} have the same image but poses that disagree; "
+            f"{detail}. Every number measured on this "
             "registration is measured on a smear of misplaced frames"
         )
 
     def as_dict(self) -> dict[str, object]:
         return {
-            "schema_version": SCHEMA_VERSION,
+            "schema_version": 2,
             "period_frames": self.period,
+            "pair_selection": self.pair_selection,
+            "requested_image_samples": self.requested_image_samples,
+            "uncheckable_pairs": [list(pair) for pair in self.uncheckable_pairs],
             "tolerance": self.tolerance,
             "required_agreement": self.required_agreement,
             "agreement": self.agreement,
@@ -437,33 +461,55 @@ def check_coherence(
     tolerance: float = DEFAULT_TOLERANCE,
     required_agreement: float = DEFAULT_REQUIRED_AGREEMENT,
 ) -> CoherenceReport:
-    """:func:`image_period` then :func:`period_agreement`, as one verdict.
+    """Project every credible actual image match, with broader angular sampling.
 
     A sweep with no image period gets a report whose ``coherent`` is None and
-    whose statement says so.
+    whose statement says so. The median lag remains a descriptive estimate,
+    never a substitute for the actual pairs that established the revisits.
     """
     if len(frames) != len(poses):
         raise CoherenceNotAllowed(
             f"{len(frames)} frames were offered with {len(poses)} poses; nothing was judged"
         )
-    estimate = image_period(frames, depth_scale=depth_scale)
+    estimate = image_period(frames, depth_scale=depth_scale, samples=COHERENCE_IMAGE_SAMPLES)
     if estimate is None:
         return CoherenceReport(
             period=None,
             tolerance=tolerance,
             required_agreement=required_agreement,
             pairs=(),
+            pair_selection="actual_image_match",
+            requested_image_samples=COHERENCE_IMAGE_SAMPLES,
         )
-    return period_agreement(
-        frames,
-        poses,
-        intrinsics=intrinsics,
-        depth_scale=depth_scale,
+    pairs: list[PeriodPair] = []
+    uncheckable: list[tuple[int, int]] = []
+    for sample in estimate.samples:
+        if not sample.credible:
+            continue
+        first, later = sample.frame, sample.best_frame
+        checked = period_agreement(
+            (frames[first], frames[later]),
+            (poses[first], poses[later]),
+            intrinsics=intrinsics,
+            depth_scale=depth_scale,
+            period=1,
+            depth_band=depth_band,
+            samples=1,
+            tolerance=tolerance,
+            required_agreement=required_agreement,
+        )
+        if not checked.pairs:
+            uncheckable.append((first, later))
+        pairs.extend(replace(pair, frame=first, revisit=later) for pair in checked.pairs)
+    return CoherenceReport(
         period=estimate.period,
-        depth_band=depth_band,
         tolerance=tolerance,
         required_agreement=required_agreement,
+        pairs=tuple(pairs),
         estimate=estimate,
+        pair_selection="actual_image_match",
+        requested_image_samples=COHERENCE_IMAGE_SAMPLES,
+        uncheckable_pairs=tuple(uncheckable),
     )
 
 

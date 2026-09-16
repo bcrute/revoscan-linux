@@ -428,6 +428,39 @@ class FakeAction:
         self.tooltip = text
 
 
+class FakeProgressBar:
+    """One QProgressBar: records every format, range, value and visibility it was given."""
+
+    def __init__(self) -> None:
+        self.visible = False
+        self.shown = 0
+        self.minimum = 0
+        self.maximum = 0
+        self.value = 0
+        self.format = ""
+        self.text_visible = False
+        #: Every value set, with the format and maximum in force at the time.
+        self.readings: list[tuple[str, int, int]] = []
+
+    def setRange(self, minimum: int, maximum: int) -> None:  # Qt's name
+        self.minimum, self.maximum = minimum, maximum
+
+    def setValue(self, value: int) -> None:  # Qt's name
+        self.value = value
+        self.readings.append((self.format, value, self.maximum))
+
+    def setFormat(self, text: str) -> None:  # Qt's name
+        self.format = text
+
+    def setVisible(self, visible: bool) -> None:  # Qt's name
+        self.visible = visible
+        if visible:
+            self.shown += 1
+
+    def setTextVisible(self, visible: bool) -> None:  # Qt's name
+        self.text_visible = visible
+
+
 class FakeLabel:
     #: Whether the window has shown or hidden this label. The pause line is
     #: present only while a pause is in play, and a stand-in that ignored
@@ -585,6 +618,9 @@ class CaptureWindow:
         #: suite from starting a colour pump against whatever scanner happens to
         #: be plugged into the machine running them.
         self.serial = serial
+        # Scheduling tests keep their deterministic in-process builder unless
+        # explicitly exercising the production asynchronous display boundary.
+        self._async_coverage = False
         #: Colour frames the window was handed, in order.
         self.colours: list[bytes] = []
         self.result: object = None
@@ -677,11 +713,13 @@ class CaptureWindow:
         self._report = FakeReport()
         self._status = FakeStatusBar()
         self._capture_progress = FakeLabel()
+        self._job_progress = FakeProgressBar()
+        self._job_progress_active = False
         self._coverage_summary = FakeLabel()
         self._cloud = FakeCloud()
         self._capture_dir: Path | None = None
         self._project_path: Path | None = None
-        self._resume_preview_after = False
+        self._preview_interrupted = False
         self._saved_frames = 0
         self._model_refreshes = 0
         self._model_refreshed_at: int | None = None
@@ -731,6 +769,8 @@ class CaptureWindow:
         that just ended from being inherited by the next one, and a stand-in
         that skipped it would let that regress silently.
         """
+        if not on:
+            self._end_job_progress()
         self.busy.append(on)
         if not on:
             self._end_pause()
@@ -796,6 +836,7 @@ class CaptureWindow:
         # channel. A stand-in that dropped them would make those sentences
         # untestable and, worse, would make them look untested.
         self.worker.progress.connect(self._log)
+        self.worker.progress.connect(self._follow_job_progress)
         self.worker.running = True
         try:
             self.result = job(self.worker)
@@ -830,8 +871,8 @@ class CaptureWindow:
     def _stop(self) -> None:
         ScannerWindow._stop(cast(ScannerWindow, self))
 
-    def _consume_resume_preview(self) -> bool:
-        return ScannerWindow._consume_resume_preview(cast(ScannerWindow, self))
+    def _consume_preview_interrupted(self) -> bool:
+        return ScannerWindow._consume_preview_interrupted(cast(ScannerWindow, self))
 
     def _refresh_capture_progress(self) -> None:
         ScannerWindow._refresh_capture_progress(cast(ScannerWindow, self))
@@ -853,6 +894,15 @@ class CaptureWindow:
 
     def _finish_progress(self) -> None:
         ScannerWindow._finish_progress(cast(ScannerWindow, self))
+
+    def _begin_job_progress(self, stage: str) -> None:
+        ScannerWindow._begin_job_progress(cast(ScannerWindow, self), stage)
+
+    def _follow_job_progress(self, line: str) -> None:
+        ScannerWindow._follow_job_progress(cast(ScannerWindow, self), line)
+
+    def _end_job_progress(self) -> None:
+        ScannerWindow._end_job_progress(cast(ScannerWindow, self))
 
     def _show_saved(self, saved: int) -> None:
         ScannerWindow._show_saved(cast(ScannerWindow, self), saved)

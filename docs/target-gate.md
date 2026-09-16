@@ -691,3 +691,77 @@ preview, tracking and Reconstruct all clip to it, the export fuses over the same
 interval, and **Remember** writes it to the config file (`scanner3d config
 --set-depth-band` does the same from a shell). What it does not yet do: crop to the
 turntable region without being told the band, or weight the fusion by incidence.
+
+## 2026-09-04, evening: a different object wobbles at every band
+
+The operator's first reconstruction from the desktop application was of a white
+model on the turntable - one large inclined face, a row of fine columns, small
+discs on the plate - captured at the adaptive cadence (146 frames, image period
+75, about 5 degrees per frame). It registered incoherently at the default band
+(4% of points within 1.5 mm at frames one period apart, 13 mm off) and no better
+at 130-275 (2%, 15.5 mm) or 100-260 (6%, 8 mm). The chain's total rotation is
+right (363 degrees per period), so this is not the under-rotation of 2026-09-03;
+the camera centres wobble off their circle instead (radius 211-224 mm between
+the 10th and 90th percentiles, orbit residual 3.1 mm median and 7.2 mm p90, 9 mm
+out of plane, against 0.28 mm on the coherent sweep), and poses one period
+apart disagree by 9-14 mm through most of the turn and by up to 60 mm over the
+last ten frames. Sixty revisits were verified and thirty used; the closures do
+not hold the chain on the circle. The depth band fixed the room-content failure
+and does nothing here. The registration needs the turntable's own structure -
+one fixed axis, one radius, and the period pairs as constraints - which
+`scanner3d.coherence` already measures.
+
+**Resolved the same evening:** the fix is not a better chain but no chain. A
+turntable sweep is one axis and one rate, and `scanner3d.turntable` fits those
+five unknowns directly - the axis and centre from alignments between frames
+60 degrees apart, the rate from frames one revolution apart found by time.
+Through this tool's own path (`tools/target_gate.py CAPTURE`, which now tries
+the turntable model first) the CAD capture above scores 0.50 mm RMS, p95
+0.89, 23/24 surfaces, 95% observed, orthogonality PASS worst 0.75 degrees,
+base plate 0.11 mm; the white model that smeared registers to 0.10 mm between
+neighbours and 0.11 mm one turn apart. What it took to get there - the axis
+to two tenths of a degree and the centre to half a millimetre, and why chains,
+loop closure and the disc's normal all miss that - is in
+`docs/turntable-registration.md`.
+
+## 2026-09-11: the metric correction, on the CAD target
+
+The unit's measured metric correction ([metric-validation.md](metric-validation.md):
+`fy` × 0.9960, depth scale × 1.0015, from the cue ball) is now applied by the
+window, by `scanner3d reconstruct` and by this tool. Run on the CAD capture
+`20260904-020845` (190 frames, turntable model, default 60-300 band) both ways,
+`tools/target_gate.py CAPTURE --workers 4` against `--no-metric-correction`:
+
+| | corrected | factory record |
+| --- | ---: | ---: |
+| accuracy RMS over observed CAD points | 0.513 mm | 0.502 mm |
+| p95 | 0.902 mm | 0.896 mm |
+| surfaces passing the 1.5 mm gate | 23/24 | 23/24 |
+| CAD points observed | 95.2% | 95.0% |
+| orthogonality, worst outer face to `base_top` | 0.70 deg | 0.75 deg |
+| turntable model | 126.67 frames/turn, axis scatter 0.13 deg | 126.70, 0.20 deg |
+
+Per surface the two runs differ by ±0.04 mm RMS except `pocket_wall` (+0.12 mm
+corrected) and `rail_6mm_side` (−0.11 mm); `pocket_floor` is unobserved and
+`pocket_wall` fails in both. The outer faces' orthogonality deviations are the
+one thing that moves consistently, and towards the CAD (east 0.16 vs 0.32 deg,
+south 0.70 vs 0.75).
+
+**What this does and does not say.** This gate measures nearest-point distance
+from CAD to scan after an ICP placement, and a placement absorbs most of a
+0.15-0.55% scale on a 92 mm object: the largest displacement such a scale can
+produce at the target's extremes is a quarter of a millimetre, split both ways
+about the centre. So a correction of that size is expected to leave this gate
+where it was, and it has; the gate confirms the correction breaks nothing, not
+that it fixes the size. The 0.8% undersize of the fused platform is a SIZE
+measurement (`component-size-bias-results.md`) and is the number the correction
+has to be judged on; that comparison has not been run yet.
+
+Two practical notes from running it. The placement search oversubscribes the
+machine: with the BLAS and OpenMP pools left free it burned fifteen cores for
+more than ten minutes without finishing on this capture, and with
+`OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4` it finished placement in under three
+minutes (the whole run, registration included, in under four). And `--cache`
+writes the fused cloud before placement starts, so a run that is cut off during
+placement resumes from the cloud; the cache carries no record of which
+deprojection wrote it, which the JSON report now says.

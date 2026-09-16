@@ -33,12 +33,13 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 
+from scanner3d.capture_sequence import frame_times
 from scanner3d.errors import DoctorStatus, ScannerError
 
 #: Schema this module writes. A reader refuses anything newer.
@@ -272,6 +273,34 @@ def resolve_capture_input(path: Path) -> tuple[Path, Path | None]:
     raise ProjectUnreadable(
         f"{path} is neither a capture folder, a {PROJECT_NAME} file, nor a file inside a capture"
     )
+
+
+#: The capture record's list of each frame's delivery time, seconds from the first.
+FRAME_TIMES_KEY: Final = "frame_times_s"
+
+
+def capture_frame_times(paths: Sequence[Path], project_path: Path | None) -> tuple[float, ...]:
+    """Each frame's delivery time in seconds from the first.
+
+    From the project file's record when it has one for exactly these frames,
+    and from the files' own modification times otherwise - a capture read at
+    a stride, or one whose project file predates the record, still has the
+    times its files carry. The record exists because copying a capture can
+    lose those.
+    """
+    if project_path is not None:
+        try:
+            recorded = read_project(project_path).capture.get(FRAME_TIMES_KEY)
+        except ProjectError:
+            recorded = None
+        if (
+            isinstance(recorded, list)
+            and len(recorded) == len(paths)
+            and all(isinstance(value, (int, float)) for value in recorded)
+        ):
+            first = float(recorded[0]) if recorded else 0.0
+            return tuple(float(value) - first for value in recorded)
+    return frame_times(paths)
 
 
 def update_capture(path: Path, **fields: object) -> None:

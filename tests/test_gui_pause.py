@@ -558,6 +558,7 @@ def test_a_refused_relocalization_leaves_the_capture_folder_exactly_as_it_was(
 
     capture = cast(Path, window._capture_dir)
     assert sorted(path.name for path in capture.iterdir()) == [
+        "diagnostics",
         *(f"frame_{index:04d}.raw" for index in range(10)),
         PROJECT_NAME,
     ]
@@ -1432,6 +1433,7 @@ def test_a_capture_that_is_never_paused_is_byte_for_byte_the_capture_it_always_w
 
     capture = cast(Path, window._capture_dir)
     assert sorted(path.name for path in capture.iterdir()) == [
+        "diagnostics",
         *(f"frame_{index:04d}.raw" for index in range(7)),
         PROJECT_NAME,
     ]

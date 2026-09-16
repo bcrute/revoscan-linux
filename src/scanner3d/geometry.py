@@ -55,6 +55,12 @@ Matrix3 = tuple[tuple[float, float, float], tuple[float, float, float], tuple[fl
 #: of composing a few hundred transforms in a turntable loop.
 ORTHONORMAL_TOLERANCE: Final = 1e-6
 
+#: Correct only accumulated floating-point drift, far below the validation
+#: tolerance. Repeated R @ (R.T @ R) otherwise amplifies roundoff exponentially
+#: even when reexpressing a stationary pose through an unchanged reference.
+ROTATION_ROUNDOFF_TRIGGER: Final = 1e-12
+ROTATION_ROUNDOFF_LIMIT: Final = 1e-10
+
 #: Below this, a vector has no reliable direction and normalising it would
 #: amplify noise into a confident-looking wrong answer.
 MIN_VECTOR_NORM: Final = 1e-12
@@ -192,13 +198,15 @@ def determinant(m: Matrix3) -> float:
     )
 
 
-def ensure_rotation(m: Matrix3) -> Matrix3:
+def ensure_rotation(m: Matrix3, *, repair_roundoff: bool = False) -> Matrix3:
     """Refuse anything that is not a proper rotation, saying which way it failed."""
     ensure_finite((value for row in m for value in row), "rotation matrix")
+    defect = 0.0
     for i in range(3):
         for j in range(i, 3):
             expected = 1.0 if i == j else 0.0
             actual = math.fsum(m[k][i] * m[k][j] for k in range(3))
+            defect = max(defect, abs(actual - expected))
             if abs(actual - expected) > ORTHONORMAL_TOLERANCE:
                 raise NotARotation(
                     f"columns {i} and {j} have dot product {actual!r}, expected {expected!r}: "
@@ -213,6 +221,22 @@ def ensure_rotation(m: Matrix3) -> Matrix3:
                 "not detectable by eye."
             )
         raise NotARotation(f"determinant is {det!r}, expected 1.0")
+    if repair_roundoff and ROTATION_ROUNDOFF_TRIGGER < defect <= ROTATION_ROUNDOFF_LIMIT:
+        # One polar/Newton correction R (3I - R.T R) / 2. The error is
+        # quadratic in the already tiny defect. Validate both before and after:
+        # this must never turn an invalid scale, skew or reflection into a pose.
+        gram = tuple(
+            tuple(math.fsum(m[k][i] * m[k][j] for k in range(3)) for j in range(3))
+            for i in range(3)
+        )
+        corrected = tuple(
+            tuple(
+                0.5 * math.fsum(m[i][k] * ((3.0 if k == j else 0.0) - gram[k][j]) for k in range(3))
+                for j in range(3)
+            )
+            for i in range(3)
+        )
+        return ensure_rotation(corrected)  # type: ignore[arg-type]
     return m
 
 
@@ -228,10 +252,13 @@ class Rigid:
     translation: Point
 
     @classmethod
-    def of(cls, rotation: Matrix3, translation: Point) -> Rigid:
+    def of(cls, rotation: Matrix3, translation: Point, *, repair_roundoff: bool = False) -> Rigid:
         """Build a validated transform."""
         ensure_finite(translation, "translation")
-        return cls(rotation=ensure_rotation(rotation), translation=translation)
+        return cls(
+            rotation=ensure_rotation(rotation, repair_roundoff=repair_roundoff),
+            translation=translation,
+        )
 
     @classmethod
     def identity(cls) -> Rigid:
@@ -273,7 +300,7 @@ class Rigid:
             tuple(math.fsum(a[i][k] * b[k][j] for k in range(3)) for j in range(3))
             for i in range(3)
         )
-        return Rigid.of(rotation, self.apply(inner.translation))  # type: ignore[arg-type]
+        return Rigid.of(rotation, self.apply(inner.translation), repair_roundoff=True)  # type: ignore[arg-type]
 
     def inverse(self) -> Rigid:
         r = self.rotation

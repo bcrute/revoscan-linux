@@ -333,8 +333,16 @@ def depth_profile(
         raise PlausibilityEnvelopeUnusable(f"a histogram needs at least 2 bins, got {bins}")
 
     total = len(samples)
-    distances = [code * scale for code in samples if code != NO_RETURN_SAMPLE]
-    returned = len(distances)
+    try:
+        import numpy as np
+    except ImportError:
+        numeric = None
+        distances = [code * scale for code in samples if code != NO_RETURN_SAMPLE]
+    else:
+        codes = np.asarray(samples)
+        numeric = codes[codes != NO_RETURN_SAMPLE] * scale
+        distances = []
+    returned = len(distances) if numeric is None else len(numeric)
     if returned == 0:
         return DepthProfile(
             samples=total,
@@ -345,10 +353,14 @@ def depth_profile(
             widest_gap=0.0,
         )
 
-    below = sum(1 for d in distances if d < near_bound)
-    above = sum(1 for d in distances if d > far_bound)
-
-    low, high = min(distances), max(distances)
+    if numeric is None:
+        below = sum(1 for d in distances if d < near_bound)
+        above = sum(1 for d in distances if d > far_bound)
+        low, high = min(distances), max(distances)
+    else:
+        below = int(np.count_nonzero(numeric < near_bound))
+        above = int(np.count_nonzero(numeric > far_bound))
+        low, high = float(numeric.min()), float(numeric.max())
     span = high - low
     if span <= 0.0:
         # Every return at one distance. One cluster of zero extent, and no gap
@@ -364,10 +376,14 @@ def depth_profile(
         )
 
     width = span / bins
-    counts = [0] * bins
-    for d in distances:
-        index = int((d - low) / width)
-        counts[min(index, bins - 1)] += 1
+    if numeric is None:
+        counts = [0] * bins
+        for d in distances:
+            index = int((d - low) / width)
+            counts[min(index, bins - 1)] += 1
+    else:
+        indices = np.minimum(((numeric - low) / width).astype(np.int64), bins - 1)
+        counts = np.bincount(indices, minlength=bins).tolist()
 
     gate = gap_multiple * NOISE_FLOOR
     groups: list[list[int]] = []
@@ -388,7 +404,12 @@ def depth_profile(
     clusters: list[DepthCluster] = []
     for group in groups:
         first, last = group[0], group[-1]
-        held = [d for d in distances if low + first * width <= d <= low + (last + 1) * width]
+        if numeric is None:
+            held = [d for d in distances if low + first * width <= d <= low + (last + 1) * width]
+        else:
+            held = numeric[
+                (numeric >= low + first * width) & (numeric <= low + (last + 1) * width)
+            ].tolist()
         if not held:  # pragma: no cover - a bin with a count always holds a sample
             continue
         clusters.append(
@@ -669,6 +690,27 @@ def _cell_medians(
     samples: Sequence[int], width: int, height: int, scale: float
 ) -> list[float | None]:
     """One coarse grid of per-cell median distances, or ``None`` for an empty cell."""
+    try:
+        import numpy as np
+    except ImportError:
+        pass
+    else:
+        values = np.asarray(samples).reshape(height, width)
+        medians: list[float | None] = []
+        for row in range(STATIC_ROWS):
+            start_y = (row * height + STATIC_ROWS - 1) // STATIC_ROWS
+            end_y = ((row + 1) * height + STATIC_ROWS - 1) // STATIC_ROWS
+            for column in range(STATIC_COLUMNS):
+                start_x = (column * width + STATIC_COLUMNS - 1) // STATIC_COLUMNS
+                end_x = ((column + 1) * width + STATIC_COLUMNS - 1) // STATIC_COLUMNS
+                cell_values = values[start_y:end_y, start_x:end_x]
+                distances = cell_values[cell_values != NO_RETURN_SAMPLE] * scale
+                middle = len(distances) // 2
+                medians.append(
+                    None if not len(distances) else float(np.partition(distances, middle)[middle])
+                )
+        return medians
+
     buckets: list[list[float]] = [[] for _ in range(STATIC_COLUMNS * STATIC_ROWS)]
     for index, code in enumerate(samples):
         if code == NO_RETURN_SAMPLE:

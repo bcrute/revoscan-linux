@@ -207,7 +207,7 @@ def test_the_raw_depth_line_says_all_three_things_and_promises_no_unit() -> None
     """The three claims the depth panel was missing, and the one it must not make.
 
     Read off the constant rather than a widget for the reason
-    :data:`~scanner3d.gui.SURFACE_TOGGLE_TITLE` is: this is the only place the
+    :data:`RAW_DEPTH_PROVENANCE` is: this is the only place the
     wording itself is checked, and the panel test below proves the constant is
     what reaches the screen.
     """
@@ -943,17 +943,20 @@ def test_a_new_scan_does_not_open_on_the_last_scans_derived_shape(
 ) -> None:
     """A finished capture's triangle count is not evidence about the next one.
 
-    The first capture ends with the surface selected and claimed. The second one
-    is started with too few frames to publish anything at all, which is exactly
+    A reconstruction's surface is selected after the first capture. The second
+    capture starts with too few frames to publish anything at all, which is exactly
     the window in which a stale label would be visible - and the panel has
     already fallen back to the dots by then, with the operator's choice kept for
-    the moment this scan has a surface of its own.
+    the moment a later reconstruction has a surface of its own.
     """
     stream_kernel(frames(3 * COVERAGE_EVERY + 4))
     window = CaptureWindow(frames=3 * COVERAGE_EVERY + 4)
     live_meshable()
     window._toggle_surface(True)
     start_capture(window)
+    # A completed reconstruction can still publish a mesh. The next live
+    # capture must clear it even though live captures no longer make meshes.
+    window._show_coverage(published(surface=True, kind=SurfaceKind.RECONSTRUCTED_TSDF))
     ended_showing = said(window)
 
     stream_kernel(frames(2))
@@ -961,7 +964,7 @@ def test_a_new_scan_does_not_open_on_the_last_scans_derived_shape(
     window._frames_spin = FakeSpin(2)
     start_capture(window)
 
-    assert "DERIVED occupancy surface" in ended_showing
+    assert "DERIVED signed-distance" in ended_showing
     assert not window.worker.coverage.emitted, "this run is too short to publish a model"
     assert window._surface_wanted is True
     assert not window._surface_toggle.enabled
@@ -988,16 +991,10 @@ def sphere_frames(root: Path, count: int = 4) -> Path:
     return frames_dir
 
 
-def test_the_live_capture_surface_is_described_as_the_occupancy_grid_it_is(
+def test_live_capture_is_described_as_points_and_offers_no_experimental_mesh(
     stream_kernel, capture_dir: Path, live_meshable
 ) -> None:
-    """The live half of the distinction, through the real capture that builds it.
-
-    Not a hand-made snapshot: the surface here is the one
-    :class:`~scanner3d.tsdf_surface.SurfaceAccumulator` marched from the cells
-    the poses accepted DURING this capture filled, published by the real
-    producer, and the kind travels with it.
-    """
+    """The real live producer publishes only measured points, even if selected."""
     stream_kernel(frames(3 * COVERAGE_EVERY + 4))
     window = CaptureWindow(frames=3 * COVERAGE_EVERY + 4)
     live_meshable()
@@ -1007,24 +1004,12 @@ def test_the_live_capture_surface_is_described_as_the_occupancy_grid_it_is(
 
     published_models = emitted(window)
     assert published_models, "this capture should have published at least one model"
-    assert all(
-        model.surface_kind is SurfaceKind.LIVE_OCCUPANCY
-        for model in published_models
-        if model.has_surface
-    )
-    assert window._mounted_picture() is ModelPicture.SURFACE
-    line = flat(said(window))
-    assert "derived occupancy surface" in line
-    assert "not measured" in line
-    assert "poses accepted during capture" in line
-    # The exported reconstruction's account, which is false about this mesh.
-    for wrong in ("signed-distance", "tsdf", "corrected"):
-        assert wrong not in line
-    # And the two adjacent claims about the same mesh agree with it.
-    assert "Experimental occupancy preview" in window._coverage_summary.text
-    assert "signed-distance" not in flat(window._coverage_summary.text)
-    assert "experimental" in flat(window._surface_toggle.text)
-    assert "occupancy" in flat(window._surface_toggle.tooltip)
+    assert all(not model.has_surface and model.surface_kind is None for model in published_models)
+    assert window._mounted_picture() is ModelPicture.POINTS
+    assert said(window) == POINTS_PROVENANCE
+    assert "Experimental occupancy preview" not in window._coverage_summary.text
+    assert not window._surface_toggle.enabled
+    assert "live captures show points only" in flat(window._surface_toggle.tooltip)
 
 
 def test_the_reconstructed_surface_is_described_as_the_fused_one_that_was_exported(
@@ -1358,7 +1343,7 @@ def booby_trap(monkeypatch) -> list[str]:
     return reached
 
 
-def test_a_live_capture_draws_both_pictures_with_every_completion_adapter_trapped(
+def test_a_live_capture_draws_points_with_every_completion_adapter_trapped(
     stream_kernel, capture_dir: Path, live_meshable, monkeypatch
 ) -> None:
     """The negative probe over the live path, with the pictures still produced.
@@ -1366,7 +1351,7 @@ def test_a_live_capture_draws_both_pictures_with_every_completion_adapter_trappe
     Spatial and temporal completion and the weighted TSDF input are offline
     evidence. Making the preview say what is measured must not become a reason
     to route any of them into what the operator is shown, so the capture that
-    produces both pictures is run with all three set to raise.
+    produces points is run with all three set to raise.
     """
     stream_kernel(frames(3 * COVERAGE_EVERY + 4))
     window = CaptureWindow(frames=3 * COVERAGE_EVERY + 4)
@@ -1381,7 +1366,7 @@ def test_a_live_capture_draws_both_pictures_with_every_completion_adapter_trappe
     assert reached == []
     assert window.worker.coverage.emitted
     assert len(window.frames_on_disk()) == 3 * COVERAGE_EVERY + 4
-    assert "DERIVED occupancy surface" in while_surfaced
+    assert while_surfaced == POINTS_PROVENANCE
     assert said(window) == POINTS_PROVENANCE
 
 
@@ -1445,9 +1430,9 @@ def test_the_prose_says_what_each_preview_is_and_why_completion_stays_offline() 
         assert "no completion" in prose
         # Measured versus derived, in the words the panel itself uses.
         assert "measured depth returns" in prose
-        assert "derived occupancy surface" in prose
-        # And the two derived surfaces kept apart, which is what round one's
-        # single surface wording could not do.
+        # Live captures contain no derived mesh; offline surfaces still state
+        # their actual producer and resolution.
+        assert "points only" in prose or "points-only" in prose
         assert "signed-distance" in prose
         assert "corrected" in prose
         assert "voxel size" in prose
@@ -1455,3 +1440,6 @@ def test_the_prose_says_what_each_preview_is_and_why_completion_stays_offline() 
         for adapter in COMPLETION_MODULES:
             assert adapter.lower() in prose
         assert "offline evidence" in prose
+    assert "experimental live meshing has been removed" in readme
+    assert "experimental occupancy meshing has been removed" in focused
+    assert "derived occupancy surface" in focused  # retained historical provenance

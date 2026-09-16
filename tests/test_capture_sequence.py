@@ -55,6 +55,7 @@ from scanner3d.capture_sequence import (
     BridgeRecordUnusable,
     CaptureSequenceUnreadable,
     SegmentPublicationRefused,
+    frame_times,
     next_frame_index,
     publish_segment,
     read_capture_sequence,
@@ -1620,3 +1621,20 @@ def test_publish_segment_refuses_limitations_its_own_reader_would_reject(
     assert sorted(entry.name for entry in tmp_path.iterdir()) == before
     assert not list(tmp_path.glob(SEGMENT_GLOB))
     assert not list(tmp_path.glob(f"{STAGING_PREFIX}*"))
+
+
+# -- delivery times ----------------------------------------------------------
+
+
+def test_frame_times_are_seconds_from_the_first_frame_by_the_files_own_clock(
+    tmp_path: Path,
+) -> None:
+    """A frame file's modification time is its delivery time; the first is zero."""
+    paths = []
+    for index, stamp in enumerate((1000.0, 1000.443, 1001.329)):
+        path = tmp_path / f"frame_{index:04d}.raw"
+        path.write_bytes(b"x")
+        os.utime(path, (stamp, stamp))
+        paths.append(path)
+    assert frame_times(paths) == pytest.approx((0.0, 0.443, 1.329), abs=1e-3)
+    assert frame_times([]) == ()

@@ -1,5 +1,11 @@
 """What each preview IS, said on the screen rather than left to be inferred.
 
+Live captures now publish points only; experimental occupancy meshing is
+retired. Its kind and descriptive wording remain for historical/explicit
+snapshots, not as an available capture feature. Offline reconstruction still
+publishes its signed-distance surface. The history below explains why a
+surface must always carry its actual producer's identity.
+
 The report this module answers
 -------------------------------
 The appliance draws three pictures of the same scan and they do not have the
@@ -284,18 +290,14 @@ class SurfaceControl:
     tooltip: str
 
 
-#: The control while the panel holds no surface at all. Not the live wording:
-#: this is a disabled box over a panel that has never been given a mesh, and
-#: naming one of the two producers here would be the same guess the provenance
-#: line refuses. It says instead what each of them would be.
+#: Live captures are points-only. This control becomes usable after an offline
+#: reconstruction publishes a mesh; it does not enable live meshing.
 NO_SURFACE_CONTROL_TITLE: Final = "No surface available"
 NO_SURFACE_CONTROL_TOOLTIP: Final = (
     "There is no surface to show yet, so this box does nothing.\n\n"
-    "A running capture builds an experimental occupancy preview from the poses\n"
-    "it accepts as it goes. Reconstruct instead exports a signed-distance\n"
-    "surface fused from the full-resolution frames at its corrected poses.\n"
-    "They are different surfaces made by different arithmetic, so this control\n"
-    "names whichever one the panel is actually holding rather than assuming.\n\n"
+    "Live captures show points only; experimental live meshing is disabled.\n"
+    "Use Reconstruct + export to build a signed-distance surface from the\n"
+    "full-resolution frames at corrected poses, then select it here.\n\n"
     "The points are the live picture and the one to read the scan from.\n"
     "Coverage - the red 'still needs scanning' colouring - is measured on the\n"
     "points, so it is shown there."

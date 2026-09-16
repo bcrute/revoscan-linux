@@ -176,16 +176,61 @@ def test_a_frame_that_is_almost_all_plane_keeps_every_point_it_had():
 # --- one path, two entry points -----------------------------------------------
 
 
+@pytest.mark.parametrize("target", [900, 3000])
+@pytest.mark.parametrize("band", [None, DepthBand(near=130.0, far=275.0)])
+def test_raw_preparation_matches_scalar_conversion_exactly(target, band):
+    raw = (Path(__file__).parent / "fixtures/turntable/bed-01.bin").read_bytes()
+    conversion = deproject_depth_frame(
+        raw,
+        intrinsics=FACTORY_INTRINSICS,
+        depth_scale=cli.DEPTH_SCALE_METRES,
+        unit=preparation_unit(),
+    )
+    expected = prepare_points(
+        [(p.x, p.y, p.z) for p in conversion.points], target_points=target, depth_band=band
+    )
+    actual = prepare_frame(raw, target_points=target, depth_band=band)
+    assert actual == expected
+
+
+def test_raw_preparation_without_numpy_matches_accelerated(monkeypatch):
+    import sys
+
+    raw = (Path(__file__).parent / "fixtures/turntable/bed-01.bin").read_bytes()
+    expected = prepare_frame(raw, target_points=900)
+    monkeypatch.setitem(sys.modules, "numpy", None)
+    assert prepare_frame(raw, target_points=900) == expected
+
+
+def test_raw_preparation_keeps_depth_band_edges_exclusive():
+    raw = struct.pack(SAMPLES_FORMAT, *([20000, 30000, 40000, 0] * 64000))
+    band = DepthBand(near=20000 * cli.DEPTH_SCALE_METRES, far=40000 * cli.DEPTH_SCALE_METRES)
+    prepared = prepare_frame(raw, target_points=900, depth_band=band)
+    assert prepared.deprojected_points == 192000
+    assert prepared.clipped_points == 64000
+    assert all(p[2] == 30000 * cli.DEPTH_SCALE_METRES for p in prepared.points)
+
+
 def test_the_window_prepares_a_raw_frame_exactly_as_the_shared_path_does():
     from scanner3d import gui
+    from scanner3d.metric_correction import calibrated_deprojection
 
     raw = scene_frame()
     through_window = gui._prepare_frame(raw, gui.RECONSTRUCT_POINTS)
-    through_path = prepare_frame(raw, target_points=RECONSTRUCT_POINTS)
+    # The window deprojects under this unit's calibrated record; the shared path
+    # given the same record must produce the identical cloud and record.
+    intrinsics, depth_scale, correction = calibrated_deprojection()
+    through_path = prepare_frame(
+        raw, target_points=RECONSTRUCT_POINTS, intrinsics=intrinsics, depth_scale=depth_scale
+    )
 
     assert gui.RECONSTRUCT_POINTS == RECONSTRUCT_POINTS
     assert through_window.points == through_path.points
     assert through_window.as_dict() == through_path.as_dict()
+    # And it is the calibrated geometry, not the factory one, that the window makes.
+    assert correction is not None
+    factory = prepare_frame(raw, target_points=RECONSTRUCT_POINTS)
+    assert through_window.points != factory.points
 
 
 def test_both_capture_paths_read_their_cloud_from_the_shared_preparation_record(tmp_path: Path):
@@ -259,8 +304,21 @@ def test_the_command_line_prepares_a_capture_through_the_shared_path(
     assert cli.main([cli.RECONSTRUCT_COMMAND, str(frames_dir), "--json"]) == 0
 
     payload = json.loads(capsys.readouterr().out)
+    # The command deprojects under this unit's calibrated record; the shared
+    # path given the same record is what its report and clouds must match.
+    from scanner3d.metric_correction import calibrated_deprojection
+
+    intrinsics, depth_scale, _ = calibrated_deprojection()
     expected = PreparationSummary.of(
-        [prepare_frame(raw, target_points=RECONSTRUCT_POINTS) for _ in range(4)]
+        [
+            prepare_frame(
+                raw,
+                target_points=RECONSTRUCT_POINTS,
+                intrinsics=intrinsics,
+                depth_scale=depth_scale,
+            )
+            for _ in range(4)
+        ]
     )
     assert payload["command"]["preparation"] == expected.as_dict()
     assert payload["command"]["preparation_statement"] == filter_statement(expected)
@@ -273,7 +331,10 @@ def test_the_command_line_prepares_a_capture_through_the_shared_path(
     )
     # And the clouds it handed the registration are the prepared ones.
     assert seen["clouds"] == [
-        prepare_frame(raw, target_points=RECONSTRUCT_POINTS).points for _ in range(4)
+        prepare_frame(
+            raw, target_points=RECONSTRUCT_POINTS, intrinsics=intrinsics, depth_scale=depth_scale
+        ).points
+        for _ in range(4)
     ]
 
 

@@ -88,6 +88,12 @@ MIN_CLOSURES_TO_SPLIT: Final = 4
 #: portable to another scanner rather than to this one alone.
 NOISE_FLOOR: Final = 0.65
 
+#: How often the pairwise alignment reports its count: every this many pairs
+#: and at the last one, on both the serial and the parallel path, so that a
+#: caller drawing a bar from the lines sees it move rather than sit at zero
+#: for the whole of the longest stage.
+PROGRESS_EVERY: Final = 10
+
 #: How far the surface should travel between kept frames, as a multiple of the
 #: noise floor.
 #:
@@ -506,7 +512,13 @@ def reconstruct_sweep(
 
         try:
             with multiprocessing.Pool(processes=workers) as pool:
-                fits = pool.map(_fit_pair, [(settings, s, t) for s, t in pairs])
+                # imap rather than map: the same order, but each fit is handed
+                # back as it completes, so the count below can be reported.
+                jobs = [(settings, s, t) for s, t in pairs]
+                for position, fit in enumerate(pool.imap(_fit_pair, jobs), start=1):
+                    fits.append(fit)
+                    if position % PROGRESS_EVERY == 0 or position == len(pairs):
+                        report(f"  aligned {position}/{len(pairs)}")
             report(f"  aligned {len(fits)} pairs across {workers} workers")
         except RuntimeError as exc:
             # Python 3.14 defaults to forkserver on Linux, which re-imports the
@@ -522,7 +534,7 @@ def reconstruct_sweep(
     if not fits and pairs:
         for position, (source, target) in enumerate(pairs, start=1):
             fits.append(_fit_pair((settings, source, target)))
-            if position % 25 == 0:
+            if position % PROGRESS_EVERY == 0 or position == len(pairs):
                 report(f"  aligned {position}/{len(pairs)}")
 
     # Back into position order. The adjacent fits above are only ONE of the

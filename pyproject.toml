@@ -28,6 +28,10 @@ scipy = ["scipy>=1.11"]
 # PySide6 backs the desktop window in scanner3d.gui. Optional like the others:
 # the CLI, the library and every test run without it.
 gui = ["PySide6>=6.7"]
+# Live hybrid tracking: GPU FP64 normals plus CPU spatial indexing and gates.
+gpu = ["PyOpenGL>=3.1.10", "PySide6>=6.7", "scipy>=1.11"]
+# Opt-in benchmark only; does not select or enable a live GPU compute backend.
+gpu-probe = ["PyOpenGL>=3.1.10", "PySide6>=6.7", "scipy>=1.11"]
 dev = [
   "pytest>=8.3",
   "pytest-cov>=5.0",

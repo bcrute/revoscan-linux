@@ -469,6 +469,43 @@ def test_the_orthonormal_tolerance_sits_exactly_where_it_is_documented():
     assert Rigid.of(within, (0.0, 0.0, 0.0)).rotation is within
 
 
+@pytest.mark.parametrize("through", [(0.0, 0.0, 0.0), (5.0, -10.0, 200.0)])
+def test_stationary_coordinate_roundtrips_do_not_amplify_rotation_roundoff(through):
+    original = rotation_about_axis((0.1, 0.3, 0.7), 0.2, through=through)
+    pose = original
+    probe = (10.0, -20.0, 150.0)
+    for _ in range(1000):
+        pose = pose.compose(pose.inverse().compose(pose))
+        r = pose.rotation
+        defect = max(
+            abs(math.fsum(r[k][a] * r[k][b] for k in range(3)) - float(a == b))
+            for a in range(3)
+            for b in range(3)
+        )
+        assert defect <= 1e-12
+        assert distance(pose.apply(probe), original.apply(probe)) < 1e-7
+        assert determinant(r) > 0.0
+
+
+@pytest.mark.parametrize("scale", [1.01, -1.0, 1.0 + 1e-6])
+def test_roundoff_repair_does_not_admit_scale_or_reflection(scale):
+    matrix: Matrix3 = ((scale, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+    with pytest.raises(NotARotation):
+        Rigid.of(matrix, (0.0, 0.0, 0.0), repair_roundoff=True)
+
+
+def test_roundoff_repair_is_closed_to_tiny_defects_and_leaves_translation_unchanged():
+    shift = (1.0, 2.0, 3.0)
+    tiny: Matrix3 = ((1.0 + 1e-11, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+    fixed = Rigid.of(tiny, shift, repair_roundoff=True)
+    assert fixed.rotation != tiny
+    assert fixed.rotation == IDENTITY_MATRIX
+    assert fixed.translation is shift
+    assert Rigid.of(tiny, shift).rotation is tiny
+    larger: Matrix3 = ((1.0 + 1e-8, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
+    assert Rigid.of(larger, shift, repair_roundoff=True).rotation is larger
+
+
 def test_of_refuses_a_non_finite_rotation_entry_naming_its_position():
     broken: Matrix3 = ((1.0, 0.0, 0.0), (0.0, 1.0, float("inf")), (0.0, 0.0, 1.0))
     with pytest.raises(NonFiniteValue) as caught:

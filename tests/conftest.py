@@ -9,6 +9,8 @@ configuration descriptor of the physical Revopoint MINI used for this task.
 from __future__ import annotations
 
 import atexit
+import builtins
+import io
 import os
 import shutil
 import tempfile
@@ -47,6 +49,32 @@ def _isolate_config_before_collection() -> Path:
 
 #: The empty config home every import-time constant is read against.
 ISOLATED_CONFIG_HOME = _isolate_config_before_collection()
+
+
+@pytest.fixture(autouse=True)
+def no_live_scanner_opens(monkeypatch):
+    """A missing fake must fail here, never operate the connected scanner.
+
+    Explicit fake-driver fixtures replace these wrappers afterwards. This is
+    a regression guard for Python device opens, not a subprocess/FFI sandbox.
+    Physical diagnostics live in tools with their explicit execution gates.
+    """
+
+    def guarded(original):
+        def opened(path, *args, **kwargs):
+            if isinstance(path, (str, bytes, os.PathLike)):
+                name = os.fsdecode(path)
+                if name.startswith(("/dev/video", "/dev/bus/usb/", "/dev/media")):
+                    raise AssertionError(
+                        f"Unit test attempted live scanner open: {name}; install a fake"
+                    )
+            return original(path, *args, **kwargs)
+
+        return opened
+
+    monkeypatch.setattr(os, "open", guarded(os.open))
+    monkeypatch.setattr(builtins, "open", guarded(builtins.open))
+    monkeypatch.setattr(io, "open", guarded(io.open))
 
 
 def descriptor_blob() -> bytes:

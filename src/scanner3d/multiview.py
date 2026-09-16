@@ -604,7 +604,12 @@ def coarse_align(
 
 
 def overlap_fraction(
-    source: Sequence[Point], target: Sequence[Point], transform: Rigid, *, tolerance: float
+    source: Sequence[Point],
+    target: Sequence[Point],
+    transform: Rigid,
+    *,
+    tolerance: float,
+    backend: str = "python",
 ) -> float:
     """Fraction of ``source`` landing within ``tolerance`` of some target point.
 
@@ -614,6 +619,21 @@ def overlap_fraction(
     """
     if not source or not target:
         return 0.0
+    if backend == "scipy" and math.isfinite(tolerance) and tolerance > 0:
+        from scipy.spatial import cKDTree
+
+        # The tree only proposes candidates. The ORIGINAL inclusive, fsum
+        # distance test decides overlap, including points exactly on the gate.
+        # Expand the query radius slightly to cover roundoff in tree distances.
+        moved = list(transform.apply_all(source))
+        radius = math.nextafter(tolerance * (1.0 + 1e-14), math.inf)
+        candidates = cKDTree(target).query_ball_point(moved, radius, workers=1)
+        limit = tolerance * tolerance
+        within = sum(
+            any(dot(subtract(p, target[j]), subtract(p, target[j])) <= limit for j in row)
+            for p, row in zip(moved, candidates, strict=True)
+        )
+        return within / len(source)
     cell = max(tolerance, 1e-6)
     grid: dict[tuple[int, int, int], list[Point]] = {}
     for q in target:

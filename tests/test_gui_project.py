@@ -14,6 +14,7 @@ from scanner3d.capture_sequence import FRAME_GLOB, TRACKING_LOSS_RECORD_NAME
 from scanner3d.gui import ScannerWindow
 from scanner3d.project import PROJECT_NAME, read_project
 from scanner3d.reconstruction_export import OUTPUT_PREFIX, RECORD_NAME
+from tests.fake_v4l2 import stream_kernel, stream_node, whole_frame
 from tests.gui_harness import (
     CaptureWindow,
     clouds,
@@ -25,7 +26,14 @@ from tests.gui_harness import (
     start_reconstruct,
 )
 
-__all__ = ["clouds", "mesh_budget", "meshable_clouds", "registration"]
+__all__ = [
+    "clouds",
+    "mesh_budget",
+    "meshable_clouds",
+    "registration",
+    "stream_kernel",
+    "stream_node",
+]
 
 
 def capture_of(tmp_path: Path, frames: int = 4) -> Path:
@@ -38,10 +46,11 @@ def capture_of(tmp_path: Path, frames: int = 4) -> Path:
 
 
 def test_a_capture_writes_its_project_file_first_and_finishes_it_last(
-    tmp_path: Path, monkeypatch, clouds: list[int]
+    tmp_path: Path, monkeypatch, clouds: list[int], stream_kernel
 ) -> None:
     """The settings go in before a frame arrives; the outcome goes in after the last one."""
     window = CaptureWindow(frames=3, decimate=2, depth_near=90, depth_far=210)
+    stream_kernel([whole_frame(index) for index in range(3)])
     monkeypatch.setattr(
         ScannerWindow, "_capture_target", lambda self: _fresh(tmp_path), raising=True
     )
@@ -71,7 +80,7 @@ def test_a_capture_writes_its_project_file_first_and_finishes_it_last(
 
 
 def test_the_folder_decides_that_tracking_was_lost(
-    tmp_path: Path, monkeypatch, clouds: list[int]
+    tmp_path: Path, monkeypatch, clouds: list[int], stream_kernel
 ) -> None:
     """A loss record on disk is a loss, whatever the window had been told by Stop.
 
@@ -80,6 +89,7 @@ def test_the_folder_decides_that_tracking_was_lost(
     lost, 0 frames" beside a tracking-loss.json.
     """
     window = CaptureWindow(frames=3, decimate=2, depth_near=90, depth_far=210)
+    stream_kernel([whole_frame(index) for index in range(3)])
     monkeypatch.setattr(
         ScannerWindow, "_capture_target", lambda self: _fresh(tmp_path), raising=True
     )

@@ -767,6 +767,24 @@ def _later_frames(
     return frames
 
 
+def frame_times(paths: Sequence[Path]) -> tuple[float, ...]:
+    """Each frame's delivery time in seconds from the first, from the files' own times.
+
+    A capture writes each frame as it arrives, so a file's modification time
+    is its delivery time to a few milliseconds - on the machine that captured
+    it. Copying a capture without preserving times loses that, which is why
+    :mod:`scanner3d.project` records these numbers in the project file at the
+    end of a capture and prefers them. The turntable registration needs them
+    when the interval between kept frames varied, as the desktop application's
+    held spacing makes it.
+    """
+    if not paths:
+        return ()
+    stamps = [path.stat().st_mtime for path in paths]
+    first = stamps[0]
+    return tuple(stamp - first for stamp in stamps)
+
+
 def read_capture_sequence(directory: Path) -> CaptureSequence:
     """Every frame of one capture, in order, with its verified bridges.
 

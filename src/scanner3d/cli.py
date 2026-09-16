@@ -2620,7 +2620,8 @@ def _cmd_sweep(args: argparse.Namespace) -> int:
         )
     # The scan's own record, beside its frames: how they were taken, so the
     # window and the reconstruct command can be pointed at one file.
-    from scanner3d.project import ProjectError, write_project
+    from scanner3d.capture_sequence import FRAME_GLOB, frame_times
+    from scanner3d.project import FRAME_TIMES_KEY, ProjectError, write_project
 
     project_file: str | None
     try:
@@ -2633,6 +2634,7 @@ def _cmd_sweep(args: argparse.Namespace) -> int:
                     "decimate": args.decimate,
                     "duration_s": args.duration,
                     "frames_written": written,
+                    FRAME_TIMES_KEY: list(frame_times(sorted(args.output.glob(FRAME_GLOB)))),
                     "delivered": result.delivered,
                     "dropped_by_sequence": result.dropped_by_sequence,
                     "short_frames": result.short_frames,
@@ -2703,6 +2705,7 @@ def _cmd_reconstruct(args: argparse.Namespace) -> int:
     """Register a captured sweep offline and report what the evidence says."""
     from scanner3d.capture_sequence import CaptureSequenceUnreadable, read_capture_sequence
     from scanner3d.coherence import check_coherence
+    from scanner3d.metric_correction import calibrated_deprojection
     from scanner3d.pipeline import reconstruct_sweep
     from scanner3d.preparation import (
         PREPARATION_ORDER,
@@ -2713,9 +2716,14 @@ def _cmd_reconstruct(args: argparse.Namespace) -> int:
         filter_statement,
         prepare_frame,
     )
-    from scanner3d.project import ProjectError, resolve_capture_input
+    from scanner3d.project import ProjectError, capture_frame_times, resolve_capture_input
     from scanner3d.reconstruction_readiness import ReconstructionRefused, evaluate_readiness
-    from scanner3d.simulate import FACTORY_INTRINSICS
+    from scanner3d.turntable import (
+        TurntableNotDetected,
+        TurntableRegistration,
+        TurntableUnusable,
+        register_turntable,
+    )
 
     # A capture folder, its project file, or any frame inside it: the frames
     # directory is what the reader below is given either way.
@@ -2757,9 +2765,22 @@ def _cmd_reconstruct(args: argparse.Namespace) -> int:
     # scanner3d.preparation rather than restated here. The raw bytes are kept
     # because the coherence check below judges the images themselves.
     raws = [path.read_bytes() for path in paths]
+    # This unit's measured metric correction rides on the factory record here,
+    # at the one place every point of this command is made (scanner3d.metric_correction).
+    intrinsics, depth_scale, correction = (
+        calibrated_deprojection(None) if args.no_metric_correction else calibrated_deprojection()
+    )
     prepared: list[PreparedCloud] = []
     for raw in raws:
-        prepared.append(prepare_frame(raw, target_points=RECONSTRUCT_POINTS, depth_band=band))
+        prepared.append(
+            prepare_frame(
+                raw,
+                target_points=RECONSTRUCT_POINTS,
+                depth_band=band,
+                intrinsics=intrinsics,
+                depth_scale=depth_scale,
+            )
+        )
     clouds: list[tuple[tuple[float, float, float], ...]] = [frame.points for frame in prepared]
     summary = PreparationSummary.of(prepared)
 
@@ -2789,16 +2810,53 @@ def _cmd_reconstruct(args: argparse.Namespace) -> int:
         if not args.json:
             print(message, file=sys.stderr, flush=True)
 
+    progress(
+        correction.statement()
+        if correction is not None
+        else "metric correction off: the factory intrinsics and depth scale, unmodified"
+    )
+
+    # A full turn of a turntable is one axis and one rate, and registers far
+    # better as that than as a chain of frames (scanner3d.turntable). Tried
+    # first: a capture whose frames never repeat is not one, and says so.
+    turntable: TurntableRegistration | None = None
+    if not args.no_turntable:
+        try:
+            turntable = register_turntable(
+                clouds,
+                raws=raws,
+                depth_scale=depth_scale,
+                times=capture_frame_times(paths, project_path),
+                backend=args.backend,
+                on_progress=progress,
+            )
+        except TurntableNotDetected as exc:
+            progress(f"registering frame by frame: {exc}")
+        except TurntableUnusable as exc:
+            progress(f"registering frame by frame; the turntable model was refused: {exc}")
+    registration_record: dict[str, object] = (
+        turntable.as_dict() if turntable is not None else {"registration": "frame-by-frame"}
+    )
+    registration_record["deprojection"] = {
+        "fx": intrinsics.values["fx"],
+        "fy": intrinsics.values["fy"],
+        "depth_scale": depth_scale,
+        "metric_correction": None if correction is None else correction.as_dict(),
+    }
     try:
-        result = reconstruct_sweep(
-            clouds,
-            backend=args.backend,
-            workers=args.workers,
-            point_to_plane=not args.point_to_point,
-            robust=not args.no_robust,
-            bridges=boundaries,
-            on_progress=progress,
-        )
+        if turntable is not None:
+            result = turntable.as_reconstruction()
+            progress(turntable.statement())
+        else:
+            result = reconstruct_sweep(
+                clouds,
+                backend=args.backend,
+                workers=args.workers,
+                point_to_plane=not args.point_to_point,
+                robust=not args.no_robust,
+                bridges=boundaries,
+                on_progress=progress,
+            )
     except ScannerError as exc:
         print(f"reconstruction refused: {exc}", file=sys.stderr)
         return EXIT_CODES[getattr(exc, "status", DoctorStatus.INTERNAL_ERROR)]
@@ -2811,8 +2869,8 @@ def _cmd_reconstruct(args: argparse.Namespace) -> int:
     coherence = check_coherence(
         raws,
         result.poses,
-        intrinsics=FACTORY_INTRINSICS,
-        depth_scale=DEPTH_SCALE_METRES,
+        intrinsics=intrinsics,
+        depth_scale=depth_scale,
         depth_band=band,
     )
     if not args.json:
@@ -2834,6 +2892,7 @@ def _cmd_reconstruct(args: argparse.Namespace) -> int:
             {
                 "readiness": readiness.as_dict(),
                 "coherence": coherence.as_dict(),
+                "registration": registration_record,
                 "command": {
                     "name": RECONSTRUCT_COMMAND,
                     "frames_directory": str(frames_dir),
@@ -2860,6 +2919,7 @@ def _cmd_reconstruct(args: argparse.Namespace) -> int:
         # one place, and it states the policy it was judged under.
         "readiness": readiness.as_dict(),
         "coherence": coherence.as_dict(),
+        "registration": registration_record,
         "command": {
             "name": RECONSTRUCT_COMMAND,
             "frames_directory": str(frames_dir),
@@ -3845,6 +3905,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-robust",
         action="store_true",
         help="do not reject closure constraints that disagree with the consensus",
+    )
+    recon.add_argument(
+        "--no-turntable",
+        action="store_true",
+        help="register frame by frame even when the frames repeat as a full turn of a "
+        "turntable. By default a capture that proves a turn is registered as one axis and "
+        "one rate (scanner3d.turntable), which holds where the frame-by-frame chain wanders",
+    )
+    recon.add_argument(
+        "--no-metric-correction",
+        action="store_true",
+        help="deproject with the factory intrinsics and depth scale unmodified, without this "
+        "unit's measured metric correction (scanner3d.metric_correction). The default applies "
+        "it; the report says which was used either way, under registration.deprojection",
     )
     recon.add_argument(
         "--depth-band",

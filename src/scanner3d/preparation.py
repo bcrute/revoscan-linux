@@ -16,6 +16,10 @@ So the steps live here once, and both entry points call
 :func:`prepare_frame`. There is no second copy to keep in step, and a record
 written by either one says which policy version produced it.
 
+With NumPy installed, raw preparation evaluates the same deprojection and
+selection in arrays and builds Python points only for the thinned cloud. The
+scalar conversion remains the fallback, and both use the filters below.
+
 The order, and why it is this order
 -----------------------------------
 :data:`PREPARATION_ORDER`, stated once so it can be quoted into a report:
@@ -438,10 +442,28 @@ def prepare_points(
     clipped = [p for p in offered if band.contains(p[2])]
     step = max(1, len(clipped) // target_points)
     thinned = clipped[::step]
+    return _filter_thinned(
+        thinned,
+        target_points=target_points,
+        deprojected_points=len(offered) if deprojected_points is None else deprojected_points,
+        clipped_points=len(clipped),
+        band=band,
+    )
+
+
+def _filter_thinned(
+    thinned: Sequence[Point],
+    *,
+    target_points: int,
+    deprojected_points: int,
+    clipped_points: int,
+    band: DepthBand,
+) -> PreparedCloud:
+    """Apply the shared filters to validated, clipped and thinned samples."""
     counts = {
         "target_points": target_points,
-        "deprojected_points": len(offered) if deprojected_points is None else deprojected_points,
-        "clipped_points": len(clipped),
+        "deprojected_points": deprojected_points,
+        "clipped_points": clipped_points,
         "thinned_points": len(thinned),
     }
     if not thinned:
@@ -459,13 +481,24 @@ def prepare_points(
 
 
 def prepare_frame(
-    raw: bytes, *, target_points: int, depth_band: DepthBand | None = None
+    raw: bytes,
+    *,
+    target_points: int,
+    depth_band: DepthBand | None = None,
+    intrinsics: IntrinsicsRecord | None = None,
+    depth_scale: float | None = None,
 ) -> PreparedCloud:
     """Deproject one raw depth frame and prepare it for registration.
 
     ``depth_band`` is the interval the clip keeps for this capture; ``None``
     is the sensor's own. Every registration entry point passes the band it
     resolved so the record says which interval the cloud describes.
+
+    ``intrinsics`` and ``depth_scale`` are the deprojection to use; ``None``
+    is the factory record and the SDK scale, unmodified. The reconstruction
+    entry points pass :func:`scanner3d.metric_correction.calibrated_deprojection`
+    so this unit's measured correction is applied; a caller that wants the raw
+    factory geometry says nothing and gets it.
 
     Takes bytes rather than a path because the frames a resumed capture holds
     TENTATIVELY have been delivered and selected but must not be written as
@@ -475,19 +508,63 @@ def prepare_frame(
     function.
     """
     ensure_target_points(target_points)
+    band = ensure_depth_band(depth_band)
 
     from scanner3d.cli import DEPTH_SCALE_METRES
-    from scanner3d.depth_metric import deproject_depth_frame
+    from scanner3d.depth_metric import (
+        deproject_depth_frame,
+        ensure_frame_length,
+        ensure_intrinsics_usable,
+        ensure_scale_usable,
+        ensure_unit_stated,
+    )
     from scanner3d.simulate import FACTORY_INTRINSICS
+    from scanner3d.v4l2_capture import FRAME_WIDTH
+
+    # Validate before either path reads samples. The array path performs the
+    # same pinhole expressions, masks and row-major stride as the scalar
+    # conversion, but materialises Python points only AFTER thinning. Building
+    # and validating ~80,000 DepthPoint objects to keep 900 cost more than one
+    # camera interval on the live scanner.
+    unit = ensure_unit_stated(preparation_unit())
+    record = FACTORY_INTRINSICS if intrinsics is None else intrinsics
+    scalar = DEPTH_SCALE_METRES if depth_scale is None else depth_scale
+    fx, fy, cx, cy = ensure_intrinsics_usable(record)
+    scale = ensure_scale_usable(scalar)
+    ensure_frame_length(raw)
+    try:
+        import numpy as np
+    except ImportError:
+        pass
+    else:
+        samples = np.frombuffer(raw, dtype="<u2")
+        indices = np.flatnonzero(samples)
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            z = samples[indices].astype(np.float64) * scale
+            rows, columns = np.divmod(indices, FRAME_WIDTH)
+            x = (columns - cx) * z / fx
+            y = (rows - cy) * z / fy
+        finite = np.isfinite(z) & np.isfinite(x) & np.isfinite(y)
+        deprojected = int(np.count_nonzero(finite))
+        clipped = np.flatnonzero(finite & (z > band.near) & (z < band.far))
+        selected = clipped[:: max(1, len(clipped) // target_points)]
+        points = [(float(x[i]), float(y[i]), float(z[i])) for i in selected]
+        return _filter_thinned(
+            points,
+            target_points=target_points,
+            deprojected_points=deprojected,
+            clipped_points=len(clipped),
+            band=band,
+        )
 
     conversion = deproject_depth_frame(
         raw,
-        intrinsics=FACTORY_INTRINSICS,
-        depth_scale=DEPTH_SCALE_METRES,
-        unit=preparation_unit(),
+        intrinsics=record,
+        depth_scale=scalar,
+        unit=unit,
     )
     points = [(p.x, p.y, p.z) for p in conversion.points]
-    return prepare_points(points, target_points=target_points, depth_band=depth_band)
+    return prepare_points(points, target_points=target_points, depth_band=band)
 
 
 # --- the same plane, at full resolution ---------------------------------------

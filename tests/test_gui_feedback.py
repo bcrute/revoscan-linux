@@ -377,6 +377,9 @@ def test_the_model_build_stops_growing_with_the_capture(
     capture runs. Counting the frames handed to the build is the deterministic
     form of that measurement - no clock, and no machine-speed dependence.
     """
+    # This measures model size, with instant fake deliveries. Exercise refresh
+    # pacing separately rather than making this depend on the machine's speed.
+    monkeypatch.setattr(gui, "LIVE_MODEL_REFRESH_FLOOR", float("inf"))
     total = 200
     stream_kernel(frames(total))
     window = CaptureWindow(frames=total)

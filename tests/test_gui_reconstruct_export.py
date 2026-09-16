@@ -41,8 +41,10 @@ from scanner3d.geometry import Point, Rigid
 from scanner3d.gui import (
     LIVE_MODEL_CLOUDS,
     LIVE_MODEL_POINTS,
+    JobProgress,
     ModelSnapshot,
     ReconstructionOutcome,
+    reconstruction_progress,
 )
 from scanner3d.pipeline import SweepReconstruction
 from scanner3d.preparation import (
@@ -73,18 +75,28 @@ from scanner3d.reconstruction_export import (
 from scanner3d.simulate import FACTORY_INTRINSICS, Sphere, render
 from scanner3d.simulate import Plane as SimulatedPlane
 from scanner3d.support_plane import POLICY_VERSION, REASON_LITTLE_OBJECT
+from tests.fake_v4l2 import stream_kernel, stream_node, whole_frame
 from tests.gui_harness import (
     CaptureWindow,
+    clouds,
     mesh_budget,
     meshable_clouds,
     registration,
     shell_cloud,
     sphere_raw_frame,
+    start_capture,
     start_reconstruct,
     stub_readiness,
 )
 
-__all__ = ["mesh_budget", "meshable_clouds", "registration"]
+__all__ = [
+    "clouds",
+    "mesh_budget",
+    "meshable_clouds",
+    "registration",
+    "stream_kernel",
+    "stream_node",
+]
 
 
 def capture_of(tmp_path: Path, frames: int = 4) -> Path:
@@ -742,7 +754,14 @@ def test_a_proved_bed_is_absent_from_the_exported_mesh_not_only_from_the_poses(
         (frames_dir / f"frame_{index:04d}.raw").write_bytes(raw)
     before = {path.name: path.read_bytes() for path in sorted(frames_dir.glob("frame_*.raw"))}
 
-    prepared = prepare_frame(raw, target_points=gui.RECONSTRUCT_POINTS)
+    # The window deprojects under this unit's calibrated record, so the plane
+    # and band the assertion below uses must be found under the same one.
+    from scanner3d.metric_correction import calibrated_deprojection
+
+    intrinsics, depth_scale, _ = calibrated_deprojection()
+    prepared = prepare_frame(
+        raw, target_points=gui.RECONSTRUCT_POINTS, intrinsics=intrinsics, depth_scale=depth_scale
+    )
     assert prepared.support is not None
     assert prepared.support.applied is True
     plane = prepared.support.plane
@@ -863,3 +882,104 @@ def test_a_withdrawn_frame_is_fused_exactly_as_it_was_captured(
     assert fusion_block["unmasked_frames"] == frames
     assert fusion_block["samples_masked"] == 0
     assert [entry["reason"] for entry in fusion_block["unmasked_reasons"]] == [REASON_LITTLE_OBJECT]
+
+
+# -- the progress bar ------------------------------------------------------
+
+
+def test_the_job_lines_that_carry_a_count_read_as_a_count() -> None:
+    """The words the pipeline and the export actually write, with their counts."""
+    assert reconstruction_progress("  read 12/146 input frames") == JobProgress(
+        "reading frames", 12, 146
+    )
+    assert reconstruction_progress("  aligned 40/145") == JobProgress("aligning frames", 40, 145)
+    assert reconstruction_progress("  placed 7/145") == JobProgress("placing frames", 7, 145)
+    assert reconstruction_progress(
+        "  fused frame 9/146, 9 of them changed the field"
+    ) == JobProgress("fusing frames", 9, 146)
+
+
+def test_the_lines_that_open_a_stage_read_as_that_stage_without_a_count() -> None:
+    assert reconstruction_progress(
+        "aligning 146 frames (point-to-plane, backend=numpy, workers=8)"
+    ) == JobProgress("aligning frames")
+    assert reconstruction_progress("looking for revisited viewpoints") == JobProgress(
+        "finding revisits"
+    )
+    assert reconstruction_progress("  fusing at 0.5 mm voxels") == JobProgress("fusing frames")
+    assert reconstruction_progress("  writing cloud.ply") == JobProgress("writing")
+
+
+def test_the_lines_that_are_not_progress_move_nothing() -> None:
+    assert reconstruction_progress("  aligned 145 pairs across 8 workers") is None
+    assert reconstruction_progress("coherence: the sweep is coherent") is None
+    assert reconstruction_progress("") is None
+
+
+def test_the_bar_follows_a_reconstruction_and_comes_down_when_it_ends(
+    tmp_path: Path, monkeypatch, meshable_clouds: list[int], registration, mesh_budget: int
+) -> None:
+    """Shown at the start, moved by the job's own lines, hidden by the end.
+
+    A reconstruction of a real capture is minutes of silence otherwise, and
+    the first operator to run one asked whether it was working at all.
+    """
+    frames_dir = capture_of(tmp_path, frames=4)
+    registration()
+    window = CaptureWindow(frames=1)
+    assert window._job_progress.visible is False
+
+    start_reconstruct(window, frames_dir, monkeypatch)
+
+    bar = window._job_progress
+    assert bar.shown == 1
+    assert bar.visible is False, "the bar stays up after the job has ended"
+    assert ("reading frames %v of %m", 4, 4) in bar.readings
+    assert ("fusing frames %v of %m", 4, 4) in bar.readings
+    # Every reading came from a line the report panel also shows.
+    assert any("fused frame 4/4" in line for line in window.logged)
+
+
+def test_a_capture_never_touches_the_bar(
+    tmp_path: Path, monkeypatch, clouds: list[int], stream_kernel
+) -> None:
+    stream_kernel([whole_frame(index) for index in range(3)])
+    window = CaptureWindow(frames=3, decimate=2)
+    target = tmp_path / "scan" / "fresh"
+    target.mkdir(parents=True)
+    monkeypatch.setattr(gui.ScannerWindow, "_capture_target", lambda self: target, raising=True)
+    start_capture(window)
+    assert window._job_progress.shown == 0
+    assert window._job_progress.readings == []
+
+
+# -- the turntable model -----------------------------------------------------
+
+
+def test_a_refused_turntable_model_is_said_and_the_chain_registers_instead(
+    tmp_path: Path, monkeypatch, meshable_clouds: list[int], registration, mesh_budget: int
+) -> None:
+    """The report names the fallback, and the export still happens."""
+    from scanner3d.turntable import TurntableUnusable
+
+    def refuse(*_a: object, **_k: object) -> object:
+        raise TurntableUnusable("the seed chain found no circle")
+
+    monkeypatch.setattr(gui, "register_turntable", refuse, raising=True)
+    frames_dir = capture_of(tmp_path, frames=4)
+    registration()
+    window = CaptureWindow(frames=1)
+    start_reconstruct(window, frames_dir, monkeypatch)
+    assert "the turntable model was refused: the seed chain found no circle" in window.report
+    (directory,) = outputs(frames_dir)
+    assert directory.is_dir()
+
+
+def test_a_capture_too_short_to_prove_a_turn_registers_frame_by_frame(
+    tmp_path: Path, monkeypatch, meshable_clouds: list[int], registration, mesh_budget: int
+) -> None:
+    frames_dir = capture_of(tmp_path, frames=4)
+    registration()
+    window = CaptureWindow(frames=1)
+    start_reconstruct(window, frames_dir, monkeypatch)
+    assert "registering frame by frame:" in window.report

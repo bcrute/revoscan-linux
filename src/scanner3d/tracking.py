@@ -125,10 +125,11 @@ needs:
 Then the candidates are compared, and this is the part that matters most:
 
 - If two or more independent candidates survive their gates and AGREE, that
-  agreement is the evidence, and the pose comes from the candidate fitted
-  against the broadest reference - the model before a keyframe, a keyframe
-  before the adjacent pair - because a broader reference is the one that does
-  not accumulate pairwise drift.
+  agreement is the evidence, and the pose follows :data:`PREFERENCE_ORDER`:
+  model, then adjacent, then keyframe. The model provides broader accumulated
+  geometry; the adjacent refinement precedes a keyframe to avoid repeatedly
+  paying a viewpoint-dependent keyframe offset (see the origin definitions).
+  Candidate agreement is not an independent guarantee against long-run drift.
 - If the largest mutual-agreement groups tie, the frame is refused unless one
   group is distinctly tighter than the next by the shared ambiguity margin.
   Tightness is the widest pose disagreement inside the group, never an ICP
@@ -176,6 +177,7 @@ import itertools
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
+from functools import lru_cache
 from typing import Final
 
 from scanner3d.errors import DoctorStatus, ScannerError
@@ -249,6 +251,12 @@ MIN_TRACK_POINTS: Final = 3
 #: redundant non-anchor, non-recent keyframe is evicted, so a two-hour capture
 #: costs exactly what a two-minute one does.
 MAX_KEYFRAMES: Final = 12
+
+#: Exact immutable pose-pair results, not an additional reference archive.
+#: A 64-keyframe diagnostic policy evaluates over 4,000 directed pairs; the
+#: old 2,048-entry cache thrashed on each eviction pass. Leave bounded room
+#: for those pairs plus current-frame selection without changing arithmetic.
+POSE_GAP_CACHE_PAIRS: Final = 16_384
 
 #: Keyframes refined against as candidates for one frame. One, deliberately:
 #: each candidate is a full ICP solve, the model candidate below is already
@@ -2666,7 +2674,13 @@ class IncrementalTracker:
         refusals: list[str] = list(edge.refusals)
         failed_gates: list[str] = []
         tolerance = OVERLAP_TOLERANCE_MULTIPLE * NOISE_FLOOR
-        overlap = overlap_fraction(source, reference, fit.transform, tolerance=tolerance)
+        overlap = overlap_fraction(
+            source,
+            reference,
+            fit.transform,
+            tolerance=tolerance,
+            backend=fit.resolved_backend,
+        )
         relative = previous.pose.inverse().compose(pose)
         travel = frame_travel(source, relative) if edge.accepted else math.inf
         # How far the placement sits from where the last accepted motion said
@@ -4139,8 +4153,9 @@ class IncrementalTracker:
         return self._accepted[index].pose
 
     @staticmethod
+    @lru_cache(maxsize=POSE_GAP_CACHE_PAIRS)
     def _pose_gap(a: Rigid, b: Rigid) -> tuple[float, float]:
-        """How far apart two poses are, in degrees and in distance."""
+        """Immutable pose pairs recur in selection/eviction; cache exact results."""
         relative = a.inverse().compose(b)
         return (math.degrees(relative.rotation_angle), relative.translation_magnitude)
 

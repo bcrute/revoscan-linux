@@ -297,22 +297,42 @@ def spatial_returns(samples: Sequence[int], width: int, height: int) -> SpatialR
     top = height
     bottom = -1
 
-    for row in range(height):
-        base = row * width
-        row_half = 2 if row >= mid_row else 0
-        for column in range(width):
-            if samples[base + column] == NO_RETURN_SAMPLE:
-                continue
-            returned += 1
-            counts[row_half + (1 if column >= mid_column else 0)] += 1
-            if column < left:
-                left = column
-            if column > right:
-                right = column
-            if row < top:
-                top = row
-            if row > bottom:
-                bottom = row
+    try:
+        import numpy as np
+    except ImportError:
+        for row in range(height):
+            base = row * width
+            row_half = 2 if row >= mid_row else 0
+            for column in range(width):
+                if samples[base + column] == NO_RETURN_SAMPLE:
+                    continue
+                returned += 1
+                counts[row_half + (1 if column >= mid_column else 0)] += 1
+                if column < left:
+                    left = column
+                if column > right:
+                    right = column
+                if row < top:
+                    top = row
+                if row > bottom:
+                    bottom = row
+    else:
+        present = np.asarray(samples).reshape(height, width) != NO_RETURN_SAMPLE
+        counts = [
+            int(np.count_nonzero(quadrant))
+            for quadrant in (
+                present[:mid_row, :mid_column],
+                present[:mid_row, mid_column:],
+                present[mid_row:, :mid_column],
+                present[mid_row:, mid_column:],
+            )
+        ]
+        returned = sum(counts)
+        if returned:
+            columns = np.flatnonzero(present.any(axis=0))
+            rows = np.flatnonzero(present.any(axis=1))
+            left, right = int(columns[0]), int(columns[-1])
+            top, bottom = int(rows[0]), int(rows[-1])
 
     left_width = mid_column
     right_width = width - mid_column

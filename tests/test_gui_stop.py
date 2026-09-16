@@ -11,8 +11,13 @@ Two separate faults produced it, and they are tested separately here:
 - A caller stop returns from :func:`~scanner3d.v4l2_stream.stream_frames`
   NORMALLY, with ``stopped_early`` set. The GUI took that return as a finished
   capture, ran its completion path and resumed the preview it had interrupted.
-- ``_resume_preview_after`` was read but never cleared, so the intent outlived
-  the capture that set it.
+- The interrupted-preview record was read but never cleared, so the intent
+  outlived the capture that set it.
+
+Since 2026-09-05 no ending restarts the preview: a capture that finished on its
+own used to put it back, and from the bench that read as the scanner never
+shutting off. The record of an interrupted preview now serves one sentence in
+the capture's ending, and nothing else.
 
 Two boundaries either side of the stream are tested here as well, because both
 decide the same question - whether a press counts - and both get it wrong in a
@@ -127,7 +132,7 @@ def test_stop_does_not_put_the_preview_back_up(
     # One setChecked, the False that released the node for the capture.
     assert window._preview_action.checks == [False]
     assert window._preview_action.checked is False
-    assert window._resume_preview_after is False
+    assert window._preview_interrupted is False
     assert "Preview was NOT restarted" in window.report
 
 
@@ -153,20 +158,28 @@ def test_the_stream_hands_the_buffer_back_before_the_stop_takes_effect(
     assert len(kernel.requeued) == len(kernel.dequeued)
 
 
-def test_a_capture_that_finishes_on_its_own_still_resumes_the_preview(
+def test_a_capture_that_finishes_on_its_own_leaves_the_preview_off_like_stop(
     stream_kernel, capture_dir: Path, deprojected: list[int]
 ) -> None:
-    """The behaviour Stop must not cost: a completed scan hands the view back."""
+    """A completed scan leaves the scanner idle and says so.
+
+    The preview used to come back here, projector lit, and from the bench
+    that read as the scanner never shutting off after a capture ran its
+    course (2026-09-05). The one setChecked is the False that released the
+    node for the capture.
+    """
     stream_kernel((whole_frame(0xB1), whole_frame(0xB2, buffer_index=1)))
     window = CaptureWindow(frames=2, previewing=True)
 
     start_capture(window)
 
-    assert window._preview_action.checks == [False, True]
-    assert window._preview_action.checked is True
+    assert window._preview_action.checks == [False]
+    assert window._preview_action.checked is False
+    assert window._preview_interrupted is False
     assert isinstance(window.result, StreamResult)
     assert window.result.stopped_early is False
     assert "Captured 2 frames" in window.report
+    assert "Preview was NOT restarted" in window.report
 
 
 def test_a_completed_capture_that_was_not_previewing_does_not_start_one(
@@ -191,7 +204,7 @@ def test_the_resume_intent_is_cleared_by_a_completion(
 
     start_capture(window)
 
-    assert window._resume_preview_after is False
+    assert window._preview_interrupted is False
     # A second terminal path, arriving later, finds nothing to act on.
     window._preview_action.checks.clear()
     window._capture_done(window.result)
@@ -206,11 +219,11 @@ def test_the_resume_intent_is_cleared_by_a_failure(monkeypatch) -> None:
     """
     monkeypatch.setattr(gui, "QMessageBox", SimpleNamespace(critical=lambda *_a: None))
     window = CaptureWindow(frames=1, previewing=True)
-    window._resume_preview_after = True
+    window._preview_interrupted = True
 
     window._fail("Traceback...\nSomethingBroke: no")
 
-    assert window._resume_preview_after is False
+    assert window._preview_interrupted is False
     assert window._preview_action.checks == []
     assert "FAILED" in window.report
 
@@ -218,11 +231,11 @@ def test_the_resume_intent_is_cleared_by_a_failure(monkeypatch) -> None:
 def test_the_resume_intent_is_cleared_by_a_stop() -> None:
     """Consumed on the stopped path too, and deliberately not acted on."""
     window = CaptureWindow(frames=1, previewing=True)
-    window._resume_preview_after = True
+    window._preview_interrupted = True
 
     window._was_stopped()
 
-    assert window._resume_preview_after is False
+    assert window._preview_interrupted is False
     assert window._preview_action.checks == []
 
 
@@ -335,4 +348,8 @@ def test_a_flag_set_after_a_normal_stream_return_is_still_a_completion(
     assert "Captured 2 frames" in window.report
     assert "Stopped." not in window.report
     # A completion in every respect, including the one Stop would have denied.
-    assert window._preview_action.checks == [False, True]
+    # Completion and Stop both leave the preview off now; what tells them apart
+    # is the ending's own words and record, not the state of the scanner.
+    assert window._preview_action.checks == [False]
+    assert window.stopped == 0
+    assert "Captured" in window.report

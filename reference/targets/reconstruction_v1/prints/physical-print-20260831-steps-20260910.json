@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "record_type": "supplemental_owner_measurements",
+  "target_id": "reconstruction-target-v1",
+  "physical_print_record": "physical-print-20260831.json",
+  "physical_print_record_sha256": "1c9c18aac0c5e86cadef2326ebc5856e21b55849f1fa2675c7954c7e5b97e91b",
+  "reported": {
+    "date": "2026-09-10",
+    "source": "owner message in the scanner development conversation",
+    "unit": "millimetres",
+    "verbatim": "16.08, 25.98 are the two top steps in the \"step\" area of the object - that's object bottom to top of step - not only the step's height above object bottom"
+  },
+  "datum_interpretation": {
+    "reference": "physical object's flat underside",
+    "endpoint": "top of each of the two highest staircase treads",
+    "basis": "The owner's explicit object-bottom-to-step-top description and identification of the two top steps in the staircase area.",
+    "not_reference": "upper surface of the printed base",
+    "not_feature": "the separate broad plateau surrounding the pocket",
+    "contact_locations": null,
+    "underside_flatness_and_common_datum_verified": false
+  },
+  "instrument": {
+    "type_from_measurement_context": "calipers",
+    "resolution_mm": null,
+    "accuracy_bound_mm": null,
+    "note": "Two displayed decimal places do not establish instrument resolution or accuracy. One reading per height was supplied."
+  },
+  "measurements": {
+    "bottom_to_second_highest_stair_tread": {
+      "surface_name": "step_10mm_top",
+      "readings_mm": [16.08],
+      "reading_locations": null,
+      "nominal_bottom_to_top_mm": 16.0,
+      "nominal_height_above_base_top_mm": 10.0
+    },
+    "bottom_to_highest_stair_tread": {
+      "surface_name": "step_20mm_top",
+      "readings_mm": [25.98],
+      "reading_locations": null,
+      "nominal_bottom_to_top_mm": 26.0,
+      "nominal_height_above_base_top_mm": 20.0
+    }
+  },
+  "cad_identity_sources": [
+    {
+      "path": "../generate.py",
+      "sha256": "dacbbd8f18e3e8430e80bc522de93917c38298e97dd3f610701d483e11424a5f",
+      "role": "Maps STEP_10 to z=16 and STEP_20 to z=26; names encode nominal heights above the z=6 base top."
+    },
+    {
+      "path": "../reconstruction-target-v1.json",
+      "sha256": "64f955b49ccf18ad8b62022babb961b31a3ba75ad1d9cdd8cd9d4103a3fad848",
+      "role": "Nominal geometry and surface identity only, not physical reference truth."
+    }
+  ],
+  "derived_quantities": {
+    "highest_minus_second_highest_tread_mm": {
+      "value": 9.90,
+      "expression": "25.98 - 16.08",
+      "status": "provisional arithmetic difference, not an independently repeated step measurement or certified plane spacing",
+      "assumptions": [
+        "Both readings refer to a common underside datum and comparable height direction.",
+        "Local tread and underside shape at the caliper contacts correspond to the later scanned patches."
+      ],
+      "uncertainty_mm": null
+    }
+  },
+  "use_constraints": [
+    "Preserve the original print record and its predeclared CAD adjustment unchanged.",
+    "Do not subtract the nominal 6 mm base thickness to invent measured above-base heights.",
+    "Do not use 16.08 mm as the physical base-to-pocket-plateau separation; it names a different surface pair and datum.",
+    "Do not treat the hidden underside or turntable plane as observed contact truth without a justified datum transfer.",
+    "A two-visible-tread comparison can use the provisional 9.90 mm difference without observing the underside, subject to the physical-reference assumptions above.",
+    "No new scanner result, accuracy pass, rescaling, calibration coefficient or new print follows from recording these readings."
+  ]
+}

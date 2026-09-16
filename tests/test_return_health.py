@@ -34,6 +34,7 @@ that it never claims a distance, a material or a cause the bytes do not carry.
 from __future__ import annotations
 
 import json
+import sys
 
 import pytest
 
@@ -72,6 +73,17 @@ from scanner3d.return_health import (
 #: module - only "is it zero" is ever asked - and a deliberately odd number is
 #: used so a test that started depending on the value would look wrong.
 R = 4321
+
+
+@pytest.mark.parametrize("shape", [(1, 1), (1, 7), (5, 1), (17, 13), (640, 400)])
+@pytest.mark.parametrize("empty", [False, True])
+def test_bulk_spatial_counts_match_scalar_including_odd_quadrants(monkeypatch, shape, empty):
+    pytest.importorskip("numpy")
+    width, height = shape
+    samples = [0 if empty or index % 3 else R for index in range(width * height)]
+    expected = spatial_returns(samples, width, height)
+    monkeypatch.setitem(sys.modules, "numpy", None)
+    assert spatial_returns(samples, width, height) == expected
 
 
 def grid(rows: list[str]) -> tuple[list[int], int, int]:

@@ -112,6 +112,7 @@ because that is the view you want next when a scan finishes on its own terms.
 from __future__ import annotations
 
 import math
+import re
 import sys
 import threading
 import time
@@ -135,6 +136,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
+    QProgressBar,
     QPushButton,
     QSpinBox,
     QSplitter,
@@ -152,6 +154,7 @@ from scanner3d.capture_sequence import (
     TRACKING_LOSS_RECORD_NAME,
     TRACKING_LOSS_STREAK,
     CaptureSequenceUnreadable,
+    frame_times,
     read_capture_sequence,
 )
 from scanner3d.cloud_viewer import CloudViewer
@@ -172,7 +175,6 @@ from scanner3d.config import (
     validate_capture_name,
 )
 from scanner3d.coverage import coverage_map
-from scanner3d.denoise import estimate_spacing
 from scanner3d.depth_plausibility import (
     StaticRegionTracker,
     depth_profile,
@@ -180,10 +182,12 @@ from scanner3d.depth_plausibility import (
     plausibility,
 )
 from scanner3d.discovery import find_scanners
+from scanner3d.errors import ScannerError
 from scanner3d.geometry import Rigid
 from scanner3d.logs import configure as configure_logging
 from scanner3d.logs import get_logger, timed
-from scanner3d.mesh import Mesh, SurfaceAccumulator
+from scanner3d.mesh import Mesh
+from scanner3d.metric_correction import calibration_source_statement
 from scanner3d.pipeline import travel_verdict
 from scanner3d.preparation import (
     DepthBand,
@@ -197,8 +201,6 @@ from scanner3d.preparation import (
     mask_support_band,
 )
 from scanner3d.preview_provenance import (
-    LIVE_SURFACE_CONTROL_TITLE,
-    LIVE_SURFACE_CONTROL_TOOLTIP,
     RAW_DEPTH_PROVENANCE,
     ModelPicture,
     ProvenanceUnusable,
@@ -209,10 +211,12 @@ from scanner3d.preview_provenance import (
     surface_summary,
 )
 from scanner3d.project import (
+    FRAME_TIMES_KEY,
     PROJECT_NAME,
     PROJECT_SUFFIX,
     ProjectError,
     adopt_capture,
+    capture_frame_times,
     record_reconstruction,
     resolve_capture_input,
     update_capture,
@@ -245,6 +249,12 @@ from scanner3d.return_health import (
     ReturnHealthTracker,
     spatial_summary,
 )
+from scanner3d.turntable import (
+    TurntableNotDetected,
+    TurntableRegistration,
+    TurntableUnusable,
+    register_turntable,
+)
 from scanner3d.v4l2_stream import (
     CALLER_STOP_REASON,
     MAX_DURATION_S,
@@ -255,7 +265,7 @@ from scanner3d.v4l2_stream import (
     StreamResult,
     wait_for_capture_access,
 )
-from scanner3d.viewer import FrameStats, render_frame
+from scanner3d.viewer import FrameStats
 
 if TYPE_CHECKING:
     from scanner3d.depth_metric import DepthUnitAssumption
@@ -267,10 +277,9 @@ if TYPE_CHECKING:
 FRAME_WIDTH: Final = 640
 FRAME_HEIGHT: Final = 400
 
-#: Frames delivered per kept frame. Three gives roughly two degrees between
-#: kept frames on a turntable turning once in two minutes, the density measured
-#: to register well. Large steps make alignment fail silently.
-DEFAULT_DECIMATE: Final = 3
+#: Keep every depth frame so a handheld scan retains overlap through starts,
+#: stops and accelerations. Automatic spacing remains available as an opt-in.
+DEFAULT_DECIMATE: Final = 1
 
 #: The depth controls' range, in the deprojection's scale. Wide enough for any
 #: standoff this scanner can focus at; the sensor's own interval sits inside.
@@ -478,12 +487,7 @@ RECONSTRUCT_VOXEL_BUDGET: Final = 128 * 128 * 128
 #: provenance of everything Reconstruct exports. Named here beside the loader
 #: that actually applies them, so the claim in the file cannot describe a
 #: different record from the one the points came through.
-CALIBRATION_SOURCE: Final = (
-    "the factory intrinsics record this repository carries as "
-    "scanner3d.simulate.FACTORY_INTRINSICS, applied unmodified to every frame of this capture; "
-    "no calibration was performed for this scan, and the record's own principal-point "
-    "observation stands"
-)
+CALIBRATION_SOURCE: Final = calibration_source_statement()
 
 #: Aligned frames the live model is built from, however many have been aligned.
 #: A rebuild that uses EVERY frame so far costs more the longer the capture runs
@@ -498,137 +502,19 @@ CALIBRATION_SOURCE: Final = (
 #: not affected by anything here.
 LIVE_MODEL_CLOUDS: Final = 40
 
-#: The live surface's cell edge, as a multiple of the measured spacing of the
-#: points it is first given.
-#:
-#: NOT a constant edge, because there is no constant that works. A cell only
-#: joins a surface when its neighbours are occupied too, so the edge has to be
-#: about the distance between samples - and that distance is a property of the
-#: object's size, of how far away it is and of the decimation the loader applied,
-#: none of which this window knows in advance. Measured instead, once, by
-#: :func:`~scanner3d.denoise.estimate_spacing` over the geometry that exists at
-#: the first refresh.
-#:
-#: A little over one spacing, so that neighbouring samples land in neighbouring
-#: cells and the occupancy is a connected sheet rather than a scatter of
-#: isolated cells - which marches to nothing at all, and would leave the panel
-#: empty for the first minute of every capture.
-#:
-#: A starting guess and not an answer, because the quantity that actually
-#: decides whether a sheet is connected is the largest GAP between samples and
-#: this measures the typical distance between them. Overlapping frames make the
-#: two differ a lot: forty views of one patch put many samples very close
-#: together and leave the gaps between patches exactly as wide as they were. So
-#: the guess is checked against the outcome - see
-#: :data:`LIVE_MESH_COARSEN_ATTEMPTS`.
-#:
-#: Sized ONCE and never resized. The scan gets denser as it goes and a finer
-#: edge would suit it better later, but coarsening is the only direction this
-#: grid moves: refining would mean re-reading points that were discarded when
-#: they were folded in. So the live surface is a preview at the resolution the
-#: scan's first few frames could support, and the exported mesh - fused from
-#: every raw frame at :data:`RECONSTRUCT_VOXEL_BUDGET` - is the detailed one.
-LIVE_MESH_SPACING_MULTIPLE: Final = 1.5
 
-#: How many times the live grid may double its cell edge because the surface it
-#: marched had no faces in it.
-#:
-#: An empty march is not a failure and not an error: it is what a grid whose
-#: cells are isolated produces, correctly, because an isolated cell straddles no
-#: node and there is nothing for the level to cut. It is also indistinguishable
-#: on the screen from a scan that has not started. So rather than trusting the
-#: spacing estimate above, the answer is checked: no faces means the cells are
-#: too small for how far apart the samples are, and the edge doubles.
-#:
-#: Bounded, and cheap to reach: each doubling makes the next march about eight
-#: times cheaper, so the whole retry sequence costs less than the first attempt.
-#: Past the bound the honest answer is that this scan has no surface yet, and
-#: the panel says so instead of coarsening until anything at all appears.
-#:
-#: A budget for the whole CAPTURE and not for one refresh. Per refresh it would
-#: not be a bound at all: a scan that never produces a surface - one of air, or
-#: of something too dark to return depth - would spend it again every few
-#: frames, and after a couple of minutes the cell edge would be a number with no
-#: relationship to anything that was measured.
-LIVE_MESH_COARSEN_ATTEMPTS: Final = 4
-
-#: Grid cells the live surface may occupy before the preview is WITHDRAWN.
-#: A time budget, since the fill and the march are both linear in cells and both
-#: run on the stream thread - but it is a fidelity floor first.
-#:
-#: The number it replaces was 250000, and what happened at that boundary was
-#: worse than a slow refresh. Crossing it called
-#: :meth:`~scanner3d.mesh.SurfaceAccumulator.coarsen_to_fit`, which DOUBLED the
-#: cell edge of the one accumulator the capture had and carried on as though
-#: nothing had changed. The owner's capture 20260827-143636 ran at voxel 2.713
-#: to 246796 cells over 35 frames and then showed the same object at 5.425 over
-#: 39900; 20260827-143407 did the same thing at frame 123 of 158, going from
-#: 2.472 to 4.944. The occupancy mesher's surface already stands as much as a
-#: voxel outside the samples, so doubling the edge doubles that error - which is
-#: the blob the owner reported beside dots whose fidelity had not changed.
-#:
-#: Sized from those two captures rather than picked. The log records the
-#: COARSENED grids they finished on - 97760 cells at 4.944 and 73892 at 5.425 -
-#: and coarsening maps a cell index to ``(i + 1) // 2``, so a fine span is at
-#: most twice the coarse span plus one and a fine grid is therefore strictly
-#: under eight times the coarse one. The fine grids those two captures would
-#: have KEPT are bounded above by 782080 and 591136 cells. A million covers both
-#: with better than a quarter to spare, and is under half
-#: :data:`~scanner3d.mesh.MAX_GRID_CELLS`, so the module's own ceiling never
-#: decides this first.
-#:
-#: What that costs, measured on this machine over a synthetic sweep shaped like
-#: those captures - a 230 mm shell, 784 points a frame at 1.8 mm spacing, cell
-#: edge sized from the first three frames the way a capture sizes it:
-#:
-#:     cells      faces    march
-#:      253890    41468    0.32 s
-#:      514176    73524    0.61 s
-#:      755634   106348    0.90 s
-#:     1018961   154376    1.30 s
-#:
-#: Linear in cells, as the fill and the march both are. 1.30 s at the ceiling is
-#: three times the 0.43 s the old budget chose, which is exactly why a cell
-#: count is no longer the only bound: :data:`LIVE_MODEL_DUTY` is what keeps a
-#: refresh that expensive from taking the stream thread with it.
-#:
-#: Past this the grid is neither coarsened nor re-attempted. See ``grow_surface``
-#: in :meth:`ScannerWindow._start_capture`, which withdraws the surface, says
-#: why, and leaves the points as the picture.
-LIVE_MESH_CELLS: Final = 1_000_000
-
-#: The share of the stream thread one live model refresh may take.
-#:
-#: The refresh runs between frames, after the driver has its buffer back, and
-#: everything queued behind it waits: the next dequeue, the depth preview, the
-#: colour pump's turn, the Stop poll and a wanted Pause. At the old 250000-cell
-#: budget the worst refresh was 0.43 s against a frame every ~0.7 s and the
-#: question did not really arise. At :data:`LIVE_MESH_CELLS` it can be 1.3 s,
-#: and a bound that was only a cell count would spend that every
-#: :data:`COVERAGE_EVERY` alignments however long it took.
-#:
-#: So the cost of the LAST refresh is measured, and the next one is held off
-#: until the thread has had at least three times that long to itself. A quarter
-#: rather than a half because the rest of that thread is the capture: the write,
-#: the deprojection and the alignment that each accepted frame already costs.
-#:
-#: Nothing is skipped and nothing goes stale. The points and the surface are
-#: still built together and published together; a refresh that is held off is
-#: simply taken a frame or two later.
+#: Keep a costly point-cloud refresh from consuming the capture thread.
+#: After each build, allow at least three times its cost before the next one.
+#: No live mesh is built; offline reconstruction has its own surface path.
 LIVE_MODEL_DUTY: Final = 0.25
 
 #: How expensive a refresh has to have been before :data:`LIVE_MODEL_DUTY`
 #: applies to it at all.
 #:
-#: Roughly what one aligned frame already costs this thread - the write, the
-#: deprojection, the speckle filter and the ICP fit - so a refresh below it is
-#: cheaper than the frames it is waiting for and holding it off would buy the
-#: capture nothing while costing the operator feedback. It is also just above
-#: the 0.43 s worst case the old 250000-cell budget chose, which means every
-#: refresh that would have been affordable before this task is still taken on
-#: exactly the old cadence: this gate is only ever reached by the large grids
-#: raising :data:`LIVE_MESH_CELLS` made possible, from around 600000 cells up.
-LIVE_MODEL_REFRESH_FLOOR: Final = 0.7
+#: A 50 ms refresh already spends a substantial part of the camera's measured
+#: 221 ms average interval. The former 700 ms floor let model work repeatedly
+#: stall full-rate handheld tracking before the duty limiter ever engaged.
+LIVE_MODEL_REFRESH_FLOOR: Final = 0.05
 
 #: Ceiling on the points in one live model, applied where the model is BUILT.
 #: Below :data:`~scanner3d.cloud_view.MAX_RENDER_POINTS`, so the view never has
@@ -637,48 +523,8 @@ LIVE_MODEL_REFRESH_FLOOR: Final = 0.7
 #: decimated at the far end.
 LIVE_MODEL_POINTS: Final = 45_000
 
-#: Whether the model panel starts with the SURFACE selected once a scan has one.
-#:
-#: False, which is the owner's decision of 2026-08-27 and reverses what this
-#: panel did when the live surface was added. The occupancy preview is not a
-#: fit to the samples: a cell joins the surface when its neighbours are occupied
-#: too, so what is marched is faceted at the cell edge, stands as much as one
-#: cell OUTSIDE the points it was built from, and neither smooths nor refits.
-#: Two accepted poses that disagree by a little are drawn as solid geometry
-#: rather than as two clouds slightly apart.
-#:
-#: Not the coarsening the previous task removed, and not a cost problem. The
-#: owner's capture 20260827-152842 wrote 116 frames, held cell 1.981 from its
-#: first refresh to its last, grew to 774300 cells and 66616 faces and never
-#: coarsened - and the owner still directly observed that surface as lumpy
-#: beside points that looked clean. So the finest surface this preview can build
-#: is still the less trustworthy of the two pictures, and the one the panel
-#: opens on is the points.
-#:
-#: The preview is KEPT, as an opt-in diagnostic: it answers "what shape has this
-#: become" faster than a cloud does, and it is the only live view of what the
-#: occupancy grid actually holds. What changes is that the operator asks for it,
-#: and that asking is remembered - see :meth:`ScannerWindow._show_surface_control`.
-#: A pose-corrected final reconstruction is separate work; nothing here is it.
+#: Points remain selected when an offline reconstruction makes a mesh available.
 SURFACE_SELECTED_BY_DEFAULT: Final = False
-
-#: What the model panel's surface control is called and what it says when
-#: hovered WHILE IT IS HOLDING THE LIVE PREVIEW. Named constants for the same
-#: reason Reconstruct's and Pause's are: the wording is the part of this control
-#: that has to be right - it offers a picture the operator is being told NOT to
-#: trust over the dots - and naming it here is the only way it is asserted
-#: without building a widget.
-#:
-#: The wording itself lives in :mod:`scanner3d.preview_provenance`, keyed by
-#: :class:`~scanner3d.preview_provenance.SurfaceKind`, because this control does
-#: not always draw the occupancy grid: once Reconstruct has published, the same
-#: box draws the exported signed-distance surface, and a control still
-#: describing filled cells and capture-time poses would contradict the
-#: provenance line one widget above it. These two names are the LIVE kind's
-#: wording; :func:`~scanner3d.preview_provenance.surface_control` is what the
-#: window applies, and it is given the surface the panel actually holds.
-SURFACE_TOGGLE_TITLE: Final = LIVE_SURFACE_CONTROL_TITLE
-SURFACE_TOGGLE_TOOLTIP: Final = LIVE_SURFACE_CONTROL_TOOLTIP
 
 #: How long a stopping stream waits for the colour grabber to notice. A grab
 #: that has already begun holds the RGB node for up to its own 8 s deadline, and
@@ -1181,9 +1027,17 @@ def _prepare_frame(
     frames kept their support plane and why - and a count that has to be
     recomputed from the cloud is a count that can disagree with it.
     """
+    from scanner3d.metric_correction import calibrated_deprojection
     from scanner3d.preparation import prepare_frame
 
-    return prepare_frame(raw, target_points=target_points, depth_band=depth_band)
+    intrinsics, depth_scale, _ = calibrated_deprojection()
+    return prepare_frame(
+        raw,
+        target_points=target_points,
+        depth_band=depth_band,
+        intrinsics=intrinsics,
+        depth_scale=depth_scale,
+    )
 
 
 def _cloud_from_bytes(
@@ -1302,8 +1156,8 @@ class ModelSnapshot:
     #: every incremental update, which is what lets the operator keep the pan
     #: and zoom they chose and see the model GROW rather than be renormalised.
     reframe: bool = False
-    #: The surface the same model implies, as vertices and triangle indices, or
-    #: two empty arrays when there is none yet.
+    #: The offline reconstruction's mesh, as vertices and triangle indices.
+    #: Live capture snapshots leave both arrays empty.
     #:
     #: Carried WITH the points rather than sent separately for the reason every
     #: other count on this record is: a panel showing a surface built at frame
@@ -1311,23 +1165,16 @@ class ModelSnapshot:
     #: existed. They are produced together and they are drawn together.
     surface_vertices: np.ndarray = field(default_factory=lambda: np.zeros((0, 3), dtype=np.float32))
     surface_faces: np.ndarray = field(default_factory=lambda: np.zeros((0, 3), dtype=np.int32))
-    #: The cell edge that surface was marched at, or 0.0 when there is none.
-    #: Sized once from the scan's own point spacing and then held there: a live
-    #: grid is never re-cut coarser to fit a budget, so this number says what
-    #: fidelity the picture actually has rather than what it started with.
+    #: The voxel/cell edge that the supplied surface was marched at, or 0.0
+    #: when no surface was supplied. Live captures always use 0.0.
     surface_voxel: float = 0.0
     #: WHICH surface that is, set by the producer that built it and by nothing
     #: else, and ``None`` when the producer carried no surface to describe.
     #:
-    #: This window has two surface producers and they make materially different
-    #: claims: the live capture's occupancy grid, marched from cells the poses
-    #: accepted AS THE SCAN RAN filled, and Reconstruct's exported
-    #: signed-distance surface, fused from the full-resolution frames at
-    #: CORRECTED poses. A snapshot that carried a mesh without saying which is
-    #: the state in which the panel printed the live preview's sentence under
-    #: the final reconstruction, so it is carried here beside the geometry and
-    #: is never inferred from :attr:`note`, from :attr:`reframe`, from the
-    #: checkbox or from a default.
+    #: Historical live occupancy and reconstructed signed-distance meshes make
+    #: different claims, so the producer's identity remains explicit. New live
+    #: snapshots carry no mesh. Never infer the kind from :attr:`note`,
+    #: :attr:`reframe`, the checkbox or a default.
     surface_kind: SurfaceKind | None = None
     #: Why there is no surface, in the operator's own words, or empty. Empty
     #: covers both the ordinary cases - there IS one, or the capture has not
@@ -1375,11 +1222,9 @@ def _relocalization_executor() -> Executor:
 class TentativeSegment:
     """Frames a resumed capture is holding until it knows where they belong.
 
-    Nothing in here has been written, counted, drawn or promised. That is the
-    whole contract: a resume collects a few frames, tries to work out where the
-    object went, and until it can the frames exist only in this object - so a
-    resume that never succeeds, a second pause, a Stop, a failure or the window
-    closing all leave a capture folder holding exactly what it held before.
+    Nothing in here is counted or promised as a scan frame. Only publication
+    can join these frames to the scan. The separate bounded diagnostic spool
+    may retain raw copies, but cannot resolve a loss or authorize reconstruction.
 
     Bounded three ways, because "hold frames until it works" is otherwise a
     memory leak with a friendly name: a frame count, a byte count and a clock.
@@ -1407,6 +1252,8 @@ class TentativeSegment:
     exhausted_reason: str = ""
     #: Tentative frames dropped by the sliding bound, for the log.
     dropped: int = 0
+    #: Diagnostic mapping, kept parallel to raws and never a validity signal.
+    delivery_indices: list[int | None] = field(default_factory=list)
 
     @classmethod
     def empty(cls) -> TentativeSegment:
@@ -1425,6 +1272,7 @@ class TentativeSegment:
         self.clouds.clear()
         self.poses.clear()
         self.edges.clear()
+        self.delivery_indices.clear()
         self.started = now
         self.attempts = 0
         self.exhausted = False
@@ -1437,6 +1285,8 @@ class TentativeSegment:
         cloud: tuple[tuple[float, float, float], ...],
         pose: Rigid,
         edge: LocalEdge | None,
+        *,
+        delivery_index: int | None = None,
     ) -> str:
         """Take one chained tentative frame, then apply the bounds.
 
@@ -1458,6 +1308,10 @@ class TentativeSegment:
                 f"do not fit inside the {MAX_TENTATIVE_BYTES}-byte ceiling on frames held "
                 "back. A segment this decision could be made from can never be collected."
             )
+        # Legacy/synthetic construction can have unknown delivery provenance.
+        while len(self.delivery_indices) < len(self.raws):
+            self.delivery_indices.append(None)
+        self.delivery_indices.append(delivery_index)
         self.raws.append(raw)
         self.clouds.append(cloud)
         self.poses.append(pose)
@@ -1484,6 +1338,8 @@ class TentativeSegment:
         if self.frames <= 1:
             return
         del self.raws[0]
+        if self.delivery_indices:
+            del self.delivery_indices[0]
         del self.clouds[0]
         base = self.poses[1].inverse()
         del self.poses[0]
@@ -1551,9 +1407,6 @@ def _live_snapshot(
     saved: int,
     aligned: int,
     reframe: bool = False,
-    surface: Mesh | None = None,
-    surface_voxel: float = 0.0,
-    surface_note: str = "",
 ) -> ModelSnapshot:
     """The disposable "scanned so far" model, bounded where it is BUILT.
 
@@ -1577,13 +1430,9 @@ def _live_snapshot(
     producer knows whether this is the first model of a capture; the widget
     knows what a camera is; neither should be guessing at the other's job.
 
-    ``surface`` is the mesh the caller's accumulator currently implies, or
-    ``None``. It is NOT built here and it is not built from ``clouds``: it comes
-    from every frame the capture has accepted, not the
-    :data:`LIVE_MODEL_CLOUDS` this samples, and it is the caller that owns the
-    grid those frames were folded into. ``surface_note`` travels with it and is
-    the caller's reason for a surface it chose not to build; it is passed
-    through untouched, since only the caller knows why.
+    Live captures publish points only. Experimental occupancy meshing is
+    retired: no grid is accumulated and no triangle arrays are built here.
+    Reconstruct builds and publishes its signed-distance surface separately.
 
     The points cross to the view in the UPRIGHT presentation frame, through the
     same :func:`~scanner3d.reconstruction_export.upright_pose` composition
@@ -1605,11 +1454,6 @@ def _live_snapshot(
         # picture whose colours have quietly slid off the geometry.
         step = len(points) // LIVE_MODEL_POINTS + 1
         points, thin, newest = points[::step], thin[::step], newest[::step]
-    # NOT decimated with the points. The surface is bounded by its own grid -
-    # every vertex is on a cell edge, and the accumulator's cell budget is what
-    # limits how many there can be - so a stride here would punch holes in a
-    # closed surface to save nothing the producer had not already saved.
-    surface_vertices, surface_faces = _surface_arrays(surface)
     return ModelSnapshot(
         points=points,
         thin=thin,
@@ -1620,18 +1464,6 @@ def _live_snapshot(
         sampled=len(sampled_clouds),
         note=f"preview after {aligned} aligned frames of {saved} saved -",
         reframe=reframe,
-        surface_vertices=surface_vertices,
-        surface_faces=surface_faces,
-        surface_voxel=surface_voxel if len(surface_faces) else 0.0,
-        # Stated by the producer, beside the mesh it describes: this function IS
-        # the live path, and what it carries is the capture-time occupancy grid.
-        # Carried only when there is one, exactly as the cell edge is, so that a
-        # snapshot with no surface makes no claim about a surface.
-        surface_kind=SurfaceKind.LIVE_OCCUPANCY if len(surface_faces) else None,
-        # Carried whether or not there is a surface, because it is the sentence
-        # that distinguishes "no surface yet" from "a surface this window
-        # refused to draw at the fidelity it could have drawn it".
-        surface_note=surface_note,
     )
 
 
@@ -1912,6 +1744,21 @@ def _raw_frames_on_disk(directory: Path) -> int:
     return sum(1 for _ in directory.rglob(FRAME_GLOB))
 
 
+def _recorded_frame_times(directory: Path) -> list[float] | None:
+    """The delivery times of the frames the reader hands over, for the project file.
+
+    The turntable registration needs them when the interval between kept
+    frames varied, which held spacing makes the rule; taken here from the
+    files while they are fresh, because a copied capture can lose them. None
+    when the reader refuses the folder: no times for frames nobody can read.
+    """
+    try:
+        paths = read_capture_sequence(directory).paths
+    except ScannerError, OSError:
+        return None
+    return list(frame_times(paths))
+
+
 def _has_tracking_loss_record(directory: Path | None) -> bool:
     """Whether the capture folder itself records that tracking was lost."""
     return directory is not None and (directory / TRACKING_LOSS_RECORD_NAME).is_file()
@@ -2023,6 +1870,56 @@ def _tracking_loss_epilogue(directory: Path | None, lead: str) -> str:
     )
 
 
+@dataclass(frozen=True)
+class JobProgress:
+    """One reading of a reconstruction's progress, taken from its own report line.
+
+    ``done`` and ``total`` are both present or both absent: a line such as
+    "fused frame 9/146" is a count, and a line that opens a stage without one
+    ("looking for revisited viewpoints") is a stage the bar can name but not
+    measure.
+    """
+
+    stage: str
+    done: int | None = None
+    total: int | None = None
+
+
+#: The report lines a reconstruction writes, in the words it writes them, and
+#: the stage each one belongs to. The bar is drawn from the same lines the
+#: report panel shows, so it can never say something the panel does not: a
+#: line with a count moves the bar, a line that opens a stage names it, and
+#: everything else - summaries, coherence, the folder written - leaves it be.
+_JOB_STAGES: Final[tuple[tuple[re.Pattern[str], str], ...]] = (
+    (re.compile(r"^read (\d+)/(\d+) input frames$"), "reading frames"),
+    (re.compile(r"^aligning \d+ frames"), "aligning frames"),
+    (re.compile(r"^aligned (\d+)/(\d+)$"), "aligning frames"),
+    (re.compile(r"^placing \d+ frames"), "placing frames"),
+    (re.compile(r"^placed (\d+)/(\d+)$"), "placing frames"),
+    (re.compile(r"^looking for revisited viewpoints"), "finding revisits"),
+    (re.compile(r"^optimising against"), "optimising"),
+    (re.compile(r"^checking reconstruction readiness"), "checking"),
+    (re.compile(r"^fusing at "), "fusing frames"),
+    (re.compile(r"^fused frame (\d+)/(\d+),"), "fusing frames"),
+    (re.compile(r"^sampling the full-resolution frames"), "checking the surface"),
+    (re.compile(r"^checking the fused surface"), "checking the surface"),
+    (re.compile(r"^writing "), "writing"),
+)
+
+
+def reconstruction_progress(line: str) -> JobProgress | None:
+    """What one report line of a reconstruction says about its progress, if anything."""
+    text = line.strip()
+    for pattern, stage in _JOB_STAGES:
+        found = pattern.match(text)
+        if found is None:
+            continue
+        if found.groups():
+            return JobProgress(stage, int(found.group(1)), int(found.group(2)))
+        return JobProgress(stage)
+    return None
+
+
 def capture_progress_text(
     saved: int, refreshed_at: int | None, refreshes: int, *, running: bool = True
 ) -> str:
@@ -2074,7 +1971,10 @@ class ScannerWindow(QMainWindow):
         self._firmware_worker: Worker | None = None
         self._preview_worker: Worker | None = None
         self._previous_stream: Worker | None = None
-        self._resume_preview_after = False
+        #: Whether the running capture interrupted a preview. For the wording of
+        #: the capture's last line only: NOTHING restarts the preview. See
+        #: :meth:`_consume_preview_interrupted`.
+        self._preview_interrupted = False
         self._capture_dir: Path | None = None
         #: The project file of the running capture, or of the capture last
         #: reconstructed; what the reconstruct chooser opens on.
@@ -2086,6 +1986,7 @@ class ScannerWindow(QMainWindow):
         self._model_refreshes = 0
         self._model_refreshed_at: int | None = None
         self._capturing = False
+        self._async_coverage = True
         #: The bounded recent-yield window the depth warning is measured
         #: against. One window per RUN: reset where a preview or a capture
         #: BEGINS and where it ENDS by any route, and when the window closes,
@@ -2362,18 +2263,12 @@ class ScannerWindow(QMainWindow):
         )
         ScannerWindow._register_technical_widget(self, bar.addWidget(self._decimate_spin))
 
-        #: Whether the spacing above is a fixed setting or a starting point.
-        #:
-        #: On by default since 2026-09-04. It was off, on the argument that a
-        #: capture whose frame spacing is a number the operator typed is one
-        #: they can reason about afterwards. Two hand-held captures that day
-        #: settled it the other way: at the fixed one-in-three, 0.67 s apart,
-        #: a hand at 2-5 cm/s put 6-36 mm between the frames the tracker saw
-        #: and the second capture lost tracking at a step no registration
-        #: could bridge (docs/frame-spacing.md, "Why it is on by default").
-        #: The operator who wants a fixed number unticks this.
+        #: Automatic spacing is opt-in now that full-rate tracking is viable.
+        #: Coarsening while a hand pauses can discard the overlap needed when
+        #: it starts moving again, before the controller can react. The default
+        #: therefore keeps every frame even through a stationary interval.
         self._hold_cadence = QCheckBox("hold spacing")
-        self._hold_cadence.setChecked(True)
+        self._hold_cadence.setChecked(False)
         self._hold_cadence.setToolTip(
             "Treats the number to the left as a starting point and then moves it,\n"
             "between 1 and 10, to hold the MEASURED travel between kept frames\n"
@@ -2413,6 +2308,14 @@ class ScannerWindow(QMainWindow):
         self._backend = QComboBox()
         self._backend.addItems(["auto", "scipy", "numpy", "python"])
         ScannerWindow._register_technical_widget(self, bar.addWidget(self._backend))
+        self._gpu_normals = QCheckBox("GPU normals")
+        self._gpu_normals.setChecked(True)
+        self._gpu_normals.setToolTip(
+            "Accelerate live normal estimation with OpenGL FP64 compute when available.\n"
+            "Requires SciPy and PyOpenGL; self-tests the driver and reports CPU fallback.\n"
+            "Tracking gates, saved depth resolution and offline reconstruction are unchanged."
+        )
+        ScannerWindow._register_technical_widget(self, bar.addWidget(self._gpu_normals))
 
         workers_label = QLabel(" workers ")
         ScannerWindow._register_technical_widget(self, bar.addWidget(workers_label))
@@ -2573,8 +2476,8 @@ class ScannerWindow(QMainWindow):
         # arrives, at the moment it arrives.
         self._surface_toggle = QCheckBox(surface_control(None).title)
         #: What the OPERATOR last asked for, which is not the same thing as what
-        #: is on the screen. A surface can go away - a scan that outgrows the
-        #: live cell budget has none to draw - and the control has to follow the
+        #: is on the screen. A surface goes away when a new capture starts;
+        #: live captures are points-only. The control has to follow the
         #: screen while remembering the choice, so the choice comes back with the
         #: surface instead of being silently reset by it.
         #:
@@ -2610,6 +2513,18 @@ class ScannerWindow(QMainWindow):
         self._capture_progress.setStyleSheet("font-weight:bold; padding:2px;")
         layout.addWidget(self._capture_progress)
         ScannerWindow._register_technical_widget(self, self._capture_progress)
+        #: The one job that runs long enough to need a bar: a reconstruction of
+        #: a real capture is minutes of silence otherwise, and the first
+        #: operator to run one asked whether it was working at all. Not a
+        #: technical widget, deliberately - it is the one thing to watch.
+        #: Hidden until a reconstruction starts, moved by its own report lines
+        #: (:func:`reconstruction_progress`), taken down by ``_busy(False)``
+        #: whatever way the job ended.
+        self._job_progress = QProgressBar()
+        self._job_progress.setTextVisible(True)
+        self._job_progress.setVisible(False)
+        self._job_progress_active = False
+        layout.addWidget(self._job_progress)
         self._coverage_summary = QLabel("No coverage yet.")
         self._coverage_summary.setWordWrap(True)
         layout.addWidget(self._coverage_summary)
@@ -2959,6 +2874,7 @@ class ScannerWindow(QMainWindow):
         self._preview_action.setEnabled(not busy)
         self._stop_action.setEnabled(busy)
         if not busy:
+            self._end_job_progress()
             # Whatever ended - a capture, a reconstruction, a failure - there is
             # no live scan to pause now. Reset rather than left as it was, so a
             # Pause left checked by the run that just finished cannot be
@@ -3250,16 +3166,21 @@ class ScannerWindow(QMainWindow):
     def _log(self, message: str) -> None:
         self._report.appendPlainText(message)
 
-    def _consume_resume_preview(self) -> bool:
-        """Whether preview should come back, clearing the intent as it answers.
+    def _consume_preview_interrupted(self) -> bool:
+        """Whether the capture interrupted a preview, clearing the record as it answers.
 
-        Read exactly once per job, on whichever path that job ended by. Left set,
-        it would outlive the capture it belongs to and hand a later operation -
-        a reconstruction, or a capture the user stopped - a preview it never
-        asked for.
+        Read exactly once per job, on whichever path that job ended by, and
+        used for one sentence: the capture's ending says the preview was not
+        put back, so a live view that does not come back is not a mystery.
+        Nothing restarts the preview on any ending. It used to come back after
+        a capture that finished on its own, and that read as the scanner
+        never shutting off (2026-09-05): the emitter has no off command of
+        its own (``docs/illumination-actuators.md``), so the only idle the
+        scanner has is a closed stream, and a finished capture is no more a
+        request to light it again than a Stop is (2026-08-26).
         """
-        resume, self._resume_preview_after = self._resume_preview_after, False
-        return resume
+        interrupted, self._preview_interrupted = self._preview_interrupted, False
+        return interrupted
 
     def _was_stopped(self) -> None:
         """The operator's Stop, arrived at after the device has been let go.
@@ -3275,7 +3196,7 @@ class ScannerWindow(QMainWindow):
         # flight cannot be drawn against whatever comes next.
         self._end_depth_run()
         self._busy(False)
-        resume = self._consume_resume_preview()
+        resume = self._consume_preview_interrupted()
         self._finish_progress()
         if self._tracking_loss is not None:
             LOG.info("capture stopped by the operator after tracking was lost")
@@ -3329,9 +3250,9 @@ class ScannerWindow(QMainWindow):
         # over, so its warning goes with it.
         self._end_depth_run()
         self._busy(False)
-        # Consumed and dropped: a failed capture is not the moment to reopen the
-        # device, and leaving the intent set would spring it on the next job.
-        self._consume_resume_preview()
+        # Consumed and dropped: leaving the record set would let it colour the
+        # next job's last line.
+        self._consume_preview_interrupted()
         self._finish_progress()
         self._log("\nFAILED:\n" + text)
         title = (
@@ -3365,10 +3286,12 @@ class ScannerWindow(QMainWindow):
         ``preview`` signal here), so there is exactly one place in this window
         that decides what a depth frame looks like and what is said about it.
         """
-        rendered = render_frame(raw)
+        from scanner3d.viewer import render_packed_frame
+
+        rendered = render_packed_frame(raw)
         stats = rendered.stats
         image = QImage(
-            b"".join(rendered.pixels),
+            rendered.rgb,
             FRAME_WIDTH,
             FRAME_HEIGHT,
             FRAME_WIDTH * 3,
@@ -3389,7 +3312,7 @@ class ScannerWindow(QMainWindow):
         self._show_return_health(stats)
         self._show_plausibility(rendered.samples)
 
-    def _show_plausibility(self, samples: tuple[int, ...]) -> None:
+    def _show_plausibility(self, samples: Sequence[int]) -> None:
         """Restate what this frame's DISTANCES look like. GUI THREAD. NEVER raises.
 
         The sibling of :meth:`_show_return_health`, and advisory in exactly the
@@ -3934,10 +3857,51 @@ class ScannerWindow(QMainWindow):
         self._surface_toggle.setText(control.title)
         self._surface_toggle.setToolTip(control.tooltip)
 
+    def _begin_job_progress(self, stage: str) -> None:
+        """Show the bar, busy, named for the stage a job is about to enter."""
+        bar = getattr(self, "_job_progress", None)
+        if bar is None:
+            return
+        self._job_progress_active = True
+        bar.setFormat(stage)
+        bar.setRange(0, 0)
+        bar.setVisible(True)
+
+    def _follow_job_progress(self, line: str) -> None:
+        """Move the bar from one report line, when a job that has a bar is running.
+
+        Wired to every worker's progress signal, and inert unless
+        :meth:`_begin_job_progress` was called for the job: a capture's lines
+        never reach the bar, and nothing a capture reports resembles the
+        reconstruction's stage lines anyway.
+        """
+        bar = getattr(self, "_job_progress", None)
+        if bar is None or not getattr(self, "_job_progress_active", False):
+            return
+        step = reconstruction_progress(line)
+        if step is None:
+            return
+        if step.done is None or step.total is None:
+            bar.setFormat(step.stage)
+            bar.setRange(0, 0)
+        else:
+            bar.setFormat(f"{step.stage} %v of %m")
+            bar.setRange(0, step.total)
+            bar.setValue(step.done)
+
+    def _end_job_progress(self) -> None:
+        """Take the bar down; a no-op when no job had one."""
+        bar = getattr(self, "_job_progress", None)
+        if bar is None:
+            return
+        self._job_progress_active = False
+        bar.setVisible(False)
+
     def _run(self, job: Callable[[Worker], object], done: Callable[[object], None]) -> None:
         worker = Worker(job)
         self._worker = worker
         worker.progress.connect(self._log)
+        worker.progress.connect(self._follow_job_progress)
         worker.preview.connect(self._frame_slot(self._depth_run))
         worker.colour.connect(self._show_colour)
         worker.saved.connect(self._show_saved)
@@ -4005,6 +3969,9 @@ class ScannerWindow(QMainWindow):
         fields: dict[str, object] = {"stopped_early": stopped, "tracking_lost": lost}
         if folder is not None:
             fields["frames_written"] = _raw_frames_on_disk(folder)
+            times = _recorded_frame_times(folder)
+            if times is not None:
+                fields[FRAME_TIMES_KEY] = times
         if frames is not None:
             fields["reconstructable_frames"] = frames
         try:
@@ -4200,7 +4167,7 @@ class ScannerWindow(QMainWindow):
         was_previewing = self._preview_action.isChecked()
         self._preview_action.setChecked(False)
         self._stop_preview()
-        self._resume_preview_after = was_previewing
+        self._preview_interrupted = was_previewing
         self._capture_dir = target
         # Same reason as the counters below: this capture's return health is
         # measured against this capture's own frames, starting with none - and
@@ -4262,6 +4229,11 @@ class ScannerWindow(QMainWindow):
                 "hold_cadence": hold_cadence,
                 "depth_band": band.as_dict(),
                 "backend": backend,
+                "gpu_normals_requested": bool(
+                    getattr(self, "_gpu_normals", None) is not None
+                    and self._gpu_normals.isChecked()
+                    and backend in ("auto", "scipy")
+                ),
             },
         )
         self._log(f"Registering depths from {band.describe()} mm only.")
@@ -4274,8 +4246,10 @@ class ScannerWindow(QMainWindow):
         # None means "any scanner" to the wait and "no colour" to the pump.
         serial = self._scanner_serial()
         control = self._pause
+        gpu_runtime_notes: list[dict[str, object]] = []
 
         def job(worker: Worker) -> object:
+            from scanner3d.capture_evidence import CaptureEvidence
             from scanner3d.capture_sequence import (
                 FRAME_TEMPLATE,
                 TRACKING_INPUT_EMPTY_TYPE,
@@ -4366,40 +4340,17 @@ class ScannerWindow(QMainWindow):
             #: set from what the last one actually cost. Zero until one has run,
             #: so the first is never held off. See :data:`LIVE_MODEL_DUTY`.
             next_refresh_at = 0.0
-            #: The live surface's grid: one occupancy set, grown by every
-            #: accepted frame and never re-read. See
-            #: :class:`~scanner3d.mesh.SurfaceAccumulator` for why this can be
-            #: incremental at all, and for the limitation that matters most -
-            #: the cells were placed by the poses that were accepted AT THE TIME
-            #: and no pose correction reaches back into them.
-            #:
-            #: ``None`` until the first refresh, because its cell edge is
-            #: measured from the geometry rather than chosen in advance; see
-            #: :data:`LIVE_MESH_SPACING_MULTIPLE`.
-            accumulator: SurfaceAccumulator | None = None
-            #: Aligned clouds already folded into it. The one number that keeps
-            #: a frame from being added twice or missed once, and the reason
-            #: folding happens at refresh time rather than at each of the two
-            #: places a cloud is appended: one place to be right instead of two.
-            accumulated = 0
-            #: Cell-edge doublings spent because a march came back empty, for
-            #: this capture and not for this refresh. See
-            #: :data:`LIVE_MESH_COARSEN_ATTEMPTS`.
-            retried = 0
-            #: Why the live surface was given up on, in the operator's words, or
-            #: empty while there is still one to build. Latched deliberately: it
-            #: is set when the grid outgrows :data:`LIVE_MESH_CELLS`, and an
-            #: occupancy union never shrinks, so retrying would be spending the
-            #: whole fold and measure again on every refresh to learn the same
-            #: answer. A new capture gets a new one of these, as it gets a new
-            #: accumulator.
-            withdrawn = ""
-            #: Cells in the grid as it was last measured, for the log. Read from
-            #: the accumulator where it is already being measured rather than
-            #: recomputed at the log line, which over a withdrawn grid would be
-            #: an extent pass per refresh answering a question already settled.
-            surface_cells = 0
-            failures = {"alignment": 0, "model": 0, "relocalization": 0, "surface": 0}
+            from scanner3d.live_model import AsyncCoverage
+
+            model_builder: AsyncCoverage | None = None
+            if getattr(self, "_async_coverage", False):
+                try:
+                    model_builder = AsyncCoverage()
+                except Exception as exc:
+                    worker.progress.emit(
+                        f"\nCoverage helper unavailable; synchronous display: {exc}"
+                    )
+            failures = {"alignment": 0, "model": 0, "relocalization": 0}
             #: Ordinary live-alignment failures SINCE THE LAST SUCCESS, in the
             #: order they happened. The list rather than a counter because the
             #: durable record needs the frames and the messages themselves, and
@@ -4716,6 +4667,12 @@ class ScannerWindow(QMainWindow):
                 # measurement that would have explained it, because a frame that
                 # was not placed has no travel. A Stop is not one, which the
                 # guard above has already settled.
+                journal.event(
+                    "tracking_failure",
+                    frame_index=frame_index,
+                    failure_type=kind,
+                    message=message,
+                )
                 note_cadence(None)
                 if streak and frame_index != streak[-1].frame_index + 1:
                     streak.clear()
@@ -4916,13 +4873,14 @@ class ScannerWindow(QMainWindow):
                 detail = (
                     "Trying to find the object again. The scan is collecting a small segment "
                     "of frames and looking for the model it had already accepted. None of "
-                    "those frames are in the scan and none of them are on disk. Move back "
+                    "those frames are in the scan. Bounded diagnostic copies may be kept "
+                    "separately, without making them reconstructable. Move back "
                     "over a part you have already scanned."
                 )
                 worker.progress.emit("\n" + detail)
                 say(RECOVERING_TRACKING_STATE, detail)
 
-            def on_delivery(buf: bytes, _record: object) -> None:
+            def on_delivery(buf: bytes, _record: FrameRecord) -> None:
                 """Show the depth camera at the rate it delivers. NEVER raises.
 
                 Every complete delivery, including the ones decimation does not
@@ -4938,6 +4896,11 @@ class ScannerWindow(QMainWindow):
                 Stop that looks like a crash.
                 """
                 worker.preview.emit(buf)
+                journal.delivery(
+                    buf,
+                    _record,
+                    "recovering" if recovering else "lost" if tracking_lost else mode,
+                )
 
             def say(state: str, detail: str, *, paused: bool = False) -> None:
                 """Publish where the pause has got to, in one place. NEVER raises."""
@@ -4954,7 +4917,7 @@ class ScannerWindow(QMainWindow):
                 abandon_search()
                 tentative.clear()
                 detail = (
-                    f"PAUSED after {kept} frames. Nothing is being written or added to the "
+                    f"PAUSED after {kept} frames. No scan frames are being written or added to the "
                     f"model. Reposition the object, then press {RESUME_TITLE} to carry on - "
                     "the scan will need to see surface it has already scanned, and a part of "
                     "it that does not look like every other part, to work out where the "
@@ -5088,6 +5051,13 @@ class ScannerWindow(QMainWindow):
                     note_failure("relocalization", exc)
                     return False
                 current_dir = publication.directory
+                journal.event(
+                    "segment_published",
+                    segment_kind="resume",
+                    directory=str(current_dir.relative_to(target)),
+                    first_frame_index=kept,
+                    delivery_indices=list(tentative.delivery_indices),
+                )
                 for offset, (cloud, local) in enumerate(
                     zip(tentative.clouds, tentative.poses, strict=True)
                 ):
@@ -5184,7 +5154,8 @@ class ScannerWindow(QMainWindow):
                     detail = (
                         "The scan found the object again, and the recovery could NOT be "
                         f"written: {exc}. NOTHING was published, so the loss still stands and "
-                        "none of the held frames are on disk. This capture is stopping now and "
+                        "none of the held frames joined the scan. Diagnostic copies may remain. "
+                        "This capture is stopping now and "
                         "will report that failure; every frame written before the loss is "
                         "untouched."
                     )
@@ -5193,6 +5164,13 @@ class ScannerWindow(QMainWindow):
                     worker.cancel()
                     return False
                 current_dir = publication.directory
+                journal.event(
+                    "segment_published",
+                    segment_kind="recovery",
+                    directory=str(current_dir.relative_to(target)),
+                    first_frame_index=kept,
+                    delivery_indices=list(tentative.delivery_indices),
+                )
                 for offset, (cloud, local) in enumerate(
                     zip(tentative.clouds, tentative.poses, strict=True)
                 ):
@@ -5254,7 +5232,8 @@ class ScannerWindow(QMainWindow):
                 )
                 detail = (
                     f"TRACKING LOST and NOT recovered. {reason} The {held} frames held while "
-                    "looking were never written and are gone; nothing has been added to the "
+                    "looking did not join the scan; bounded diagnostic copies may remain "
+                    "separately. Nothing has been added to the "
                     f"scan and nothing more will be. The model is FROZEN at {frozen}, the "
                     "frames written while tracking was lost are still on disk as evidence, and "
                     f"{TRACKING_LOSS_RECORD_NAME} records what happened. Press Stop and rescan "
@@ -5264,225 +5243,78 @@ class ScannerWindow(QMainWindow):
                 worker.progress.emit("\n" + detail)
                 say(TRACKING_LOST_STATE, detail)
 
-            def grow_surface() -> Mesh | None:
-                """Fold every frame not yet folded in, and march. NEVER raises.
-
-                Returns ``None`` rather than propagating, because a surface is
-                the part of the picture the operator can do without: a capture
-                whose mesh fails must still show its points, still write its
-                frames and still finish.
-
-                Every accepted frame reaches the grid, not the
-                :data:`LIVE_MODEL_CLOUDS` the point picture samples. That is
-                affordable here precisely because it is a grid: folding a frame
-                in costs the frame, and what it costs to MARCH is bounded by the
-                object's own extent rather than by how many frames have been
-                folded.
-
-                Also returns ``None``, permanently, once the object outgrows
-                :data:`LIVE_MESH_CELLS`. It does NOT coarsen to fit: see
-                ``withdrawn`` below.
-                """
-                nonlocal accumulator, accumulated, retried, withdrawn, surface_cells
-                # Bounded by construction rather than by trying again cheaply: an
-                # occupancy union only ever grows, and the grid extent with it,
-                # so a build that did not fit cannot come to fit. Returning here
-                # is what stops a scan that outgrew the budget from folding and
-                # re-measuring its whole grid every few frames for the rest of
-                # the capture.
-                if withdrawn:
-                    return None
-                try:
-                    # Into the UPRIGHT presentation frame, the same one the
-                    # points are drawn in and the exported files are written in.
-                    # A surface and a cloud in different frames would be two
-                    # objects on one screen.
-                    pending = [
-                        tuple(upright_pose(poses[index]).apply_all(clouds[index]))
-                        for index in range(accumulated, len(clouds))
-                    ]
-                    if accumulator is None:
-                        # Sized from the geometry the capture has, the first time
-                        # it has any. Before this there is no grid at all, so a
-                        # refresh that arrives too early costs nothing and the
-                        # next one measures again.
-                        flat = [point for cloud in pending for point in cloud]
-                        if not flat:
-                            return None
-                        edge = estimate_spacing(flat).spacing * LIVE_MESH_SPACING_MULTIPLE
-                        accumulator = SurfaceAccumulator(voxel_size=edge)
-                        LOG.info(
-                            "live surface grid sized at voxel %.3f from %d points of %d frames",
-                            edge,
-                            len(flat),
-                            len(pending),
-                        )
-                    for cloud in pending:
-                        accumulator.add(cloud)
-                    accumulated = len(clouds)
-                    if accumulator.is_empty:
-                        return None
-                    # The estimate above is a guess about gaps made from a
-                    # measurement of typical distances, so it is checked against
-                    # what it produced rather than trusted. An empty march means
-                    # the cells are isolated; a coarser one joins them up.
-                    while True:
-                        surface_cells = accumulator.grid_cells
-                        if surface_cells > LIVE_MESH_CELLS:
-                            # The whole point of this task. What used to happen
-                            # here was coarsen_to_fit: the sole fine accumulator
-                            # was destructively re-cut at twice the cell edge and
-                            # the panel went on showing the result as though the
-                            # fidelity were unchanged. The mesher's surface
-                            # already stands up to a voxel outside its samples,
-                            # so that DOUBLED the error, swallowed thin features
-                            # and produced the blob the owner reported.
-                            #
-                            # There is no coarser answer worth showing, so no
-                            # answer is shown. The points are the authoritative
-                            # picture and they are still current.
-                            nx, ny, nz = accumulator.grid_shape
-                            # The closing sentence is measured against what
-                            # Reconstruct does rather than against how much
-                            # better it sounds. It reads every captured frame
-                            # and rebuilds from the corrected poses, and its
-                            # mesh is fused from the full-resolution frames -
-                            # but the voxel it fuses at is still derived from
-                            # the placed extent and RECONSTRUCT_VOXEL_BUDGET
-                            # rather than from the depth image, and the cloud it
-                            # writes is still thinned to RECONSTRUCT_POINTS with
-                            # isolated samples dropped. So it is not "full
-                            # resolution" either, and a message whose whole
-                            # purpose is to refuse an overstated picture cannot
-                            # end on one.
-                            withdrawn = (
-                                f"No live surface: the scan now needs a {nx}x{ny}x{nz} grid of "
-                                f"{surface_cells} cells at cell {accumulator.voxel_size:.2f}, "
-                                f"past this preview's {LIVE_MESH_CELLS}-cell budget. The points "
-                                "are the picture from here on; Reconstruct still reads every "
-                                "captured frame, rebuilds from the corrected poses, and sizes "
-                                "its own mesh resolution under its own separate budget."
-                            )
-                            LOG.warning(
-                                "live surface withdrawn after %d folded frames: %s "
-                                "The grid is NOT coarsened to fit - doubling the cell edge "
-                                "doubles how far the surface stands from the samples - and it "
-                                "is not attempted again for this capture, because an occupancy "
-                                "union only grows.",
-                                accumulated,
-                                withdrawn,
-                            )
-                            # Once, in the running report as well as beside the
-                            # coverage numbers. The panel sentence says what is
-                            # true NOW and is easy to have already been looking
-                            # away from; this one says WHEN it stopped being a
-                            # surface, which is what an operator comparing this
-                            # scan with the last one needs.
-                            worker.progress.emit(f"\n{withdrawn}")
-                            return None
-                        marched = accumulator.surface(max_grid_cells=LIVE_MESH_CELLS)
-                        if marched.faces or retried >= LIVE_MESH_COARSEN_ATTEMPTS:
-                            return marched
-                        retried += 1
-                        LOG.info(
-                            "live surface marched to no faces at voxel %.3f over %d cells; "
-                            "doubling the cell edge (%d of %d allowed for this capture)",
-                            accumulator.voxel_size,
-                            accumulator.occupied_cells,
-                            retried,
-                            LIVE_MESH_COARSEN_ATTEMPTS,
-                        )
-                        accumulator.coarsen()
-                except Exception as exc:
-                    note_failure("surface", exc)
-                    return None
-
-            def refresh_model(*, force: bool = False) -> None:
-                """Build and publish one accumulated model, if one is due. NEVER raises."""
+            def publish_model(snapshot: ModelSnapshot, elapsed: float, *, blocking: bool) -> None:
                 nonlocal refreshed_at, next_refresh_at
-                aligned = len(clouds)
-                if aligned < MIN_COVERAGE_CLOUDS:
-                    return
-                due = force or refreshed_at == 0 or aligned - refreshed_at >= COVERAGE_EVERY
-                if not due or worker.cancelled:
-                    return
-                started = time.monotonic()
-                # Held off rather than skipped, and ``refreshed_at`` is left
-                # exactly where it is so the next aligned frame asks again. This
-                # is what bounds the stream thread's share of a refresh that has
-                # become expensive because the object is large - see
-                # :data:`LIVE_MODEL_DUTY`. Never against a forced refresh: that
-                # one exists because the operator has just been told something
-                # happened and has to be able to see it.
-                if not force and started < next_refresh_at:
-                    return
-                surface = grow_surface()
-                try:
-                    snapshot = _live_snapshot(
-                        clouds,
-                        poses,
-                        saved=kept,
-                        aligned=aligned,
-                        surface=surface,
-                        surface_voxel=0.0 if accumulator is None else accumulator.voxel_size,
-                        surface_note=withdrawn,
-                        # The first model this capture has produced, and the
-                        # only one entitled to move the camera: the previous
-                        # capture's framing describes a different object, and
-                        # every refresh after this one is an addition to the
-                        # picture the operator is already looking at.
-                        reframe=refreshed_at == 0,
-                    )
-                except Exception as exc:
-                    # ``refreshed_at`` deliberately unchanged: the next aligned
-                    # frame tries again. A model that fails to build once must
-                    # not be a model that never builds.
-                    note_failure("model", exc)
-                    return
-                refreshed_at = aligned
-                elapsed = time.monotonic() - started
-                # Measured here and applied to the NEXT one, which is the only
-                # honest way round: what a refresh costs is a property of the
-                # grid the object has grown, and nothing knows it in advance. A
-                # refresh that cost less than a frame does arms nothing at all,
-                # so the ordinary cadence is exactly what it always was.
+                refreshed_at = snapshot.aligned
                 next_refresh_at = (
                     time.monotonic() + elapsed * (1.0 / LIVE_MODEL_DUTY - 1.0)
-                    if elapsed > LIVE_MODEL_REFRESH_FLOOR
+                    if blocking and elapsed > LIVE_MODEL_REFRESH_FLOOR
                     else 0.0
                 )
-                # "Produced" is the half of the story this side of the boundary
-                # can vouch for. Whether it was ever DRAWN is the window's to
-                # report, and the two being separate lines is what lets a
-                # physical report distinguish a model that failed to build from
-                # one the GUI could not keep up with. Once every
-                # COVERAGE_EVERY alignments, so this is not per-frame spam.
-                # The placement breakdown rides on this line rather than one of
-                # its own, and that is not tidiness: this is at INFO precisely
-                # because it does not fire per frame, and a second line on the
-                # same cadence would double what a long capture writes to say
-                # one thing. "Aligned 40 frames" does not distinguish a capture
-                # whose every pose came from its immediate neighbour from one
-                # being held up entirely by geometry captured minutes ago, and
-                # only the second is about to stop working.
                 LOG.info(
                     "live model produced: %d points from %d of %d aligned frames "
-                    "in %.3fs, at %d saved; surface %d faces over %d cells at voxel %.3f%s; "
-                    "placed by %s over %d keyframes",
+                    "in %.3fs, at %d saved; points only (live mesh disabled); "
+                    "placed by %s over %d keyframes; blocking=%s",
                     len(snapshot.points),
                     snapshot.sampled,
-                    aligned,
+                    snapshot.aligned,
                     elapsed,
-                    kept,
-                    len(snapshot.surface_faces),
-                    surface_cells,
-                    0.0 if accumulator is None else accumulator.voxel_size,
-                    " (surface withdrawn)" if withdrawn else "",
+                    snapshot.saved,
                     ", ".join(f"{count} {origin}" for origin, count in sorted(placements.items()))
                     or "nothing yet",
                     len(tracker.keyframes),
+                    blocking,
                 )
                 worker.coverage.emit(snapshot)
+
+            def refresh_model(*, force: bool = False) -> None:
+                """Publish only completed snapshots; independent display jobs never hold capture."""
+                nonlocal model_builder
+                aligned = len(clouds)
+                if aligned < MIN_COVERAGE_CLOUDS or worker.cancelled:
+                    return
+                if model_builder is not None:
+                    try:
+                        if force:
+                            model_builder.discard()
+                        else:
+                            ready = model_builder.poll()
+                            if ready is not None:
+                                publish_model(*ready, blocking=False)
+                    except Exception as exc:
+                        model_builder.close()
+                        model_builder = None
+                        note_failure("model", exc)
+                        worker.progress.emit(
+                            "\nCoverage helper failed; synchronous display fallback."
+                        )
+                due = force or refreshed_at == 0 or aligned - refreshed_at >= COVERAGE_EVERY
+                if not due:
+                    return
+                started = time.monotonic()
+                if not force and started < next_refresh_at:
+                    return
+                # The first picture is tiny and immediate. Forced pause/recovery
+                # boundaries remain synchronous and discard every older request.
+                if model_builder is not None and refreshed_at and not force:
+                    try:
+                        model_builder.request(clouds, poses, saved=kept, aligned=aligned)
+                        return
+                    except Exception as exc:
+                        model_builder.close()
+                        model_builder = None
+                        note_failure("model", exc)
+                        worker.progress.emit(
+                            "\nCoverage helper failed; synchronous display fallback."
+                        )
+                try:
+                    snapshot = _live_snapshot(
+                        clouds, poses, saved=kept, aligned=aligned, reframe=refreshed_at == 0
+                    )
+                except Exception as exc:
+                    note_failure("model", exc)
+                    return
+                publish_model(snapshot, time.monotonic() - started, blocking=True)
 
             def abandon_search() -> None:
                 """Stop caring about a search still running. NEVER blocks.
@@ -5612,7 +5444,7 @@ class ScannerWindow(QMainWindow):
                 worker.progress.emit("\n" + detail)
                 say("relocalizing", detail)
 
-            def collect_tentative(buf: bytes) -> None:
+            def collect_tentative(buf: bytes, record: FrameRecord) -> None:
                 """Hold one frame back and try to place the segment. NEVER raises.
 
                 POST-REQUEUE, always. Everything below - deprojecting half a
@@ -5670,6 +5502,11 @@ class ScannerWindow(QMainWindow):
                         note_failure("relocalization", exc)
                         report_collecting()
                         return
+                    journal.event(
+                        "recovery_tracking",
+                        delivery_index=record.index,
+                        decision=decision.as_dict(),
+                    )
                     # A returned fit is not a link. It is judged against named
                     # gates in the same vocabulary as everything else here, and
                     # a link that fails them is dropped rather than chained -
@@ -5693,7 +5530,7 @@ class ScannerWindow(QMainWindow):
                 else:
                     pose = Rigid.identity()
 
-                refused = tentative.add(buf, cloud, pose, edge)
+                refused = tentative.add(buf, cloud, pose, edge, delivery_index=record.index)
                 if refused:
                     give_up(refused)
                     return
@@ -5721,7 +5558,7 @@ class ScannerWindow(QMainWindow):
                 # and is picked up when it finishes.
                 take_search_result()
 
-            def on_frame(buf: bytes, _record: object) -> None:
+            def on_frame(buf: bytes, _record: FrameRecord) -> None:
                 """Save the frame, then keep the model view honest about it.
 
                 Never raises, and specifically never raises
@@ -5760,7 +5597,8 @@ class ScannerWindow(QMainWindow):
                     # that runs in ``after_frame``, once the driver has its
                     # buffer back. It is still not written, still not counted
                     # and still not in the model; the only thing that can move
-                    # it out of memory is a published recovery.
+                    # it into the scan is a published recovery. on_delivery's
+                    # bounded diagnostic copies cannot authorize that step.
                     if recovering:
                         tentative_pending = True
                         return
@@ -5826,6 +5664,7 @@ class ScannerWindow(QMainWindow):
                     mode == "paused" or (mode == "running" and epoch != handled_epoch)
                 ):
                     enter_relocalizing(epoch)
+                    journal.retain_recovery(buf, _record)
                 if mode == "relocalizing":
                     # Nothing else here. The frame is not written, not counted
                     # and not drawn, and the work of deciding where it belongs
@@ -5838,6 +5677,12 @@ class ScannerWindow(QMainWindow):
                 path = current_dir / FRAME_TEMPLATE.format(index=kept)
                 path.write_bytes(buf)
                 kept += 1
+                journal.event(
+                    "saved",
+                    delivery_index=_record.index,
+                    frame_index=kept - 1,
+                    path=str(path.relative_to(target)),
+                )
                 # Before anything that can be skipped, and never skipped itself:
                 # the frame IS on disk, so the count must say so.
                 worker.saved.emit(kept)
@@ -5907,6 +5752,12 @@ class ScannerWindow(QMainWindow):
                     note_failure("alignment", exc)
                     note_alignment_failure(kept - 1, exc)
                     return
+                journal.event(
+                    "tracking",
+                    delivery_index=_record.index,
+                    frame_index=kept - 1,
+                    decision=decision.as_dict(),
+                )
                 if not decision.accepted or decision.pose is None:
                     note_failure("alignment", decision.message())
                     # The cumulative count above says how the capture has been
@@ -5951,7 +5802,7 @@ class ScannerWindow(QMainWindow):
                 # lost until the next multiple comes round.
                 refresh_model()
 
-            def after_frame(buf: bytes, _record: object) -> None:
+            def after_frame(buf: bytes, _record: FrameRecord) -> None:
                 """The expensive half of a resume, with the buffer already back.
 
                 NEVER raises, for the same reason ``on_frame`` never does: this
@@ -5992,7 +5843,7 @@ class ScannerWindow(QMainWindow):
                     say_tentative(
                         f"Still looking for where the object went (attempt "
                         f"{tentative.attempts} of {MAX_ATTEMPTS}, {tentative.frames} frames "
-                        "held). Nothing is being written."
+                        "held). No scan frames are being written."
                     )
                     return
                 # ``take_search_result`` can have ACCEPTED, which puts the
@@ -6005,8 +5856,23 @@ class ScannerWindow(QMainWindow):
                 # just run out of attempts.
                 if not (recovering or mode == "relocalizing"):
                     return
-                collect_tentative(buf)
+                collect_tentative(buf, _record)
 
+            journal = CaptureEvidence(
+                target,
+                dict(
+                    serial=serial,
+                    frames_requested=frames,
+                    decimate=decimate,
+                    hold_cadence=hold_cadence,
+                    backend_requested=backend,
+                    depth_band=band.as_dict(),
+                    device_settings_readback=None,
+                    gpu_runtime_notes=list(gpu_runtime_notes),
+                ),
+                lambda line: worker.progress.emit("\n" + line),
+            )
+            stream_returned = False
             try:
                 result = stream_with_colour(
                     worker,
@@ -6018,7 +5884,30 @@ class ScannerWindow(QMainWindow):
                     after_frame=after_frame,
                     on_delivery=on_delivery,
                 )
+                stream_returned = True
+                journal.event("stream", summary=result.as_dict())
+                for record in result.records:
+                    if not record.complete:
+                        journal.event(
+                            "short_delivery",
+                            record=record.as_dict(),
+                            monotonic_s=record.monotonic,
+                        )
+                if model_builder is not None and not tracking_lost and mode == "running":
+                    # Once acquisition has ended, catch up the final picture.
+                    # Never after Stop/loss; refresh_model checks cancellation.
+                    refresh_model(force=True)
             finally:
+                journal.event("gpu_runtime", notes=gpu_runtime_notes)
+                journal.close(
+                    stream_returned=stream_returned,
+                    tracking_lost=tracking_lost,
+                    mode=mode,
+                    recovering=recovering,
+                    scan_frames_written=kept,
+                )
+                if model_builder is not None:
+                    model_builder.close()
                 # ``wait=False``: a Stop must not sit behind a global search
                 # that has already started, and it does not have to - the search
                 # holds only the tuples it was handed, publishes nothing and
@@ -6096,22 +5985,52 @@ class ScannerWindow(QMainWindow):
                 raise Stopped
             return result
 
-        self._run(job, self._capture_done)
+        gpu_toggle = getattr(self, "_gpu_normals", None)
+        if gpu_toggle is not None and gpu_toggle.isChecked() and backend in ("auto", "scipy"):
+            # Qt requires surface creation/destruction on the GUI thread, even
+            # though its OpenGL context is created and used by the worker.
+            from PySide6.QtGui import QOffscreenSurface, QSurfaceFormat
+
+            surface = QOffscreenSurface(parent=self)
+            fmt = QSurfaceFormat()
+            fmt.setVersion(4, 3)
+            fmt.setProfile(QSurfaceFormat.OpenGLContextProfile.CoreProfile)
+            surface.setFormat(fmt)
+            surface.create()
+
+            def accelerated_job(worker: Worker) -> object:
+                from scanner3d.gpu_normals import live_normals
+
+                def gpu_notice(line: str) -> None:
+                    if len(gpu_runtime_notes) < 16:
+                        gpu_runtime_notes.append(dict(monotonic_s=time.monotonic(), message=line))
+                    worker.progress.emit("\n" + line)
+
+                try:
+                    with live_normals(surface, gpu_notice):
+                        return job(worker)
+                finally:
+                    # Queued back to the object's GUI owner; never destroy an
+                    # offscreen window in the capture thread.
+                    surface.deleteLater()
+
+            self._run(accelerated_job, self._capture_done)
+        else:
+            self._run(job, self._capture_done)
 
     def _capture_done(self, result: object) -> None:
         """A capture that ran to its own end. Never the operator's Stop.
 
-        Stop arrives at :meth:`_was_stopped` instead, which is what makes
-        resuming the preview here safe: this is the path where the capture
-        finished on its own terms and the live view is the natural next thing to
-        see.
+        Stop arrives at :meth:`_was_stopped` instead. The two endings differ in
+        their words and their record, not in what they do to the scanner: both
+        leave it idle. A finished capture used to put the interrupted preview
+        back, projector lit and frames flowing, and from the bench that read
+        as the scanner never shutting off; the emitter has no off command of
+        its own, so a closed stream is the only idle it has.
         """
-        # First: resuming the preview below STARTS a run, and this one has to
-        # have ended before it does.
         self._end_depth_run()
         self._busy(False)
-        if self._consume_resume_preview():
-            self._preview_action.setChecked(True)
+        interrupted = self._consume_preview_interrupted()
         self._finish_progress()
         # A capture can reach its full frame count with tracking already lost -
         # the 2026-08-28 sweep ran on for another 120-odd frames. Ending it with
@@ -6135,6 +6054,10 @@ class ScannerWindow(QMainWindow):
         counts = _frame_counts(self._capture_dir)
         self._finish_project(frames=counts.frames, stopped=False)
         self._log(f"\nCaptured {counts.frames} frames to {self._capture_dir}")
+        if interrupted:
+            self._log(
+                "Preview was NOT restarted: the scanner is idle. Press Preview to look again."
+            )
         excluded = _excluded_note(counts)
         if excluded:
             self._log(excluded)
@@ -6231,10 +6154,14 @@ class ScannerWindow(QMainWindow):
         self._busy(True)
 
         def job(worker: Worker) -> object:
-            from scanner3d.cli import DEPTH_SCALE_METRES
             from scanner3d.coherence import check_coherence
+            from scanner3d.metric_correction import calibrated_deprojection
             from scanner3d.pipeline import reconstruct_sweep
-            from scanner3d.simulate import FACTORY_INTRINSICS
+
+            # The same deprojection _prepare_frame used for the registration
+            # clouds, so the fusion input, the coherence check and the export
+            # describe the frames under one calibration.
+            intrinsics, depth_scale, correction = calibrated_deprojection()
 
             # The authoritative reader, not a glob. A capture that was
             # repositioned mid-sweep keeps its later frames in the boundary
@@ -6275,12 +6202,15 @@ class ScannerWindow(QMainWindow):
                     mask_support_band(
                         raw,
                         frame.support,
-                        intrinsics=FACTORY_INTRINSICS,
-                        depth_scale=DEPTH_SCALE_METRES,
+                        intrinsics=intrinsics,
+                        depth_scale=depth_scale,
                     )
                 )
+                # One-based and always at the last frame, so a bar drawn from
+                # this line ends at "N of N" rather than one report short of it.
+                if index % PREPARATION_PROGRESS_EVERY == 0 or index == len(paths) - 1:
+                    worker.progress.emit(f"  read {index + 1}/{len(paths)} input frames")
                 if index % PREPARATION_PROGRESS_EVERY == 0:
-                    worker.progress.emit(f"  read {index}/{len(paths)} input frames")
                     # Bounded to the same cadence as the read line. A frame whose
                     # support plane was NOT removed is the interesting one - it
                     # still contains whatever the object was standing on - so the
@@ -6297,13 +6227,43 @@ class ScannerWindow(QMainWindow):
                 worker.check()
                 worker.progress.emit(message)
 
-            result = reconstruct_sweep(
-                clouds,
-                backend=backend,
-                workers=workers,
-                bridges=boundaries,
-                on_progress=report_progress,
+            if correction is not None:
+                report_progress(correction.statement())
+
+            # A full turn of a turntable is one axis and one rate, and
+            # registers far better as that than as a chain of frames
+            # (scanner3d.turntable). Tried first; a capture whose frames
+            # never repeat is not one, and the chain is used as before.
+            turntable: TurntableRegistration | None = None
+            try:
+                turntable = register_turntable(
+                    clouds,
+                    raws=raw_frames,
+                    depth_scale=depth_scale,
+                    times=capture_frame_times(paths, project_path),
+                    backend=backend,
+                    on_progress=report_progress,
+                )
+            except TurntableNotDetected as exc:
+                report_progress(f"registering frame by frame: {exc}")
+            except TurntableUnusable as exc:
+                report_progress(
+                    f"registering frame by frame; the turntable model was refused: {exc}"
+                )
+            registration_record: dict[str, object] = (
+                turntable.as_dict() if turntable is not None else {"registration": "frame-by-frame"}
             )
+            if turntable is not None:
+                result = turntable.as_reconstruction()
+                report_progress(turntable.statement())
+            else:
+                result = reconstruct_sweep(
+                    clouds,
+                    backend=backend,
+                    workers=workers,
+                    bridges=boundaries,
+                    on_progress=report_progress,
+                )
             # Judged by the images themselves, and said before the export:
             # closure is scored on the constraints the optimiser was given, so
             # a trajectory bent between them reads as healthy there. See
@@ -6311,8 +6271,8 @@ class ScannerWindow(QMainWindow):
             coherence = check_coherence(
                 [frame.raw for frame in fusion_frames],
                 list(result.poses),
-                intrinsics=FACTORY_INTRINSICS,
-                depth_scale=DEPTH_SCALE_METRES,
+                intrinsics=intrinsics,
+                depth_scale=depth_scale,
                 depth_band=band,
             )
             report_progress(f"coherence: {coherence.statement()}")
@@ -6332,10 +6292,10 @@ class ScannerWindow(QMainWindow):
                     clouds,
                     list(result.poses),
                     raw_frames=raw_frames,
-                    intrinsics=FACTORY_INTRINSICS,
+                    intrinsics=intrinsics,
                     registration=result,
                     unit=_depth_unit(),
-                    depth_scale=DEPTH_SCALE_METRES,
+                    depth_scale=depth_scale,
                     calibration_source=CALIBRATION_SOURCE,
                     points_per_frame_target=RECONSTRUCT_POINTS,
                     per_frame_filter=filter_statement(summary, fusion),
@@ -6370,6 +6330,7 @@ class ScannerWindow(QMainWindow):
                     details={
                         "depth_band": band.as_dict(),
                         "coherence": coherence.statement(),
+                        "registration": registration_record,
                         "points": export.point_count,
                         "vertices": export.vertex_count,
                         "faces": export.face_count,
@@ -6430,6 +6391,7 @@ class ScannerWindow(QMainWindow):
             )
             return ReconstructionOutcome(registration=result, export=export)
 
+        self._begin_job_progress("reading frames")
         self._run(job, self._reconstruct_done)
 
     def _reconstruct_done(self, result: object) -> None:

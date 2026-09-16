@@ -101,12 +101,10 @@ Seam for a future GPU backend - not implemented here
 ``"gpu"`` is a *recognised* backend name - see :data:`GPU_BACKEND` and
 :func:`available_backends` - that always reports unavailable, and
 :func:`select_backend` always refuses it, with a reason rather than a
-mystery. It is deliberately not implemented in this task: the machine this
-scanner runs on carries an AMD Radeon RX 470/480/570-class GPU plus a newer
-device, so CUDA is not an option and ROCm's support for that generation is
-unverified here. A GPU backend needs a measurement of what it would actually
-buy on THIS hardware before it is worth building, and no such measurement
-exists yet. Recognising the name now, and refusing it honestly, is what lets
+mystery. OpenGL rendering does not implement these compute operations. A GPU
+backend needs an implementation, accuracy checks and end-to-end measurements
+on the installed hardware and runtime; graphics-device availability alone is
+not such a check. Recognising the name now, and refusing it honestly, is what lets
 a caller's code that branches on backend names be written once and not need
 to change again when a GPU backend eventually arrives.
 
@@ -148,7 +146,7 @@ import importlib
 import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Final, Protocol
+from typing import Any, Final, Protocol
 
 from scanner3d.errors import DoctorStatus, ScannerError
 from scanner3d.geometry import (
@@ -190,8 +188,8 @@ _RESERVED_BACKENDS: Final[tuple[str, ...]] = (GPU_BACKEND,)
 #: :func:`select_backend` give the identical reason rather than two that
 #: could drift apart.
 _GPU_UNAVAILABLE_REASON: Final = (
-    "not implemented: this machine's AMD GPU generation has no measured ROCm support and CUDA "
-    "is not an option, so a GPU backend needs a measurement this task did not make, not a guess"
+    "not implemented: no validated GPU registration backend; GPU/OpenGL model rendering "
+    "does not offload tracking or frame preparation"
 )
 
 #: Upper bound on how many (row, target-point) pairs a chunked numpy search
@@ -200,6 +198,10 @@ _GPU_UNAVAILABLE_REASON: Final = (
 #: 3 float64 coordinates per pair this ceiling is about 48 MB per block,
 #: comfortably below what would make a large sweep's memory use a concern.
 _PAIRWISE_CHUNK_ELEMENTS: Final = 2_000_000
+
+#: Small tracking queries finish faster than starting a thread on every CPU.
+#: Keep parallel queries for the larger reconstruction and texture workloads.
+_PARALLEL_QUERY_MIN_POINTS: Final = 4096
 
 #: One nearest-neighbour hit: ``(distance, target_point)``. ``None`` means
 #: nothing in the target cloud lies strictly inside the gate - the same
@@ -753,10 +755,12 @@ class _ScipyBackend:
     instantiated, whether or not scipy is installed.
     """
 
-    __slots__ = ("_numpy",)
+    __slots__ = ("_numpy", "_tree", "_tree_points")
 
     def __init__(self) -> None:
         self._numpy = _NumpyBackend()
+        self._tree_points: tuple[Point, ...] = ()
+        self._tree: Any = None
 
     @property
     def name(self) -> str:
@@ -782,9 +786,8 @@ class _ScipyBackend:
         not assumed, and checked by
         ``test_nearest_neighbors_gate_is_strict_on_both_backends``'s scipy
         parametrisation. A miss is mapped to ``None`` here for the same
-        reason. Queried with ``workers=-1`` to use every core - the query is
-        embarrassingly parallel across independent points, and this machine
-        has 20 of them mostly idle during a scan.
+        reason. Small tracking queries use one worker to avoid thread startup
+        on every ICP iteration; large batches can use every core.
 
         Ties (two target points at the identical distance from a query) are
         broken by ``cKDTree``'s own internal traversal order, which is not
@@ -802,8 +805,20 @@ class _ScipyBackend:
         from scipy.spatial import cKDTree
 
         target_points = list(target)
-        tree = cKDTree(target_points)
-        distances, indices = tree.query(list(queries), k=1, distance_upper_bound=gate, workers=-1)
+        # ICP asks about the same target on every iteration. Cache one small
+        # value-keyed index per backend, never an identity-keyed mutable list.
+        # Large reconstruction targets do not remain resident in this cache.
+        key = tuple(target_points) if len(target_points) <= 2048 else ()
+        if key and key == self._tree_points:
+            tree = self._tree
+        else:
+            tree = cKDTree(target_points)
+            self._tree_points = key
+            self._tree = tree if key else None
+        workers = 1 if len(queries) < _PARALLEL_QUERY_MIN_POINTS else -1
+        distances, indices = tree.query(
+            list(queries), k=1, distance_upper_bound=gate, workers=workers
+        )
         miss = len(target_points)
         hits: list[NearestHit] = []
         for distance, index in zip(distances, indices, strict=True):
@@ -831,7 +846,8 @@ class _ScipyBackend:
         from scipy.spatial import cKDTree
 
         tree = cKDTree(target_list)
-        _, indices = tree.query(query_list, k=cap, workers=-1)
+        workers = 1 if len(query_list) < _PARALLEL_QUERY_MIN_POINTS else -1
+        _, indices = tree.query(query_list, k=cap, workers=workers)
         if cap == 1:
             return [(int(row),) for row in indices]
         return [tuple(int(j) for j in row) for row in indices]
@@ -860,7 +876,8 @@ class _ScipyBackend:
 
         point_list = list(points)
         tree = cKDTree(point_list)
-        _, indices = tree.query(point_list, k=cap + 1, workers=-1)
+        workers = 1 if n < _PARALLEL_QUERY_MIN_POINTS else -1
+        _, indices = tree.query(point_list, k=cap + 1, workers=workers)
         result: list[tuple[int, ...]] = []
         for row_index, row in enumerate(indices):
             neighbours = tuple(int(j) for j in row if int(j) != row_index)[:cap]

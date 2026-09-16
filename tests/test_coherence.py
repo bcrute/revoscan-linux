@@ -10,9 +10,11 @@ because a check that could not run must not read as one that passed.
 from __future__ import annotations
 
 import math
+import struct
 
 import pytest
 
+from scanner3d import coherence
 from scanner3d.cli import DEPTH_SCALE_METRES
 from scanner3d.coherence import (
     CoherenceNotAllowed,
@@ -133,6 +135,74 @@ def test_check_coherence_reads_the_period_and_then_judges(sweep):
     assert report.period == TURN
     assert report.coherent is True
     assert report.estimate is not None
+
+
+@pytest.mark.parametrize(
+    "translation,expected",
+    [((0.0, 0.0, 0.0), True), ((0.0, 0.0, 5.0), False), ((5000.0, 0.0, 0.0), None)],
+)
+def test_final_check_uses_actual_matches_and_never_passes_unprojectable_pairs(
+    monkeypatch, translation, expected
+):
+    raws = [struct.pack("<H", 30000) * (640 * 400)] * 10
+    poses = [Rigid.identity()] * 10
+    poses[9] = Rigid.of(IDENTITY, translation)
+    estimate = coherence.PeriodEstimate(
+        period=4,
+        samples=tuple(
+            coherence.PeriodSample(frame=a, best_frame=b, lag=b - a, match=0.0, adjacent=1.0)
+            for a, b in ((0, 4), (1, 9), (2, 6))
+        ),
+    )
+
+    def matched(frames, *, depth_scale, samples):
+        assert frames == raws and depth_scale == DEPTH_SCALE_METRES
+        assert samples == 25
+        return estimate
+
+    monkeypatch.setattr(coherence, "image_period", matched)
+    # The old fixed-lag sampler never reaches frame 9 and falsely passes.
+    legacy = period_agreement(
+        raws,
+        poses,
+        intrinsics=FACTORY_INTRINSICS,
+        depth_scale=DEPTH_SCALE_METRES,
+        period=4,
+        depth_band=BAND,
+    )
+    assert legacy.coherent is True
+    checked = check_coherence(
+        raws, poses, intrinsics=FACTORY_INTRINSICS, depth_scale=DEPTH_SCALE_METRES, depth_band=BAND
+    )
+    assert checked.coherent is expected
+    assert checked.period == 4  # Descriptive, not an invented constant lag.
+    assert checked.as_dict()["pair_selection"] == "actual_image_match"
+    assert checked.as_dict()["requested_image_samples"] == 25
+    if expected is None:
+        assert checked.uncheckable_pairs == ((1, 9),)
+        assert "not checkable" in checked.statement()
+    else:
+        assert [(p.frame, p.revisit) for p in checked.pairs] == [(0, 4), (1, 9), (2, 6)]
+        assert not checked.uncheckable_pairs
+
+
+@pytest.mark.parametrize("agreement,expected", [(0.5, False), (0.95, None)])
+def test_missing_projection_cannot_hide_failure_or_establish_pass(agreement, expected):
+    report = coherence.CoherenceReport(
+        period=100,
+        tolerance=1.5,
+        required_agreement=0.75,
+        pairs=(coherence.PeriodPair(0, 100, 200, 0.0, agreement),),
+        pair_selection="actual_image_match",
+        requested_image_samples=25,
+        uncheckable_pairs=((20, 121),),
+    )
+    assert report.coherent is expected
+    saved = report.as_dict()
+    assert saved["coherent"] is expected
+    assert saved["uncheckable_pairs"] == [[20, 121]]
+    assert saved["schema_version"] == 2
+    assert report.statement().startswith("INCOHERENT" if expected is False else "not checkable")
 
 
 def test_a_sweep_under_one_turn_has_no_period_and_is_not_checkable(sweep):

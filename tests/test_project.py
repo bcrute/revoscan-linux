@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from scanner3d.project import (
     ProjectInvalid,
     ProjectUnreadable,
     adopt_capture,
+    capture_frame_times,
     read_project,
     record_reconstruction,
     resolve_capture_input,
@@ -156,3 +158,26 @@ def test_a_file_that_does_not_say_what_a_project_says_is_refused(tmp_path: Path,
 def test_a_missing_file_is_a_different_refusal_from_a_wrong_one(tmp_path: Path) -> None:
     with pytest.raises(ProjectUnreadable):
         read_project(tmp_path / PROJECT_NAME)
+
+
+def test_frame_times_come_from_the_record_when_it_fits_and_from_the_files_otherwise(
+    tmp_path: Path,
+) -> None:
+    """The project file's record survives a copy; the files' own times are the fallback."""
+    folder = tmp_path / "capture"
+    folder.mkdir()
+    paths = []
+    for index in range(3):
+        path = folder / f"frame_{index:04d}.raw"
+        path.write_bytes(b"x")
+        os.utime(path, (2000.0 + index, 2000.0 + index))
+        paths.append(path)
+    project = write_project(folder, source="test", capture={"frames_written": 3})
+    # no record yet: the files
+    assert capture_frame_times(paths, project) == pytest.approx((0.0, 1.0, 2.0), abs=1e-3)
+    update_capture(project, frame_times_s=[5.0, 5.5, 7.0])
+    # the record, made relative to its first frame
+    assert capture_frame_times(paths, project) == pytest.approx((0.0, 0.5, 2.0))
+    # a record for other frames than these (a stride, say) is not for these
+    assert capture_frame_times(paths[:2], project) == pytest.approx((0.0, 1.0), abs=1e-3)
+    assert capture_frame_times(paths, None) == pytest.approx((0.0, 1.0, 2.0), abs=1e-3)

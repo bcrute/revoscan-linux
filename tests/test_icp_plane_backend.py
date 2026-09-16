@@ -177,6 +177,37 @@ def test_estimate_normals_backend_matches_default_exactly(backend_name: str) -> 
 # --- genuine wiring: a deliberately wrong backend must change the output --------------
 
 
+@needs_scipy
+def test_repeated_target_reuses_normals_without_changing_the_fit(monkeypatch):
+    from scanner3d import icp_plane
+
+    source, target = _scene(300, seed=421)
+    icp_plane._cached_normals.cache_clear()
+    estimate = icp_plane.estimate_normals
+    calls = []
+
+    def counted(points, **kwargs):
+        calls.append(len(points))
+        return estimate(points, **kwargs)
+
+    monkeypatch.setattr(icp_plane, "estimate_normals", counted)
+    first = icp_point_to_plane(source, target, backend="scipy")
+    repeated = icp_point_to_plane(source, target, backend="scipy")
+    assert repeated == first
+    assert len(calls) == 1
+
+    # Backend objects bypass the cache, and must produce the identical fit.
+    uncached = icp_point_to_plane(source, target, backend=_ScipyBackend())
+    assert uncached == first
+    assert len(calls) == 2
+
+    icp_point_to_plane(source, target, backend="scipy", normal_neighbours=12)
+    moved_target = [(x + 0.01, y, z) for x, y, z in target]
+    icp_point_to_plane(source, moved_target, backend="scipy")
+    assert len(calls) == 4
+    icp_plane._cached_normals.cache_clear()
+
+
 class _CorrespondenceStub:
     """Correct everywhere except ``nearest_neighbors``, which pairs query
     ``i`` with a target point shifted by a fixed offset - never the true

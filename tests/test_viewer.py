@@ -39,6 +39,7 @@ from __future__ import annotations
 import http.client
 import json
 import struct
+import sys
 import threading
 import time
 import tkinter
@@ -91,12 +92,38 @@ NO_DATA_PIXELS = (bytes(NO_DATA_PRIMARY), bytes(NO_DATA_SECONDARY))
 # --- building synthetic frames ----------------------------------------------
 
 
+@pytest.mark.parametrize("bounds", [(None, None), (0, 65535), (20000, 30000), (100, 100)])
+@pytest.mark.parametrize("custom", [False, True])
+def test_bulk_pixels_match_scalar_for_every_code_and_without_numpy(monkeypatch, bounds, custom):
+    pytest.importorskip("numpy")
+    samples = tuple(index % 65536 for index in range(FRAME_WIDTH * FRAME_HEIGHT))
+    palette = (
+        Palette(no_data=(1, 0, 0), stops=((0.0, (0, 2, 9)), (1.0, (255, 0, 0))))
+        if custom
+        else DEFAULT_PALETTE
+    )
+    kwargs = dict(low=bounds[0], high=bounds[1], palette=palette)
+    expected = viewer_module._scalar_pixels_from_samples(samples, **kwargs)
+    assert viewer_module._pixels_from_samples(samples, **kwargs) == expected
+    monkeypatch.setitem(sys.modules, "numpy", None)
+    assert viewer_module._pixels_from_samples(samples, **kwargs) == expected
+
+
 def make_frame(overrides: Mapping[tuple[int, int], int] = {}, *, fill: int = 0) -> bytes:
     """A whole 512000-byte frame: ``fill`` everywhere except at named (u, v)."""
     samples = [fill] * (FRAME_WIDTH * FRAME_HEIGHT)
     for (u, v), value in overrides.items():
         samples[v * FRAME_WIDTH + u] = value
     return struct.pack(f"<{len(samples)}H", *samples)
+
+
+@pytest.mark.parametrize("fill", [0, 32000])
+def test_bulk_frame_statistics_equal_scalar_fallback(monkeypatch, fill):
+    pytest.importorskip("numpy")
+    raw = make_frame({(0, 0): 65535, (639, 399): 1, (200, 100): 22345}, fill=fill)
+    expected = frame_stats(raw)
+    monkeypatch.setitem(sys.modules, "numpy", None)
+    assert frame_stats(raw) == expected
 
 
 ALL_ZERO_FRAME = make_frame()

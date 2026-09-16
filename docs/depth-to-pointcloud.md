@@ -1,5 +1,11 @@
 # Depth frame to point cloud — what the geometry path does, and what it does not establish
 
+Historical record: its "units unknown" statements predate the August 24
+[caliper validation](metric-validation.md). See the September 9
+[semantics review](reliability-calibration-semantics.md) for the current distinction
+between measured units, software conversion and unresolved optical accuracy.
+The original record below is preserved rather than rewritten as later evidence.
+
 Status: the code path described here is offline. It reads bytes that a capture
 already wrote to disk, applies arithmetic, and writes a file. It opens no device
 node and sends nothing to the scanner. Every number quoted below was produced by

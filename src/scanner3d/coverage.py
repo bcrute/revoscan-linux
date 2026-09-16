@@ -54,8 +54,9 @@ from __future__ import annotations
 
 import math
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Final
 
 from scanner3d.errors import DoctorStatus, ScannerError
@@ -280,6 +281,22 @@ def _max_pairwise_angle(directions: Sequence[Point]) -> float:
     count = len(directions)
     if count < 2:
         return 0.0
+    if 8 <= count <= 64:
+        try:
+            import numpy as np
+        except ImportError:
+            pass
+        else:
+            values = np.asarray(directions, dtype=np.float64)
+            first, second = _pair_indices(count)
+            products = values[list(first)] * values[list(second)]
+            approximate = (products[:, 0] + products[:, 1]) + products[:, 2]
+            # Unit vectors bound each product by one. This envelope exceeds
+            # the three-term rounding error: only contenders are recomputed,
+            # but the final minimum uses the original correctly rounded dot.
+            contenders = np.flatnonzero(approximate <= approximate.min() + 1e-14)
+            cosine = min(dot(directions[first[i]], directions[second[i]]) for i in contenders)
+            return math.acos(max(-1.0, min(1.0, cosine)))
     widest = 0.0
     for i in range(count):
         a = directions[i]
@@ -290,6 +307,33 @@ def _max_pairwise_angle(directions: Sequence[Point]) -> float:
             if angle > widest:
                 widest = angle
     return widest
+
+
+@lru_cache(maxsize=64)
+def _pair_indices(count: int) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    pairs = [(i, j) for i in range(count) for j in range(i + 1, count)]
+    return tuple(i for i, _ in pairs), tuple(j for _, j in pairs)
+
+
+def _frame_observations(
+    cloud: Sequence[Point], transform: Rigid, cell: float
+) -> Iterator[tuple[Point, Point, _Key]]:
+    camera_centre = transform.apply((0.0, 0.0, 0.0))
+    for local_point in cloud:
+        world_point = transform.apply(local_point)
+        try:
+            direction = normalize(subtract(world_point, camera_centre))
+        except DegenerateVector:
+            continue
+        yield world_point, direction, _cell_key(world_point, cell)
+
+
+@lru_cache(maxsize=64)
+def _cached_frame_observations(
+    cloud: tuple[Point, ...], transform: Rigid, cell: float
+) -> tuple[tuple[Point, Point, _Key], ...]:
+    """Reuse immutable placed preview frames; changed poses miss the cache."""
+    return tuple(_frame_observations(cloud, transform, cell))
 
 
 def _accumulate(
@@ -307,19 +351,15 @@ def _accumulate(
     points: dict[_Key, list[float]] = {}
     directions: dict[_Key, dict[int, list[float]]] = {}
     for frame_index, (cloud, transform) in enumerate(zip(clouds, transforms, strict=True)):
-        camera_centre = transform.apply((0.0, 0.0, 0.0))
-        for local_point in cloud:
-            world_point = transform.apply(local_point)
-            offset = subtract(world_point, camera_centre)
-            try:
-                direction = normalize(offset)
-            except DegenerateVector:
-                # The point sits at its own frame's camera centre - zero
-                # depth - and has no viewing direction to contribute. Excluded
-                # rather than letting one degenerate sample fail the whole map.
-                continue
-            key = _cell_key(world_point, cell)
-
+        # Both entry count and per-entry size are bounded. Large reconstruction
+        # clouds remain streaming, and all accumulator additions retain their
+        # original order: this cache changes no coverage arithmetic.
+        observations = (
+            _cached_frame_observations(tuple(cloud), transform, cell)
+            if len(cloud) <= 2048
+            else _frame_observations(cloud, transform, cell)
+        )
+        for world_point, direction, key in observations:
             point_bucket = points.get(key)
             if point_bucket is None:
                 points[key] = [world_point[0], world_point[1], world_point[2], 1.0]

@@ -69,15 +69,25 @@ eigenvectors of the cloud's covariance, refined by a bounded mode-and-refit
 loop, over :data:`DEFLATION_ROUNDS` rounds that re-seed on whatever the previous
 round did not claim - a whole-cloud covariance points at the bed only when the
 bed dominates the whole cloud, and subtracting what was found is how a plane
-that is 40% of the frame gets a covariance of its own to be found by. Every sum
+that is 40% of the frame gets a covariance of its own to be found by. The
+refinement's window starts wide and halves down to the band that is finally
+applied (:data:`COARSE_BAND_FRACTION`), placed afresh at every width where it
+holds the most points: a seed some degrees off a bed seen at a grazing angle
+spreads that bed across many applied bands, and a window one band wide then
+settles on whichever patch of a curved object lies square to the seed and
+stays there - which is how a sphere resting on a slanted bed once hid a bed
+that was most of the frame from every candidate. A plane is dense along its
+own normal and a curved patch is not, so the wide window is claimed by the
+bed's bulk, each refit turns towards it, and each narrower window keeps it.
+Every sum
 is :func:`math.fsum`, which is correctly rounded and therefore independent of
 the order the points arrived in; every tie is broken by an explicit rule. The
 same points in any order give bit-identical answers, and a
 rigidly transformed cloud gives the same DECISION and the same kept point set
-for any plane whose inliers are not sitting on the band edge. No optional
-dependency, no wall clock, no device state and no file on disk is consulted:
-this module imports :mod:`math` and this package's own error and geometry
-vocabulary, and nothing else.
+for any plane whose inliers are not sitting on the band edge. Optional NumPy
+batches refinement's point projections without changing their operation order
+or band comparisons; the dependency-free scalar path remains available. No
+wall clock, device state or file on disk participates in the decision.
 
 What it does not do
 -------------------
@@ -91,10 +101,16 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from scanner3d.errors import DoctorStatus, ScannerError
 from scanner3d.geometry import Point
+
+if TYPE_CHECKING:
+    # Annotations only: NumPy is optional at run time, and every use of it in
+    # this module is imported inside the function that needs it.
+    import numpy as np
+    from numpy.typing import NDArray
 
 #: Serialised shape version for every record this module emits.
 SCHEMA_VERSION: Final = 1
@@ -104,10 +120,15 @@ SCHEMA_VERSION: Final = 1
 FILTER_MODE: Final = "covariance-seeded-plane-band"
 
 #: The policy version a caller records alongside a prepared cloud. Bumped when
-#: any threshold below changes, because a record that says only "support plane
-#: filtering ran" cannot be compared across two runs that disagreed about what
-#: that meant.
-POLICY_VERSION: Final = 1
+#: any threshold below changes, or when the search changes which plane it can
+#: find, because a record that says only "support plane filtering ran" cannot
+#: be compared across two runs that disagreed about what that meant.
+#:
+#: 2 (2026-09-11): the refinement's window starts wide and halves down to the
+#: applied band, relocated by density at each width
+#: (:data:`COARSE_BAND_FRACTION`). No gate moved, but a frame whose bed the
+#: version-1 search missed can now have it found and removed.
+POLICY_VERSION: Final = 2
 
 #: The most points this module will read. Far above anything the preparation
 #: path produces (about 900 for the live preview, 2200 for reconstruction) and
@@ -151,10 +172,50 @@ DEFLATION_ROUNDS: Final = 3
 #: Refinements a single call may run, and so the ceiling on the whole search.
 CANDIDATES: Final = CANDIDATE_SEEDS * DEFLATION_ROUNDS
 
-#: Mode-and-refit passes per candidate. The loop stops early when the inlier set
-#: stops changing, which on a real frame happens in two or three; the bound is
-#: what makes the worst case as cheap as the ordinary one.
+#: Mode-and-refit passes per candidate AT THE APPLIED BAND, after the coarse
+#: passes below: this many with the window placed by density, then this many
+#: more with it centred on the points it fitted. The located passes stop as
+#: soon as a window holds no more points than the last one did, the settling
+#: passes as soon as the inlier set stops changing; on a real frame each takes
+#: two or three, and the bound is what makes the worst case as cheap as the
+#: ordinary one.
 REFINE_PASSES: Final = 8
+
+#: Where a candidate's refinement starts: its first window is this fraction of
+#: the cloud's bounding-box diagonal wide, and the window halves on every pass
+#: until it is no wider than the band that is finally applied. Half of
+#: :data:`MAX_BAND_FRACTION`, so the first window is never wider than one a
+#: caller could have asked for outright.
+#:
+#: Why not start at the applied band: the seed is a covariance direction, and
+#: on a frame that is bed and object together it is some degrees off the bed's
+#: normal. A bed seen at a grazing angle is long, and a long plane projected
+#: along a direction a few degrees off its normal is spread over many applied
+#: bands, so a window one band wide catches a ribbon of it at best - while a
+#: curved object always has SOME patch lying square to the seed, which the
+#: same narrow window catches whole and the refit then cannot leave, because a
+#: patch square to the seed refits to the seed. A rendered sphere on a slanted
+#: bed hid a bed that was three quarters of the frame from all nine candidates
+#: that way, on some thinnings and not others.
+#:
+#: The wide window is claimed by the bed's bulk instead, and its refit turns
+#: towards the bed. At each narrower width the window is placed again where it
+#: holds the most points along the refitted normal, not centred on the last
+#: fit's mean: a plane is dense along its own normal and a curved patch is
+#: not, so the bed keeps the window while the object loses it, which is what
+#: lets a bed that is only half the cloud be found from a seed twenty degrees
+#: off. At the applied band the window goes on being placed by density while
+#: each window holds more points than the last, and only then is the plane
+#: centred on the points it fitted, as version 1 did from the start - so a bed
+#: the narrow loop did find is found again, as the same plane, on every scene
+#: the tests hold.
+COARSE_BAND_FRACTION: Final = 0.125
+
+#: The most halvings a refinement may take on the way down. From an eighth of
+#: the diagonal, eight halvings reach a two-thousandth of it, far below any
+#: band this module proposes; the bound exists so a caller-stated band down at
+#: :data:`MIN_BAND` cannot buy an unbounded number of passes.
+COARSE_HALVINGS: Final = 8
 
 #: Jacobi sweeps for the 3x3 symmetric eigen decomposition, and the off-diagonal
 #: sum below which it stops. Eight sweeps converges a 3x3 to machine precision
@@ -536,6 +597,8 @@ class SupportPlaneResult:
                 "candidates_scored": self.candidates_scored,
                 "sample_points": self.sample_points,
                 "refine_passes": REFINE_PASSES,
+                "coarse_band_fraction": COARSE_BAND_FRACTION,
+                "coarse_halvings": COARSE_HALVINGS,
             },
             "thresholds": self.thresholds.as_dict(),
             "bounds": {
@@ -623,13 +686,35 @@ def _mean(values: Sequence[float]) -> float:
     return math.fsum(values) / len(values)
 
 
-def _covariance(points: Sequence[tuple[float, float, float]]) -> list[list[float]]:
+def _covariance(
+    points: Sequence[tuple[float, float, float]] | NDArray[np.float64],
+    *,
+    accelerated: bool = False,
+) -> list[list[float]]:
     """The 3x3 covariance about the centroid, every sum correctly rounded.
 
     :func:`math.fsum` rather than ``sum``: it is exact, so a permutation of the
     same points produces the identical matrix and therefore the identical
     plane. That is the whole of this module's order independence.
     """
+    if accelerated:
+        import numpy as np
+
+        # Batch only the independent subtraction/products. fsum still owns
+        # every reduction, including order-independent, correctly rounded sums.
+        # An array handed in is used as it is; a sequence of points is one.
+        array = points if isinstance(points, np.ndarray) else np.asarray(points, dtype=np.float64)
+        cx = _mean(array[:, 0].tolist())
+        cy = _mean(array[:, 1].tolist())
+        cz = _mean(array[:, 2].tolist())
+        delta = array - (cx, cy, cz)
+        n = float(len(points))
+        matrix = [[0.0] * 3 for _ in range(3)]
+        for i in range(3):
+            for j in range(i, 3):
+                value = math.fsum((delta[:, i] * delta[:, j]).tolist()) / n
+                matrix[i][j] = matrix[j][i] = value
+        return matrix
     cx = _mean([p[0] for p in points])
     cy = _mean([p[1] for p in points])
     cz = _mean([p[2] for p in points])
@@ -791,7 +876,7 @@ def _sample(points: Sequence[tuple[float, float, float]]) -> list[tuple[float, f
     return ordered[::step]
 
 
-def _best_window(distances: Sequence[float], band: float) -> float:
+def _best_window(distances: Sequence[float], band: float, *, accelerated: bool = False) -> float:
     """The centre of the fullest band-wide slab, leftmost on a tie.
 
     A histogram would split a plane that happens to straddle a bin edge; this
@@ -802,7 +887,39 @@ def _best_window(distances: Sequence[float], band: float) -> float:
     caught, not of the window. A plane placed at a window EDGE sits half a band
     away from the surface it just found, which for an exactly planar synthetic
     scene puts every one of those points on its own band's boundary.
+
+    ``accelerated`` answers with NumPy, bit for bit the same: the window's end
+    for every start is the first point whose distance from that start exceeds
+    the band - found with a sorted search on ``start + band`` and then moved,
+    where rounding put it a point off, until the loop's own comparison
+    ``point - start <= band`` decides it - and the first fullest window wins,
+    as the scalar loop's strict comparison makes it.
     """
+    if accelerated:
+        import numpy as np
+
+        ordered_array = np.sort(np.asarray(distances, dtype=np.float64))
+        count = len(ordered_array)
+        starts = np.arange(count)
+        ends = np.searchsorted(ordered_array, ordered_array + band, side="right")
+        ends = np.maximum(ends, starts + 1)
+        # The sorted search compared point <= start + band; the loop compares
+        # point - start <= band, and the two can differ by a point where the
+        # sums round differently. Extend, then retract, on the loop's own test.
+        while True:
+            reach = np.minimum(ends, count - 1)
+            extend = (ends < count) & (ordered_array[reach] - ordered_array <= band)
+            if not extend.any():
+                break
+            ends[extend] += 1
+        while True:
+            last = ends - 1
+            retract = (last > starts) & (ordered_array[last] - ordered_array > band)
+            if not retract.any():
+                break
+            ends[retract] -= 1
+        best = int(np.argmax(ends - starts))
+        return (float(ordered_array[best]) + float(ordered_array[ends[best] - 1])) / 2.0
     ordered = sorted(distances)
     best_count = 0
     best_low = 0
@@ -821,40 +938,131 @@ def _best_window(distances: Sequence[float], band: float) -> float:
     return (ordered[best_low] + ordered[best_high - 1]) / 2.0
 
 
+def _band_schedule(band: float, diagonal: float) -> list[float]:
+    """The widths a refinement runs at, in order: coarse and halving, then the band.
+
+    Starts at :data:`COARSE_BAND_FRACTION` of the diagonal and halves while
+    still wider than ``band``, at most :data:`COARSE_HALVINGS` times; then
+    ``band`` itself for twice :data:`REFINE_PASSES` passes - the located ones
+    and the settling ones. Every coarse width is strictly wider than ``band``,
+    which is how the loop tells the coarse phase apart. A band already as wide
+    as the start gets the applied-band passes alone.
+    """
+    schedule: list[float] = []
+    width = COARSE_BAND_FRACTION * diagonal
+    while width > band and len(schedule) < COARSE_HALVINGS:
+        schedule.append(width)
+        width /= 2.0
+    schedule.extend([band] * (2 * REFINE_PASSES))
+    return schedule
+
+
 def _refine(
     sample: Sequence[tuple[float, float, float]],
     normal: tuple[float, float, float],
     band: float,
+    *,
+    diagonal: float,
+    accelerated: bool = True,
 ) -> tuple[Plane, int]:
     """Alternate "which points are in the band" and "what plane fits them".
 
     Seeded from a covariance eigenvector, which is a whole-cloud answer and so
     is pulled towards the bed only in proportion to how much of the cloud the
-    bed is - which is exactly the case this module exists for. Each pass places
-    the band where it holds the most points and refits the plane to just those,
-    so the fit stops describing the object as soon as the band stops containing
-    it.
+    bed is - which is exactly the case this module exists for. The window runs
+    down :func:`_band_schedule`. At each coarse width it is placed where it
+    holds the most points along the current normal, and the plane is refitted
+    to just those: the first, wide window is claimed by a bed the seed is some
+    degrees off, and each narrower one keeps the bed, which is dense along its
+    normal, and loses the object, which is not. At ``band`` itself the window
+    goes on being placed by density while each window holds more points than
+    the last; the plane is then centred on the points it fitted and the loop
+    settles, so the fit stops describing the object as soon as the band stops
+    containing it, and the surface it describes is never left on its own
+    band's edge.
     """
+    try:
+        import numpy as np
+    except ImportError:
+        numeric = None
+    else:
+        numeric = np.asarray(sample, dtype=np.float64) if accelerated else None
     current = normal
-    offset = _best_window([_dot(p, current) for p in sample], band)
+    offset = 0.0
+    settling = False
+    #: Points the last density-placed window at the applied band held; -1
+    #: before the first, so that one is always refitted.
+    located = -1
     previous: tuple[int, ...] = ()
-    for _ in range(REFINE_PASSES):
-        chosen = tuple(
-            index
-            for index, point in enumerate(sample)
-            if _in_band(_dot(point, current), offset, band / 2.0)
-        )
-        if len(chosen) < 3 or chosen == previous:
+    for width in _band_schedule(band, diagonal):
+        coarse = width > band
+        if numeric is None:
+            projected = [_dot(p, current) for p in sample]
+        else:
+            # Explicit operations retain _dot's left-to-right arithmetic.
+            # No BLAS reduction, fused multiply-add, or changed band edge.
+            distances = (
+                numeric[:, 0] * current[0] + numeric[:, 1] * current[1] + numeric[:, 2] * current[2]
+            )
+            projected = distances.tolist()
+        if not settling:
+            # Placed by density: at every coarse width, and at the applied
+            # band while each window holds more than the last. After that the
+            # window sits on the mean of the points it fitted, see below.
+            offset = _best_window(projected, width, accelerated=numeric is not None)
+        if numeric is None:
+            chosen = tuple(
+                index for index, d in enumerate(projected) if _in_band(d, offset, width / 2.0)
+            )
+        else:
+            chosen_index = np.flatnonzero(
+                np.abs(distances - offset) <= width / 2.0 * (1.0 + BAND_TOLERANCE)
+            )
+            chosen = tuple(chosen_index.tolist())
+        if len(chosen) < 3:
+            break
+        if coarse:
+            # The same points give the same plane, and the next, narrower
+            # window may still let go of something.
+            if chosen == previous:
+                continue
+        elif not settling:
+            # A window no fuller than the last is the cue to settle: refit
+            # what it holds and centre the window on those points.
+            if len(chosen) <= located:
+                settling = True
+            located = len(chosen)
+        elif chosen == previous:
+            # A stable settled set is convergence.
             break
         previous = chosen
-        inliers = [sample[index] for index in chosen]
-        current = _eigen_symmetric(_covariance(inliers))[0][1]
         # Centred on the points it just fitted, not on the sliding window that
         # found them: the window only has to LOCATE the slab, and leaving the
         # plane at its edge would put the surface it describes on the boundary
         # of its own band, where a point either side of zero falls differently.
-        offset = _mean([_dot(p, current) for p in inliers])
-    population = sum(1 for p in sample if _in_band(_dot(p, current), offset, band / 2.0))
+        if numeric is None:
+            inliers = [sample[index] for index in chosen]
+            current = _eigen_symmetric(_covariance(inliers))[0][1]
+            offset = _mean([_dot(p, current) for p in inliers])
+        else:
+            selected = numeric[chosen_index]
+            current = _eigen_symmetric(_covariance(selected, accelerated=True))[0][1]
+            offset = _mean(
+                (
+                    selected[:, 0] * current[0]
+                    + selected[:, 1] * current[1]
+                    + selected[:, 2] * current[2]
+                ).tolist()
+            )
+    if numeric is None:
+        population = sum(1 for p in sample if _in_band(_dot(p, current), offset, band / 2.0))
+    else:
+        distances = (
+            numeric[:, 0] * current[0] + numeric[:, 1] * current[1] + numeric[:, 2] * current[2]
+        )
+        population = int(
+            np.count_nonzero(np.abs(distances - offset) <= band / 2.0 * (1.0 + BAND_TOLERANCE))
+        )
     return Plane(normal=current, offset=offset), population
 
 
@@ -988,7 +1196,7 @@ def suppress_support_plane(
             # remainder still has to beat every other candidate on the cloud it
             # is actually going to be applied to, so a later round cannot win by
             # being measured against an easier population.
-            plane, _population = _refine(remaining, vector, width)
+            plane, _population = _refine(remaining, vector, width, diagonal=diagonal)
             population = sum(
                 1 for point in sample if _in_band(_dot(point, plane.normal), plane.offset, half)
             )
